@@ -1,0 +1,28 @@
+name: Connect BoringCache validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  connect:
+    if: github.repository == 'boringcache/kukuri' && github.ref == 'refs/heads/boringcache-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the released BoringCache CLI
+        run: |
+          curl -fsSL https://install.boringcache.com/install.sh -o "$RUNNER_TEMP/install-boringcache.sh"
+          sh "$RUNNER_TEMP/install-boringcache.sh"
+
+      - name: Connect this repository through GitHub OIDC
+        run: boringcache ci connect --oidc-provider github-actions
