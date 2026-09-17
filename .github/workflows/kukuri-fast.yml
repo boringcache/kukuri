@@ -70,6 +70,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
+
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
@@ -140,6 +145,11 @@ jobs:
           libayatana-appindicator3-dev
           librsvg2-dev
           patchelf
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
@@ -212,6 +222,11 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
@@ -289,6 +304,11 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
@@ -369,6 +389,11 @@ jobs:
           librsvg2-dev
           patchelf
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
+
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
@@ -428,6 +453,11 @@ jobs:
           librsvg2-dev
           patchelf
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
+
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
@@ -483,6 +513,11 @@ jobs:
           libayatana-appindicator3-dev
           librsvg2-dev
           patchelf
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
@@ -547,6 +582,11 @@ jobs:
           libayatana-appindicator3-dev
           librsvg2-dev
           patchelf
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
@@ -623,6 +663,11 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
