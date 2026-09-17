@@ -1,6 +1,10 @@
 name: Connect BoringCache validation
 
 on:
+  push:
+    branches: [boringcache-validation]
+    paths:
+      - '.github/workflows/boringcache-connect.yml'
   workflow_dispatch:
 
 permissions:
