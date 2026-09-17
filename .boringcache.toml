@@ -19,85 +19,20 @@ tag = "kukuri-cargo-registry-index"
 [entries.cargo-git-db]
 tag = "kukuri-cargo-git-db"
 
-# Target directories stay per job, exactly as Kukuri Fast already separated them
-# with shared-key. Each job compiles a different selection, so sharing one would
-# make them overwrite each other. They are no longer charged to a 10 GB cap.
-[entries.target-linux-rust-static]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-rust-static-target"
-
-[entries.target-linux-rust-tests]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-rust-tests-target"
-
-[entries.target-linux-desktop-ui]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-desktop-ui-target"
-
-[entries.target-linux-desktop-browser]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-desktop-browser-target"
-
-[entries.target-linux-cn]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-cn-target"
-
-[entries.target-linux-cn-e2e]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-cn-e2e-target"
-
-[entries.target-linux-smoke]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-smoke-target"
-
-[entries.target-linux-community-node]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-linux-community-node-target"
-
-[entries.target-windows-fast]
-kind = "cargo-target"
-path = "target"
-tag = "kukuri-fast-windows-fast-target"
+# The workspace target directory. Source freshness travels with this entry, so a
+# job that restores another job's target rebuilds only what it actually needs.
+# The CLI splits the tag by platform, so Windows and Linux never share one.
+[entries.cargo-target]
+tag = "kukuri-fast-target"
 
 # apps/desktop/src-tauri is excluded from the root workspace and keeps its own
-# target directory. Only desktop-package builds it, so only windows-fast carries
-# it. The finished installer is a job artifact, not reusable compiler state.
+# target directory. Only desktop-package builds it, so only windows-fast asks
+# for this profile. The finished installer is a job artifact, not reusable
+# compiler state.
 [entries.desktop-tauri-target]
 path = "apps/desktop/src-tauri/target"
 tag = "kukuri-fast-desktop-tauri-target"
 exclude = ["**/bundle"]
 
-[profiles.linux-rust-static]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-rust-static"]
-
-[profiles.linux-rust-tests]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-rust-tests"]
-
-[profiles.linux-desktop-ui]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-desktop-ui"]
-
-[profiles.linux-desktop-browser]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-desktop-browser"]
-
-[profiles.linux-cn]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-cn"]
-
-[profiles.linux-cn-e2e]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-cn-e2e"]
-
-[profiles.linux-smoke]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-smoke"]
-
-[profiles.linux-community-node]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-community-node"]
-
-[profiles.windows-fast]
-entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-windows-fast", "desktop-tauri-target"]
+[profiles.desktop-tauri]
+entries = ["desktop-tauri-target"]

@@ -75,7 +75,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-rust-static
           diagnostics: summary
 
       - name: Doctor
@@ -139,7 +138,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-rust-tests
           diagnostics: summary
 
       - name: Install nextest
@@ -204,7 +202,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-desktop-ui
           diagnostics: summary
 
       - name: Install desktop dependencies
@@ -274,7 +271,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-desktop-browser
           diagnostics: summary
 
       - name: Install desktop dependencies
@@ -346,7 +342,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-cn
           diagnostics: summary
 
       - name: Community-node checks
@@ -398,7 +393,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-cn-e2e
           diagnostics: summary
 
       - name: Community-node full-stack E2E
@@ -447,7 +441,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-smoke
           diagnostics: summary
 
       - name: E2E smoke
@@ -504,7 +497,6 @@ jobs:
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: linux-community-node
           diagnostics: summary
 
       - name: Community-node connectivity scenario
@@ -568,12 +560,20 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
+      - name: Cache the desktop Tauri target with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: archive
+          cache-profiles: desktop-tauri
+          diagnostics: summary
+          save-always: true
+
       - name: Cache Rust with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
           mode: cargo
-          cache-profiles: windows-fast
           diagnostics: summary
           # #1063: keep the dependency build a timed-out attempt reached.
           save-always: true
