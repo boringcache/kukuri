@@ -6,7 +6,7 @@ metadata-hints = ["project=kukuri", "workflow=kukuri-fast"]
 # One compiler-object store for every Kukuri Fast job. sccache keys are content
 # hashes, so the eight Linux jobs read each other's dependency objects instead
 # of each filling a private cache that the 10 GB allowance then evicts.
-[adapters.cargo]
+[adapters.sccache]
 tag = "kukuri-fast-rust"
 
 # Cargo download state is the same in every job: one Cargo.lock, one copy.
@@ -19,20 +19,77 @@ tag = "kukuri-cargo-registry-index"
 [entries.cargo-git-db]
 tag = "kukuri-cargo-git-db"
 
-# The workspace target directory. Source freshness travels with this entry, so a
-# job that restores another job's target rebuilds only what it actually needs.
-# The CLI splits the tag by platform, so Windows and Linux never share one.
-[entries.cargo-target]
-tag = "kukuri-fast-target"
+# Target directories stay separated per job exactly as shared-key separated
+# them, because each job compiles a different selection. They are no longer
+# charged to a 10 GB cap.
+
+[entries.target-linux-rust-static]
+path = "target"
+tag = "kukuri-fast-linux-rust-static-target"
+
+[entries.target-linux-rust-tests]
+path = "target"
+tag = "kukuri-fast-linux-rust-tests-target"
+
+[entries.target-linux-desktop-ui]
+path = "target"
+tag = "kukuri-fast-linux-desktop-ui-target"
+
+[entries.target-linux-desktop-browser]
+path = "target"
+tag = "kukuri-fast-linux-desktop-browser-target"
+
+[entries.target-linux-cn]
+path = "target"
+tag = "kukuri-fast-linux-cn-target"
+
+[entries.target-linux-cn-e2e]
+path = "target"
+tag = "kukuri-fast-linux-cn-e2e-target"
+
+[entries.target-linux-smoke]
+path = "target"
+tag = "kukuri-fast-linux-smoke-target"
+
+[entries.target-linux-community-node]
+path = "target"
+tag = "kukuri-fast-linux-community-node-target"
+
+[entries.target-windows-fast]
+path = "target"
+tag = "kukuri-fast-windows-fast-target"
 
 # apps/desktop/src-tauri is excluded from the root workspace and keeps its own
-# target directory. Only desktop-package builds it, so only windows-fast asks
-# for this profile. The finished installer is a job artifact, not reusable
-# compiler state.
+# target directory. Only desktop-package builds it, so only windows-fast carries
+# it. The finished installer is a job artifact, not reusable compiler state.
 [entries.desktop-tauri-target]
 path = "apps/desktop/src-tauri/target"
 tag = "kukuri-fast-desktop-tauri-target"
 exclude = ["**/bundle"]
 
-[profiles.desktop-tauri]
-entries = ["desktop-tauri-target"]
+[profiles.linux-rust-static]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-rust-static"]
+
+[profiles.linux-rust-tests]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-rust-tests"]
+
+[profiles.linux-desktop-ui]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-desktop-ui"]
+
+[profiles.linux-desktop-browser]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-desktop-browser"]
+
+[profiles.linux-cn]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-cn"]
+
+[profiles.linux-cn-e2e]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-cn-e2e"]
+
+[profiles.linux-smoke]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-smoke"]
+
+[profiles.linux-community-node]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-linux-community-node"]
+
+[profiles.windows-fast]
+entries = ["cargo-registry-cache", "cargo-registry-index", "cargo-git-db", "target-windows-fast", "desktop-tauri-target"]

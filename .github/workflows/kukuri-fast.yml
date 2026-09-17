@@ -70,11 +70,19 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-rust-static
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Doctor
@@ -133,11 +141,19 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-rust-tests
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Install nextest
@@ -197,11 +213,19 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-desktop-ui
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Install desktop dependencies
@@ -266,11 +290,19 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-desktop-browser
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Install desktop dependencies
@@ -337,11 +369,19 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-cn
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Community-node checks
@@ -388,11 +428,19 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-cn-e2e
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Community-node full-stack E2E
@@ -436,11 +484,19 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-smoke
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: E2E smoke
@@ -492,11 +548,19 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: archive
+          cache-profiles: linux-community-node
+          diagnostics: summary
+
+      - name: Cache Rust compilation with BoringCache
+        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        with:
+          trust-policy: auto
+          mode: sccache
           diagnostics: summary
 
       - name: Community-node connectivity scenario
@@ -560,22 +624,22 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
-      - name: Cache the desktop Tauri target with BoringCache
+      - name: Cache the Rust directories with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
           mode: archive
-          cache-profiles: desktop-tauri
+          cache-profiles: windows-fast
           diagnostics: summary
+          # #1063: keep the dependency build a timed-out attempt reached.
           save-always: true
 
-      - name: Cache Rust with BoringCache
+      - name: Cache Rust compilation with BoringCache
         uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
         with:
           trust-policy: auto
-          mode: cargo
+          mode: sccache
           diagnostics: summary
-          # #1063: keep the dependency build a timed-out attempt reached.
           save-always: true
 
       - name: Install desktop dependencies
