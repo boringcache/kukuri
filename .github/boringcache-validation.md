@@ -16,6 +16,7 @@ upstream's. `Kukuri Fast` keeps its eight Linux jobs and `windows-fast`.
 | warm | [35223130289 attempt 2](https://github.com/boringcache/kukuri/actions/runs/35223130289) | `75acc64b13b0` |
 | rolling 1 | [35229995862](https://github.com/boringcache/kukuri/actions/runs/35229995862) | `b65e4a48d4bd` |
 | rolling 2 | [35235858484](https://github.com/boringcache/kukuri/actions/runs/35235858484) | `351249d3dd4c` |
+| rolling 3 | [35316695325](https://github.com/boringcache/kukuri/actions/runs/35316695325) | `978c21efac` (27 upstream commits merged) |
 
 Cold and warm are the same commit on two attempts of one run. Rolling 1 and 2
 are the two following upstream `main` revisions.
@@ -34,6 +35,24 @@ are the two following upstream `main` revisions.
 | linux-smoke | 5m45s | 2m20s | 2m54s | 1m57s | −59.4% |
 | windows-fast | 44m46s | 16m50s | 18m37s | 12m35s | −62.4% |
 | **Total runner time** | **160m40s** | **91m56s** | **97m46s** | **88m39s** | **−42.8%** |
+
+Rolling 3 merged 27 upstream commits at once rather than advancing one revision,
+so it is a larger source change than rolling 1 and 2. Total runner time 99m08s.
+Per job: linux-cn 13m54s, linux-cn-e2e 6m22s, linux-community-node 3m18s,
+linux-desktop-browser 18m19s, linux-desktop-ui 9m23s, linux-rust-static 7m06s,
+linux-rust-tests 12m41s, linux-smoke 2m39s, windows-fast 25m26s. Hit rates:
+linux-rust-tests 148/148 (100.00%), linux-desktop-ui 25/25 (100.00%), linux-cn
+257/272 (94.49%), linux-rust-static 200/234 (85.47%), linux-cn-e2e 148/175
+(84.57%), windows-fast 62/111 (55.86%), linux-desktop-browser 1/25 (4.00%),
+linux-community-node 0/25 (0.00%), linux-smoke 0/25 (0.00%). Read and write
+errors were 0 in every job.
+
+Two jobs in rolling 3 failed on the first attempt and were rerun: linux-rust-tests
+hit `Machine connection failed during post-save: The Machine connection is
+unavailable or expired`, and linux-desktop-ui hit an upstream test timeout
+(`Test timed out in 10000ms`). Their reruns started about two hours later against
+a warmer cache, so their durations and hit rates are not directly comparable with
+the seven jobs that passed first time.
 | Wall time (slowest job) | 44m46s | 17m27s | 18m37s | 19m27s | |
 
 Job time includes checkout, toolchain install and test execution, not queueing.
