@@ -14,6 +14,11 @@ import {
 
 import { CommunityNodeAdvisoryAdoptionField } from './CommunityNodeAdvisoryAdoptionField';
 import { CommunityNodeConsentDialog } from './CommunityNodeConsentDialog';
+import { CommunityNodeTrustPriorityField } from './CommunityNodeTrustPriorityField';
+import {
+  CommunityNodeObservationSharingField,
+  type CommunityNodeObservationSharingHandlers,
+} from './CommunityNodeObservationSharingField';
 import { useCommunityNodePolicyDialog, type FetchCommunityNodePolicyView, type AcceptCommunityNodePolicyView } from '@/shell/actions/useCommunityNodePolicyDialog';
 import { SettingsActionRow } from './SettingsActionRow';
 import { SettingsDiagnosticList } from './SettingsDiagnosticList';
@@ -41,6 +46,11 @@ type CommunityNodePanelProps = {
   onRefresh: (baseUrl: string) => boolean | void | Promise<boolean | void>;
   onClearToken: (baseUrl: string) => void;
   onSubmitInviteCode: (baseUrl: string, inviteCode: string) => Promise<void>;
+  /// #1061: 信頼値の採用順位。未指定なら順位の設定を出さない。
+  trustNodePriority?: readonly string[];
+  onTrustNodePriorityChange?: (priority: string[]) => void;
+  /// #1061: ブロック / ミュート観測の提供（CN の任意文書への同意）。未指定なら選択肢を出さない。
+  observationSharing?: CommunityNodeObservationSharingHandlers;
   onGetRelationOptout?: (baseUrl: string) => Promise<RelationOptoutResponse>;
   onSetRelationOptout?: (baseUrl: string) => Promise<RelationOptoutResponse>;
   onClearRelationOptout?: (baseUrl: string) => Promise<RelationOptoutResponse>;
@@ -70,6 +80,9 @@ export function CommunityNodePanel({
   onRefresh,
   onClearToken,
   onSubmitInviteCode,
+  trustNodePriority,
+  onTrustNodePriorityChange,
+  observationSharing,
   onGetRelationOptout,
   onSetRelationOptout,
   onClearRelationOptout,
@@ -204,6 +217,17 @@ export function CommunityNodePanel({
           {t('settings:communityNode.actions.clearNodes')}
         </Button>
       </SettingsActionRow>
+
+      {trustNodePriority && onTrustNodePriorityChange ? (
+        <CommunityNodeTrustPriorityField
+          configuredBaseUrls={view.nodes
+            .filter((node) => node.saved && node.baseUrl.trim())
+            .map((node) => node.baseUrl)}
+          priority={trustNodePriority}
+          disabled={nodeActionsDisabled}
+          onChange={onTrustNodePriorityChange}
+        />
+      ) : null}
 
       <SettingsEditorField
         label={t('settings:communityNode.indexNode.label')}
@@ -396,6 +420,15 @@ export function CommunityNodePanel({
                 nodeId={node.id}
                 enabled={node.contentAdvisoryEnabled !== false}
                 onChange={(enabled) => onNodeContentAdvisoryChange(node.id, enabled)}
+              />
+            ) : null}
+            {observationSharing && node.saved && node.baseUrl.trim() ? (
+              <CommunityNodeObservationSharingField
+                nodeId={node.id}
+                baseUrl={node.baseUrl}
+                disabled={nodeActionsDisabled}
+                language={i18n.resolvedLanguage ?? i18n.language}
+                {...observationSharing}
               />
             ) : null}
             {relationOptoutAvailable ? (

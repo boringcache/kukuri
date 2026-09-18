@@ -153,6 +153,7 @@ async fn trust_user(
             trust: 0.55,
             w_abs_applied: 0.5,
             computed_at: "2026-08-14T00:00:00Z".to_string(),
+            evaluation: None,
             basis: vec![TrustBasisEntry {
                 signal_id: APPEAL_SIGNAL_ID.to_string(),
                 issuer_node_id: "harness-issuer-node".to_string(),
@@ -346,6 +347,7 @@ pub(crate) async fn run_community_node_trust_relation_client(
     let runtime = DesktopRuntime::new(&db_path).await?;
     runtime
         .set_community_node_config(SetCommunityNodeConfigRequest {
+            trust_node_priority: None,
             nodes: vec![SetCommunityNodeConfigNode {
                 content_advisory_enabled: None,
                 base_url: base_url.clone(),

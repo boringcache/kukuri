@@ -5,12 +5,13 @@ use crate::{
 };
 use async_trait::async_trait;
 use kukuri_desktop_runtime::{
-    AcceptCommunityNodeConsentsRequest, CommunityNodeContentAdvisoryLookupRequest,
-    CommunityNodeIndexQueryRequest, CommunityNodeIndexingRequest,
-    CommunityNodeIndexingStatusRequest, CommunityNodeNodeStatus,
+    AcceptCommunityNodeConsentsRequest, AuthorTrustGateRequest,
+    CommunityNodeContentAdvisoryLookupRequest, CommunityNodeIndexQueryRequest,
+    CommunityNodeIndexingRequest, CommunityNodeIndexingStatusRequest, CommunityNodeNodeStatus,
     CommunityNodeRelationNeighborsRequest, CommunityNodeTargetRequest,
     CommunityNodeTesterFeedbackSubmission, CommunityNodeUserAdvisoryRequest,
-    FetchCommunityNodePoliciesRequest, SetCommunityNodeConfigRequest,
+    EnableCommunityNodeObservationSharingRequest, FetchCommunityNodePoliciesRequest,
+    SetAuthorTrustDisplayExceptionRequest, SetCommunityNodeConfigRequest,
     SetCommunityNodeInviteCodeRequest, SubmitCommunityNodeReportRequest,
 };
 use serde_json::Value;
@@ -216,6 +217,51 @@ impl CommandHandler for Handler {
                     .await
                     .map_err(|error| command_error(error.into()))?,
             ),
+            "evaluate_author_trust_gates" => encode(
+                runtime
+                    .evaluate_author_trust_gates(decode::<AuthorTrustGateRequest>(payload)?)
+                    .await
+                    .map_err(command_error)?,
+            ),
+            "set_author_trust_display_exception" => encode(
+                runtime
+                    .set_author_trust_display_exception(decode::<
+                        SetAuthorTrustDisplayExceptionRequest,
+                    >(payload)?)
+                    .await
+                    .map_err(command_error)?,
+            ),
+            "list_author_trust_display_exceptions" => encode(
+                runtime
+                    .list_author_trust_display_exceptions()
+                    .await
+                    .map_err(command_error)?,
+            ),
+            "get_community_node_observation_sharing" => encode(
+                runtime
+                    .get_community_node_observation_sharing(decode::<CommunityNodeTargetRequest>(
+                        payload,
+                    )?)
+                    .await
+                    .map_err(command_error)?,
+            ),
+            "enable_community_node_observation_sharing" => encode(
+                runtime
+                    .enable_community_node_observation_sharing(
+                        decode::<EnableCommunityNodeObservationSharingRequest>(payload)?,
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                    .await
+                    .map_err(command_error)?,
+            ),
+            "disable_community_node_observation_sharing" => encode(
+                runtime
+                    .disable_community_node_observation_sharing(
+                        decode::<CommunityNodeTargetRequest>(payload)?,
+                    )
+                    .await
+                    .map_err(command_error)?,
+            ),
             "accept_community_node_consents" => encode(safe_status(
                 runtime
                     .accept_community_node_consents(
@@ -284,6 +330,16 @@ pub(super) fn registrations() -> Vec<CommandRegistration> {
         ("set_community_node_relation_optout", Write, false),
         ("clear_community_node_relation_optout", Destructive, false),
         ("accept_community_node_consents", Write, false),
+        ("get_community_node_observation_sharing", Read, false),
+        ("evaluate_author_trust_gates", Read, false),
+        ("set_author_trust_display_exception", Write, false),
+        ("list_author_trust_display_exceptions", Read, false),
+        ("enable_community_node_observation_sharing", Write, false),
+        (
+            "disable_community_node_observation_sharing",
+            Destructive,
+            false,
+        ),
         ("set_community_node_invite_code", Write, true),
     ]
     .into_iter()

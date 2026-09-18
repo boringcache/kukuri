@@ -35,6 +35,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# #1120: cache-tag の `-v2` は、debuginfo を line-tables-only にする前の依存 crate の成果物を含む
+# 旧 volume を捨てるために付けた。依存の build 設定を大きく変えたときは同じ方法で入れ替える。
 jobs:
   linux-rust-static:
     runs-on: ubuntu-latest

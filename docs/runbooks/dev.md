@@ -55,6 +55,7 @@ cargo xtask desktop-visual-test
 - `cargo xtask cn-check` / `cargo xtask cn-test` は `cn-*` server slice の compile/test 用。
 - `cargo xtask-lite <command>` は xtask を `harness` feature なしで build して実行する alias（`.cargo/config.toml`）。`e2e-smoke` / `scenario` 以外の command は `cargo xtask` と同じ動作で、xtask 自体の build が軽い。CI の harness を使わない job はこちらを使う（#1120）。
 - `cargo xtask ci-prune-target` は `target/` と `apps/desktop/src-tauri/target/` から workspace crate の build 成果物だけを削除し、依存 crate の成果物は残す。CI の Cache Volume の容量対策として各 job の最後に実行する（#1120）。ローカルで実行すると workspace crate が次回再 compile される。
+- `Kukuri Flake Probe`（`.github/workflows/kukuri-flake-probe.yml`、手動起動のみ）は、同じ suite を繰り返し実行して失敗率を測る。lane（`rust` / `vitest` / `playwright` / `all`）と 1 shard あたりの回数を指定し、2 shard を並行させる（既定は 2 × 10 = 20 回）。test の並列度を上げる変更の前後で使う（#1121）。実体は `scripts/ci/flake_probe.sh` で、失敗しても最後まで回し、失敗回数と各回の所要秒を step summary に出す。CI 本体とは別の Cache Volume tag（`kukuri-probe-*`）を使う。
 - `cargo xtask cn-test` は `docker-compose.community-node.yml` の `cn-postgres` を自動起動し、`KUKURI_CN_RUN_INTEGRATION_TESTS=1` を付けて contract/integration test を流す。
 - `cargo xtask scenario community_node_public_connectivity` も `cn-postgres` を自動起動し、in-process の `cn-user-api` / `cn-iroh-relay` を立てて 2 desktop scenario を流す。
 - `cargo xtask scenario community_node_multi_device_connectivity` は same-author 2 desktop の endpoint-bound bootstrap で `post -> reply/thread -> reconnect` を確認する。
@@ -69,6 +70,19 @@ cargo xtask desktop-visual-test
 ### 検証を選ぶ入口
 
 日常の製品変更は `cargo xtask check` + `cargo xtask test` を起点とし、変更pathと影響に応じた必須項目は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選ぶ。文書の誤字など区分Aは同節の対象確認を使う。UIの証跡は [ADR 0014](../adr/0014-uiux-dev-flow.md)、視覚baselineの更新方法は次節を参照する。
+
+## ローカル先行検証
+
+CI は課金対象の計算資源で動く。実装しながら CI へ push して確かめる進め方は費用が大きいので行わない。実装中の確認はローカルで済ませ、CI は PR を作った後の最終確認だけに使う。
+
+- 変更 path に対応する validation は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選び、ローカルで実行してから commit する。
+- workflow を変えるときは `actionlint <対象 file>` を実行する。runner label を増やす場合は `.github/actionlint.yaml` にも追加する。
+- `docker/cn/**` や image の build 手順を変えるときは、ローカルの Docker で `docker buildx bake --file docker/cn/docker-bake.hcl --allow "fs.write=<出力先>"` を実行し、smoke まで通してから PR にする。
+- CI 専用の設定（runner profile、Cache Volume、同時実行枠）を変えるときは、変更前後の計測値と根拠を Issue に記録する。
+- ローカルで再現できない項目（実 runner の版差、Cache Volume の当たり外れ、registry への push）は、PR の run か merge 後の run で確認する。その項目を PR 本文の「検証」に明記する。
+- 反復して失敗率を測るときは `Kukuri Flake Probe` を使い、通常の CI を繰り返し起動しない。
+
+PR 作成後は `gh pr checks <番号>` で全 check の完了を待ち、pending が 0 件になってから merge する（`kukuri-fast.yml` 以外にも `xtask/**` や `.cargo/**` の変更で起動する workflow がある）。
 
 ## リファクタリング監査の発火要否（#873）
 

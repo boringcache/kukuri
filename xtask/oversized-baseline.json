@@ -1,7 +1,7 @@
 {
   "files": [
     {
-      "lines": 1318,
+      "lines": 1324,
       "path": "crates/cn-operator/src/config.rs"
     },
     {
@@ -9,7 +9,7 @@
       "path": "docs/THIRD_PARTY_NOTICES.md"
     },
     {
-      "lines": 1224,
+      "lines": 1226,
       "path": "crates/harness/src/scenarios/community_node.rs"
     },
     {
@@ -21,7 +21,7 @@
       "path": "crates/metaverse-host/src/lib.rs"
     },
     {
-      "lines": 1149,
+      "lines": 1152,
       "path": "crates/cn-operator/src/docs.rs"
     },
     {
@@ -41,16 +41,16 @@
       "path": "crates/app-api/src/service/private_channels_support.rs"
     },
     {
+      "lines": 1082,
+      "path": "apps/desktop/src/lib/api/commands/runtimeApi.ts"
+    },
+    {
       "lines": 1058,
       "path": "crates/app-api/src/game.rs"
     },
     {
       "lines": 1056,
       "path": "crates/metaverse-host/src/tests.rs"
-    },
-    {
-      "lines": 1049,
-      "path": "apps/desktop/src/lib/api/commands/runtimeApi.ts"
     },
     {
       "lines": 1033,
@@ -69,8 +69,24 @@
       "path": "crates/desktop-runtime/src/identity.rs"
     },
     {
+      "lines": 1004,
+      "path": "crates/desktop-runtime/src/tests/community_node/connectivity.rs"
+    },
+    {
+      "lines": 1000,
+      "path": "apps/desktop/src/components/core/PostCard.tsx"
+    },
+    {
+      "lines": 1000,
+      "path": "apps/desktop/src/shell/DesktopShellPage.tsx"
+    },
+    {
       "lines": 1000,
       "path": "apps/desktop/tests/playwright/shell.smoke.spec.ts"
+    },
+    {
+      "lines": 1000,
+      "path": "crates/desktop-runtime/src/tests/community_node/metadata.rs"
     }
   ]
 }

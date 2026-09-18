@@ -51,7 +51,25 @@ pub(super) fn status() -> Value {
 }
 
 pub(super) fn policies() -> Value {
-    let document = view(
+    view(
+        json!({"policies": array(policy_document()), "policy_snapshot_revision": string()}),
+        &["policy_snapshot_revision"],
+    )
+}
+
+/// #1061: 著者 1 人分の表示判断。
+pub(super) fn author_trust_gate() -> Value {
+    view(
+        json!({"author_pubkey": string(), "hidden": boolean(), "node_base_url": nullable(string()),
+        "reasons": array(json!({"type": "string", "enum": ["risk_signals", "related_users_block_or_mute"]})),
+        "expires_at": nullable(string()), "always_visible": boolean()}),
+        &[],
+    )
+}
+
+/// 公開 policy カタログの文書 1 件。
+pub(super) fn policy_document() -> Value {
+    view(
         json!({"policy_slug": string(), "policy_version": integer(), "title": string(), "body_markdown": string(), "required": boolean(),
         "effective_date": string(), "language": string(), "policy_snapshot_revision": string(), "authoritative_language": string(), "reference_translation": boolean(),
         "translation_revision": integer(), "translation_of_version": integer(), "fallback": boolean(), "requested_language": string(),
@@ -73,10 +91,6 @@ pub(super) fn policies() -> Value {
             "next_policy_version",
             "next_policy_snapshot_revision",
         ],
-    );
-    view(
-        json!({"policies": array(document), "policy_snapshot_revision": string()}),
-        &["policy_snapshot_revision"],
     )
 }
 
@@ -100,8 +114,15 @@ pub(super) fn trust() -> Value {
         "raw_contribution": number(), "decay_factor": number(), "relation_weight": number(), "contribution": number()}),
         &[],
     );
-    view(
-        json!({"viewer_pubkey": string(), "target_id": string(), "absolute": number(), "relative": number(), "trust": number(), "w_abs_applied": number(), "computed_at": string(), "basis": array(basis)}),
+    // #1061: `trust` は CN が合算した S。`evaluation` は旧 node の応答では欠落する。
+    let evaluation = view(
+        json!({"policy_version": string(), "trust_version": string(), "relation_version": string(), "computed_at": string(), "expires_at": string(),
+        "hide_recommended": boolean(), "reasons": array(json!({"type": "string", "enum": ["risk_signals", "related_users_block_or_mute"]}))}),
         &[],
+    );
+    view(
+        json!({"viewer_pubkey": string(), "target_id": string(), "absolute": number(), "relative": number(), "trust": number(), "w_abs_applied": number(), "computed_at": string(), "basis": array(basis),
+        "evaluation": evaluation}),
+        &["evaluation"],
     )
 }

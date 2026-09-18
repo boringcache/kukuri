@@ -97,7 +97,21 @@ pub(super) fn input(name: &str) -> Value {
                 json!("招待コードは専用frameのUTF-8で渡す。空のframeは保存済みコードを解除する。");
             input
         }
-        "authenticate_community_node"
+        "enable_community_node_observation_sharing" => object(
+            json!({"base_url": string(), "policy_version": integer(), "policy_snapshot_revision": nullable(string()), "language": string(), "include_existing": boolean()}),
+            &["base_url", "policy_version"],
+        ),
+        "evaluate_author_trust_gates" => {
+            object(json!({"author_pubkeys": strings()}), &["author_pubkeys"])
+        }
+        "set_author_trust_display_exception" => object(
+            json!({"author_pubkey": string(), "always_visible": boolean()}),
+            &["author_pubkey", "always_visible"],
+        ),
+        "list_author_trust_display_exceptions" => object(json!({}), &[]),
+        "get_community_node_observation_sharing"
+        | "disable_community_node_observation_sharing"
+        | "authenticate_community_node"
         | "clear_community_node_token"
         | "withdraw_community_node_consents"
         | "refresh_community_node_metadata"
@@ -115,7 +129,8 @@ pub(super) fn output(name: &str) -> Value {
     use community_views::view;
     match name {
         "get_community_node_config" | "set_community_node_config" => view(
-            json!({"nodes": array(view(json!({"base_url": string(), "resolved_urls": nullable(community_views::resolved_urls()), "content_advisory_enabled": boolean()}), &[]))}),
+            json!({"nodes": array(view(json!({"base_url": string(), "resolved_urls": nullable(community_views::resolved_urls()), "content_advisory_enabled": boolean()}), &[])),
+            "trust_node_priority": strings()}),
             &[],
         ),
         "get_community_node_statuses" => array(community_views::status()),
@@ -126,6 +141,19 @@ pub(super) fn output(name: &str) -> Value {
         | "withdraw_community_node_consents"
         | "refresh_community_node_metadata" => community_views::status(),
         "clear_community_node_config" => json!({"type": "null"}),
+        "evaluate_author_trust_gates" => view(
+            json!({"gates": array(community_views::author_trust_gate())}),
+            &[],
+        ),
+        "set_author_trust_display_exception" => community_views::author_trust_gate(),
+        "list_author_trust_display_exceptions" => strings(),
+        "get_community_node_observation_sharing"
+        | "enable_community_node_observation_sharing"
+        | "disable_community_node_observation_sharing" => view(
+            json!({"base_url": string(), "offered": boolean(), "policy": nullable(community_views::policy_document()),
+                "enabled": boolean(), "needs_reconsent": boolean(), "revocation_pending": boolean(), "pending_count": integer()}),
+            &[],
+        ),
         "fetch_community_node_policies" => community_views::policies(),
         "fetch_community_node_manifest" => view(
             json!({"status": {"enum": ["ok", "absent"]}, "manifest": nullable(community_views::manifest())}),

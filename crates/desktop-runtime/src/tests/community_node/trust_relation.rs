@@ -4,7 +4,8 @@ use axum::http::{Method, Uri};
 use axum::response::{IntoResponse, Response};
 use kukuri_cn_protocol::{
     ApiErrorBody, Proximity, ProximityBasisEntry, RelationNeighborsResponse,
-    RelationOptoutResponse, RelationReadResponse, TrustReadView, TrustUserReadResponse,
+    RelationOptoutResponse, RelationReadResponse, TrustEvaluation, TrustEvaluationReason,
+    TrustReadView, TrustUserReadResponse,
 };
 use std::collections::HashMap;
 
@@ -70,6 +71,15 @@ async fn mock_trust_user(
             w_abs_applied: 0.5,
             computed_at: "2026-08-13T00:00:00Z".to_string(),
             basis: Vec::new(),
+            evaluation: Some(TrustEvaluation {
+                policy_version: "v1-policy".to_string(),
+                trust_version: "t-version".to_string(),
+                relation_version: "r-1-2".to_string(),
+                computed_at: "2026-08-13T00:00:00Z".to_string(),
+                expires_at: "2026-08-13T00:10:00Z".to_string(),
+                hide_recommended: false,
+                reasons: vec![TrustEvaluationReason::RiskSignals],
+            }),
         },
     })
     .into_response()
@@ -236,6 +246,7 @@ async fn trust_relation_runtime(
     )
     .expect("persist token");
     *runtime.community_node_config.lock().await = CommunityNodeConfig {
+        trust_node_priority: Vec::new(),
         nodes: vec![CommunityNodeNodeConfig {
             content_advisory_enabled: true,
             base_url: base_url.clone(),
@@ -264,6 +275,10 @@ async fn community_node_trust_relation_client_preserves_wire_contract_and_method
         .expect("trust read");
     assert_eq!(trust.view.target_id, target);
     assert_eq!(trust.view.trust, -0.3);
+    // #1061: CN が合算した評価の版・期限・表示 policy をそのまま運ぶ。
+    let evaluation = trust.view.evaluation.as_ref().expect("evaluation");
+    assert_eq!(evaluation.relation_version, "r-1-2");
+    assert!(!evaluation.hide_recommended);
 
     let relation = runtime
         .read_community_node_relation_user(CommunityNodeUserAdvisoryRequest {
