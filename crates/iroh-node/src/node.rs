@@ -172,6 +172,7 @@ impl IrohDocsNode {
             TransportNetworkConfig::loopback(),
             DhtDiscoveryOptions::disabled(),
             TransportRelayConfig::default(),
+            false,
         )
         .await
     }
@@ -199,21 +200,68 @@ impl IrohDocsNode {
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
     ) -> Result<Arc<Self>> {
+        Self::load_persistent(
+            root.as_ref(),
+            network_config,
+            dht_options,
+            relay_config,
+            true,
+        )
+        .await
+    }
+
+    /// Runtime repair reopens canonical data; it must never turn a failed open
+    /// into an empty replacement store or generate a new endpoint identity.
+    pub async fn reopen_with_discovery_config(
+        root: impl AsRef<Path>,
+        network_config: TransportNetworkConfig,
+        dht_options: DhtDiscoveryOptions,
+        relay_config: TransportRelayConfig,
+    ) -> Result<Arc<Self>> {
         let root = root.as_ref();
+        for name in [
+            DOCS_STORE_FILE_NAME,
+            DEFAULT_AUTHOR_FILE_NAME,
+            ENDPOINT_SECRET_FILE_NAME,
+        ] {
+            anyhow::ensure!(
+                root.join(name).is_file(),
+                "runtime repair requires the existing {name}"
+            );
+        }
+        Self::load_persistent(root, network_config, dht_options, relay_config, false).await
+    }
+
+    async fn load_persistent(
+        root: &Path,
+        network_config: TransportNetworkConfig,
+        dht_options: DhtDiscoveryOptions,
+        relay_config: TransportRelayConfig,
+        recover_corrupt_docs: bool,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(root)
             .with_context(|| format!("failed to create docs root {}", root.display()))?;
         let options = BlobStoreOptions::new(root);
         let store = iroh_blobs::store::fs::FsStore::load_with_opts(root.join("blobs.db"), options)
             .await
             .with_context(|| format!("failed to load blob store at {}", root.display()))?;
-        Self::spawn(
+        let result = Self::spawn(
             (*store).clone(),
             Some(root.to_path_buf()),
             network_config,
             dht_options,
             relay_config,
+            recover_corrupt_docs,
         )
-        .await
+        .await;
+        if result.is_err() {
+            // Early failures (e.g. relay parsing or bind) happen before a node
+            // owns this store. Wait for its actor/DB to close before a caller
+            // can reopen it; merely dropping the API races cleanup on Linux.
+            // Docs startup may already have closed it; retain the original error.
+            let _ = store.shutdown().await;
+        }
+        result
     }
 
     async fn spawn(
@@ -222,6 +270,7 @@ impl IrohDocsNode {
         network_config: TransportNetworkConfig,
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
+        recover_corrupt_docs: bool,
     ) -> Result<Arc<Self>> {
         let blobs = store.into();
         let discovery = Arc::new(MemoryLookup::new());
@@ -268,7 +317,7 @@ impl IrohDocsNode {
         {
             Ok(docs) => docs,
             Err(error) => {
-                let error = if let Some(root) = root.as_deref() {
+                let error = if let Some(root) = root.as_deref().filter(|_| recover_corrupt_docs) {
                     recover_persistent_docs(
                         root,
                         endpoint.clone(),
