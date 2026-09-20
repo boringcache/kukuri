@@ -220,11 +220,14 @@ pub(crate) async fn ensure_index_entries_projected(
             .is_none()
         {
             // 1 回に多数の object を反映するので、本文は手元にあるものだけを読む(表示を remote 取得で待たせない)。
+            // 索引の entry を書いた docs author を、envelope を読む手がかりにする(ADR 0053 §3)。envelope の key に
+            // 不正な record を積まれていても、著者の docs author と key の組の 1 件引きで読める。
             match hydrate_object_in_topic_with(
                 services,
                 topic_id,
                 replica,
                 &object_id,
+                entry.docs_author.as_deref(),
                 policy,
                 BodyFetch::LocalOnly,
             )
@@ -534,7 +537,9 @@ impl AppService {
             let entries = keys
                 .entries
                 .into_iter()
-                .filter_map(|entry| thread_index_entry(index_prefix.as_str(), entry.key))
+                .filter_map(|entry| {
+                    thread_index_entry(index_prefix.as_str(), entry.key, entry.docs_author)
+                })
                 .collect::<Vec<_>>();
             let outcome = ensure_index_entries_projected(
                 &self.services,
@@ -556,7 +561,11 @@ impl AppService {
 }
 
 /// `indexes/thread/<root>/<sort key>/<object id>` から object id を取り出す。形の違う key は捨てる。
-fn thread_index_entry(index_prefix: &str, key: String) -> Option<TimeIndexEntry> {
+fn thread_index_entry(
+    index_prefix: &str,
+    key: String,
+    docs_author: Option<String>,
+) -> Option<TimeIndexEntry> {
     let rest = key.strip_prefix(index_prefix)?;
     let (sort_key, object_id) = rest.rsplit_once('/')?;
     let (time, sort_object_id) = sort_key.split_once('-')?;
@@ -568,6 +577,7 @@ fn thread_index_entry(index_prefix: &str, key: String) -> Option<TimeIndexEntry>
         created_at,
         object_id: object_id.to_string(),
         key,
+        docs_author,
     })
 }
 
@@ -737,13 +747,17 @@ mod tests {
     fn thread_index_keys_are_parsed_and_malformed_keys_are_dropped() {
         let prefix = "indexes/thread/root/";
         let id = "a".repeat(64);
-        let entry = thread_index_entry(prefix, format!("{prefix}{:020}-{id}/{id}", 1_758_000_000))
-            .expect("valid key");
+        let entry = thread_index_entry(
+            prefix,
+            format!("{prefix}{:020}-{id}/{id}", 1_758_000_000),
+            None,
+        )
+        .expect("valid key");
         assert_eq!(entry.created_at, 1_758_000_000);
         assert_eq!(entry.object_id, id);
-        assert!(thread_index_entry(prefix, format!("{prefix}junk")).is_none());
+        assert!(thread_index_entry(prefix, format!("{prefix}junk"), None).is_none());
         assert!(
-            thread_index_entry(prefix, format!("{prefix}{:020}-{id}/other", 1)).is_none(),
+            thread_index_entry(prefix, format!("{prefix}{:020}-{id}/other", 1), None).is_none(),
             "the sort key and the object id must agree"
         );
     }
