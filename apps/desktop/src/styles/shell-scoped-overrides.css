@@ -791,6 +791,49 @@
   text-align: left;
 }
 
+/* #1192: コントロールセンターから各コミュニティノードの規約同意モーダルを開く。 */
+.shell-phase1 .shell-control-center-community-node-list {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+  /* コミュニティノードの行が、その上の設定ボタンに属することを字下げで示す。 */
+  margin: 0 0 var(--space-2xs) var(--space-sm);
+  padding: 0 0 0 var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  list-style: none;
+}
+
+.shell-phase1 .shell-control-center-community-node-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-xs);
+  align-items: center;
+  min-width: 0;
+  padding: var(--space-2xs) 0;
+}
+
+.shell-phase1 .shell-control-center-community-node-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.shell-phase1 .shell-control-center-community-node-row .button {
+  width: auto;
+  min-height: 2.75rem;
+}
+
+.shell-phase1 .shell-control-center-community-node-empty {
+  margin: 0 0 var(--space-2xs) var(--space-sm);
+  padding: var(--space-2xs) 0 var(--space-2xs) var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
+}
+
 .shell-phase1 .shell-control-center-column-list {
   display: grid;
   gap: var(--space-xs);

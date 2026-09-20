@@ -37,12 +37,12 @@
       "path": "crates/app-api/src/private_channels.rs"
     },
     {
-      "lines": 1097,
-      "path": "crates/app-api/src/service/private_channels_support.rs"
-    },
-    {
       "lines": 1082,
       "path": "apps/desktop/src/lib/api/commands/runtimeApi.ts"
+    },
+    {
+      "lines": 1074,
+      "path": "crates/app-api/src/service/private_channels_support.rs"
     },
     {
       "lines": 1058,
@@ -51,6 +51,10 @@
     {
       "lines": 1056,
       "path": "crates/metaverse-host/src/tests.rs"
+    },
+    {
+      "lines": 1042,
+      "path": "apps/desktop/src/styles/shell-scoped-overrides.css"
     },
     {
       "lines": 1033,
@@ -67,14 +71,6 @@
     {
       "lines": 1004,
       "path": "crates/desktop-runtime/src/tests/community_node/connectivity.rs"
-    },
-    {
-      "lines": 1000,
-      "path": "apps/desktop/src/components/core/PostCard.tsx"
-    },
-    {
-      "lines": 1000,
-      "path": "apps/desktop/src/shell/DesktopShellPage.tsx"
     },
     {
       "lines": 1000,
