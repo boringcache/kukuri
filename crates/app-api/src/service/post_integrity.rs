@@ -194,6 +194,15 @@ pub(crate) fn select_verified_post<'a>(
     rejection.map_or(Ok(None), Err)
 }
 
+/// 投稿を 1 件読んだ結果(#1239)。まだ届いていない投稿と、検証に通らない record を区別する。
+pub(crate) enum PostLoad {
+    Verified(Box<VerifiedPost>),
+    /// envelope の record が手元に無い(entry が無い、または本体が未着)。後から届きうる。
+    Missing,
+    /// record はあるが、検証に通るものが無い。読み直しても変わらない。
+    Rejected,
+}
+
 /// 投稿を 1 件、署名つき envelope から読んで検証する。
 ///
 /// 読む docs の record は、その object の `envelope` の key の最大 `MAX_ENVELOPE_RECORDS_PER_OBJECT` 件だけで、
@@ -206,9 +215,25 @@ pub(crate) async fn load_verified_post(
     object_id: &EnvelopeId,
     policy: DocFetchPolicy,
 ) -> Result<Option<VerifiedPost>> {
+    Ok(
+        match load_post(docs_sync, replica, subscription_topic_id, object_id, policy).await? {
+            PostLoad::Verified(post) => Some(*post),
+            PostLoad::Missing | PostLoad::Rejected => None,
+        },
+    )
+}
+
+/// `load_verified_post` の本体。検証に通る envelope が無いとき、未着(`Missing`)と不正(`Rejected`)を区別して返す。
+pub(crate) async fn load_post(
+    docs_sync: &dyn DocsSync,
+    replica: &ReplicaId,
+    subscription_topic_id: &str,
+    object_id: &EnvelopeId,
+    policy: DocFetchPolicy,
+) -> Result<PostLoad> {
     let Some(scope) = ReplicaPostScope::for_replica(replica, subscription_topic_id) else {
         warn_rejected_post(replica, object_id, PostRejection::UnsupportedReplica);
-        return Ok(None);
+        return Ok(PostLoad::Rejected);
     };
     let records = docs_sync
         .query_replica_exact_bounded(
@@ -218,13 +243,16 @@ pub(crate) async fn load_verified_post(
             policy,
         )
         .await?;
-    match select_verified_post(records.iter(), object_id, replica, &scope) {
-        Ok(post) => Ok(post),
-        Err(reason) => {
-            warn_rejected_post(replica, object_id, reason);
-            Ok(None)
-        }
-    }
+    Ok(
+        match select_verified_post(records.iter(), object_id, replica, &scope) {
+            Ok(Some(post)) => PostLoad::Verified(Box::new(post)),
+            Ok(None) => PostLoad::Missing,
+            Err(reason) => {
+                warn_rejected_post(replica, object_id, reason);
+                PostLoad::Rejected
+            }
+        },
+    )
 }
 
 /// 取り下げを、対象の envelope の record(複数ありうる)に照らした結果。

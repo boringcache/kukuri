@@ -139,6 +139,7 @@ mod live_game_support;
 pub(crate) use live_game_support::{DomeReadUnavailable, fetch_verified_dome_envelope};
 mod metaverse_room_event_support;
 mod notifications_support;
+mod object_hydration;
 mod object_persistence_support;
 mod post_integrity;
 mod post_withdrawal_hydration;
@@ -146,8 +147,11 @@ mod private_channels_support;
 mod profile_docs_support;
 mod projection_support;
 mod reaction_hydration;
-pub(crate) use reaction_hydration::hydrate_reaction_cache_from_key;
+pub(crate) use reaction_hydration::{
+    hydrate_reaction_cache_for_target_bounded, hydrate_reaction_cache_from_key,
+};
 mod reaction_integrity;
+mod replica_window;
 mod session_integrity;
 mod social_helpers;
 mod social_runtime_support;
@@ -174,9 +178,9 @@ pub(crate) use attachment_support::{
 };
 pub(crate) use gossip_subscription_support::gossip_disabled_channel_key;
 pub(crate) use hydration_support::{
-    hint_refers_to_replica_content, hint_targets_topic, hydrate_object_in_topic,
-    hydrate_subscription_event, hydrate_subscription_hint, hydrate_subscription_state,
-    hydrate_topic_state, profile_timeline_page,
+    hint_refers_to_replica_content, hint_targets_topic, hydrate_subscription_event,
+    hydrate_subscription_hint, hydrate_subscription_state, hydrate_topic_state,
+    profile_timeline_page,
 };
 pub(crate) use metaverse_room_event_support::{
     metaverse_room_event_buffer_key, parse_metaverse_room_event_envelope,
@@ -187,6 +191,9 @@ pub(crate) use notifications_support::{
     document_notification_id, normalize_author_pubkey, notification_candidate_from_follow_event,
     notification_candidate_from_object_event, notification_doc_event_fingerprint,
     notification_doc_event_fingerprint_parts, notification_preview_text,
+};
+pub(crate) use object_hydration::{
+    BodyFetch, ObjectHydration, hydrate_object_in_topic, hydrate_object_in_topic_with,
 };
 pub(crate) use object_persistence_support::{
     best_effort_blob_cache_status, best_effort_blob_view_status,
@@ -204,8 +211,8 @@ pub(crate) use object_persistence_support::{
     store_manifest_blob, wait_for_private_channel_epoch_snapshot,
 };
 pub(crate) use post_integrity::{
-    MAX_ENVELOPE_RECORDS_PER_OBJECT, MAX_WITHDRAWAL_RECORDS_PER_OBJECT, ReplicaPostScope,
-    VerifiedPost, WithdrawalTargetCheck, load_verified_post, object_id_from_post_key,
+    MAX_ENVELOPE_RECORDS_PER_OBJECT, MAX_WITHDRAWAL_RECORDS_PER_OBJECT, PostLoad, ReplicaPostScope,
+    VerifiedPost, WithdrawalTargetCheck, load_post, load_verified_post, object_id_from_post_key,
     post_envelope_key, select_verified_post, verify_withdrawal_against_records, warn_rejected_post,
 };
 pub(crate) use post_withdrawal_hydration::{
@@ -374,6 +381,8 @@ pub struct ServiceHandles {
     pub(crate) missing_body_ledger: Arc<hydration_limits::MissingBodyLedger>,
     /// #1239: 表示した投稿の取り下げの、背景での確認の台帳。
     pub(crate) withdrawal_checks: Arc<hydration_limits::WithdrawalCheckLedger>,
+    /// #1239: ページの範囲と時系列の索引の照合の台帳。
+    pub(crate) range_checks: Arc<replica_window::RangeCheckLedger>,
 }
 
 impl ServiceHandles {
@@ -399,6 +408,7 @@ impl ServiceHandles {
             replica_scan_cache: Arc::default(),
             missing_body_ledger: Arc::default(),
             withdrawal_checks: Arc::default(),
+            range_checks: Arc::default(),
         }
     }
 }
