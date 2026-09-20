@@ -22,11 +22,12 @@ impl AppService {
             Some(ChannelRef::Public) | None => TimelineScope::Public,
         };
         let target_object_id = EnvelopeId::from(target_object_id);
-        Box::pin(self.hydrate_scope_projection_for_target(
+        self.ensure_object_projection(
             target_topic_id.as_str(),
             &scope,
             &target_object_id,
-        ))
+            DocFetchPolicy::LocalOnly,
+        )
         .await?;
         let target = self
             .services
@@ -56,6 +57,33 @@ impl AppService {
             &current_author,
             normalized_reaction_key.as_str(),
         );
+        // #1239: 自分の既存の reaction が projection に無ければ、その key だけを docs から反映する
+        // (reaction id は対象・著者・key から決まる)。replica は走査しない。
+        if self
+            .services
+            .projection_store
+            .get_reaction_cache(&target.source_replica_id, &target_object_id, &reaction_id)
+            .await?
+            .is_none()
+        {
+            hydrate_reaction_cache_from_key(
+                self.services.docs_sync.as_ref(),
+                self.services.projection_store.as_ref(),
+                &target.source_replica_id,
+                stable_key(
+                    "reactions",
+                    &format!(
+                        "{}/{}/state",
+                        target_object_id.as_str(),
+                        reaction_id.as_str()
+                    ),
+                )
+                .as_str(),
+                // 利用者の操作は remote 取得で待たせない(ADR 0052 §4)。
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?;
+        }
         let next_status = match self
             .services
             .projection_store

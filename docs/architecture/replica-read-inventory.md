@@ -14,7 +14,7 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 `docs-sync` は query を既定の並び順（`SortBy::AuthorKey`）で組んでいたため、iroh-docs は `Exact`・`Prefix`・`All` のどれも namespace 全体の table scan として実行していた。
 つまり下の表の prefix 読みだけでなく、**key を 1 つ指定した読み出しのすべて**が、replica の総 entry 数に比例していた
 （1,000 → 10,000 entry で 2.4 ms → 24 ms。修正後は 0.27 ms → 0.31 ms。計測 test `measure_exact_query_cost`）。
-段階 T2 で、すべての query を key の索引（`SortBy::KeyAuthor`）で読む形に直す。これは下の全行に効くが、prefix の全件読みそのものは T3 以降で無くす。
+段階 T2（PR #1245）で、すべての query を key の索引（`SortBy::KeyAuthor`）で読む形に直した。これは下の全行に効くが、prefix の全件読みそのものは T3 以降で無くす。
 
 ## 全件走査の入口（app-api）
 
@@ -26,8 +26,8 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 | S-4 | replica の内容を指す hint で個別反映が 0 件（3 秒の最小間隔） | 同上 | 同 S-1 | T4 |
 | S-5 | private channel の doc event で個別反映が 0 件（`withdrawals/` などの event） | 同上 | 同 S-1 | T4 |
 | S-6 | `list_timeline_scoped`（空ページ、private channel の現在 epoch が未反映）・`list_thread`（空ページ） | scope の全 replica の 5 prefix | 同 S-1 × scope の replica 数 | T5 |
-| S-7 | repost・bookmark・reply（`timeline.rs`）、reaction（`reactions.rs`）の実行時。利用者の操作が走査の完了を待つ | 同 S-6 | 同 S-6 | T3 |
-| S-8 | community index の解決（`community_index.rs`）、repost 元の解決（`resolve_repost_source` → `hydrate_topic_state(LocalThenRemote)`） | 同 S-6 | 同 S-6 | T3 |
+| S-7 | repost・bookmark・reply・取り下げ（`timeline.rs`）、reaction（`reactions.rs`）の実行時。利用者の操作が走査の完了を待つ | 同 S-6 | 同 S-6 | T3（解消済み。`ensure_object_projection` が対象の key だけを読む） |
+| S-8 | community index の解決（`community_index.rs`）、repost 元の解決（`resolve_repost_source` → `hydrate_topic_state(LocalThenRemote)`） | 同 S-6 | 同 S-6 | T3（解消済み） |
 | S-9 | `list_game_rooms`（行が空）・`list_live_sessions`（行が空、または live で viewer 0。購読再起動と再 sync も行う） | 同 S-6 | 同 S-6 | T5 |
 | S-10 | author 購読の起動時と doc event ごと（`social_runtime_support.rs` の `hydrate_author_state(LocalThenRemote)`）、`list_profile_timeline` | author replica の profile・follow・block・投稿・repost の全 entry | author の投稿・repost・follow・block の総数 × 購読中の author 数 | T6 |
 
@@ -35,13 +35,13 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 
 | ID | caller | prefix | 比例する総数 | 分類 |
 | --- | --- | --- | --- | --- |
-| P-1 | `hydration_support.rs` `hydrate_post_withdrawals_from_replica`。全件走査のほか、view の生成中に行ごとに呼ばれる（`timeline_view_support.rs` の `profile_post_to_view`・`profile_repost_to_view`・`repost_snapshot_to_view_with_profiles`） | `withdrawals/` | topic の取り下げ総数 × ページの行数 | 対象。view の生成からは T3 で外す。関数は T7 で削除 |
+| P-1 | `hydration_support.rs` `hydrate_post_withdrawals_from_replica`。全件走査のほか、view の生成中に行ごとに呼ばれる（`timeline_view_support.rs` の `profile_post_to_view`・`profile_repost_to_view`・`repost_snapshot_to_view_with_profiles`） | `withdrawals/` | topic の取り下げ総数 × ページの行数 | 対象。view の生成からは T3 で外した（背景の key 指定の確認へ）。関数は T7 で削除 |
 | P-2 | `hydration_support.rs` `hydrate_object_projection_from_replica` | `objects/`（1 投稿につき `state` と `envelope` の 2 entry） | topic の投稿総数 | 対象。T7 で削除 |
 | P-3 | `hydration_support.rs` `hydrate_reaction_cache_from_replica` | `reactions/` | topic のリアクション総数 | 対象。T7 で削除 |
-| P-4 | `hydration_support.rs` `hydrate_reaction_cache_for_target` | `reactions/<target object id>/` | 1 投稿のリアクション数 | 対象。T3 で上限つきの読み出しにする（集計は best effort） |
+| P-4 | `hydration_support.rs` `hydrate_reaction_cache_for_target` | `reactions/<target object id>/` | 1 投稿のリアクション数 | 対象。T4 で上限つきの読み出しにする（集計は best effort）。T3 では、自分の reaction の確認を key 指定の読み出しにした |
 | P-5 | `hydration_support.rs` `hydrate_live_sessions_from_replica` | `sessions/live/` | topic の live session の総数（終了したものも残る） | 対象。T5 で上限つき、T7 で全件走査から外す |
 | P-6 | `hydration_support.rs` `hydrate_game_rooms_from_replica` | `sessions/game/` | topic の game room の総数 | 同上 |
-| P-7 | `service/mod.rs` `find_existing_simple_repost`（repost のたび。全 entry を deserialize） | `objects/` | target topic の投稿総数 | 対象。T3 で projection の索引に置き換える |
+| P-7 | `service/mod.rs` `find_existing_simple_repost`（repost のたび。全 entry を deserialize） | `objects/` | target topic の投稿総数 | 対象。T3 で projection の索引（`find_author_reposts_of`）に置き換えた |
 | P-8 | `profile_docs_support.rs` `hydrate_author_state` | `graph/follows/`、`graph/blocks/` | author の follow・block の総数 | 対象。T6（event 駆動と上限つきの読み出し） |
 | P-9 | `profile_docs_support.rs` `load_profile_posts_from_author_replica`・`load_profile_reposts_from_author_replica` | `profile/posts/`、`profile/reposts/` | author の投稿・repost の総数 | 対象。T6 |
 | P-10 | `profile_docs_support.rs` `load_custom_reaction_assets_from_author_replica` | `reactions/assets/` | author のカスタムリアクションの総数 | 対象。T6 で上限つき |
@@ -49,7 +49,17 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 | P-12 | `object_persistence_support.rs` `fetch_private_channel_participants_from_replica` | `channels/participants/` | private channel の参加者数 | Non-goal（本 Issue の固定 AC に含まれない。招待制で件数は小さいが、上限が無い点を #1224 の台帳の上限で扱う） |
 | P-13 | `dome_connections.rs`（4 か所）、`dome_hosting.rs`（3 か所）、`dome_delete.rs`（1 か所） | `metaverse/dome-instances/`・提案・選択・接続・削除・layout commit | topic の Dome と提案の総数 | Non-goal（本 Issue の固定 AC に含まれない。Dome の一覧と接続の読み出しは別 Issue で、同じ原則で見直す） |
 | P-14 | `crates/cn-indexer/src/ingest.rs` `ingest_scope`（3 か所。変更通知で対象を特定できないときの fallback と初回） | `objects/`・`withdrawals/` など | scope の投稿総数 | Non-goal（CN 側。`ingest_changed_keys` が通常経路。T2 の索引化は効く。全件走査の廃止は CN 側の Issue で扱う） |
-| P-15 | `desktop-runtime/src/runtime/sync_live_api.rs` `has_topic_timeline_doc_index_entry`（test と harness 用） | `indexes/timeline/` | topic の投稿総数 | 対象。T2 で時系列の索引の key 指定の読み出しへ置き換える |
+| P-15 | `desktop-runtime/src/runtime/sync_live_api.rs` `has_topic_timeline_doc_index_entry`（test と harness 用） | `indexes/timeline/` | topic の投稿総数 | 対象。T2 で key 指定の読み出し 2 回へ置き換えた |
+
+## view の生成に残る docs の読み出し（key 指定）
+
+T3 の後も、view の生成の経路に docs の読み出しが 2 か所残る。どちらも key を 1 つ指定した `LocalOnly` の読み出しで、replica の総 entry 数には依存しない
+（T2 の索引化の後）。ただし ADR 0052 §2 の「view の生成中に docs を読まない」に反するので、T5 で外す。
+
+| ID | 箇所 | 読む範囲・契機 | 比例する総数 | 分類 |
+| --- | --- | --- | --- | --- |
+| V-1 | `timeline_view_support.rs` `hydrate_reply_preview_row`（`fetch_post_object_for_projection`） | 返信先が projection に無いときだけ、`objects/<返信先 id>/state` を 1 回（`LocalOnly`）。反映できれば次回以降は読まない | 依存しない（表示する行ごとに 1 key 以下） | 対象。T5 で、返信先の反映を取得側（窓の追いつき・遡りの取得）と背景へ移す |
+| V-2 | `timeline_view_support.rs` `attachment_views_for_projection_row` の fallback | `projection_version < 2` で添付の列が空の行だけ、`objects/<id>/state` を 1 回（`LocalOnly`）。現行の反映が書く行は対象外 | 依存しない（旧い行ごとに 1 key） | 対象。T5 で、旧い行は反映し直すときに列を埋める形にして fallback を削除する |
 
 ## projection 側
 
@@ -63,4 +73,8 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 
 - 同じ key に複数の docs 著者の entry があるとき、caller は `Exact` の結果の先頭（docs 著者 id の昇順で最初）を使う。最新の entry ではない。
   T2 で並びを key の索引に変えても、`Exact` の結果の順序（docs 著者 id の昇順）と、prefix 読みで同じ key の最後に反映される entry は変わらない。
+- repost 元、profile の投稿、profile の投稿の返信先の取り下げの確認は、購読していない topic の replica を開いて同期する（T3 より前から、view の生成のたびに起きていた副作用）。T3 で確認は背景の key 指定になったが、replica を開くこと自体は残る。
+  開く replica の上限と、取り下げの置き場所は #1224・#1243 で扱う。
+- private channel の取り下げは、現在の epoch の replica に書かれる。対象の投稿が過去の epoch の replica にあると、取り下げを反映する側は同じ replica で対象の envelope を見つけられず、
+  取り下げを検証できない（T3 より前から同じ。key 単位の反映でも全件走査でも変わらない）。epoch をまたぐ取り下げの扱いは別 Issue で決める。
 - iroh-docs の同期と保存は replica の総 entry 数に比例する（ADR 0052 §7）。replica の時間分割は #1243 が所有する。
