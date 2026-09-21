@@ -419,3 +419,51 @@ T4b（購読タスクの全件走査の置き換え）は大きいので、挙�
   - 未確認: `SyncFinished`・`ContentReady` が実際の 2 node の同期で届くことは、購読タスクがそれを使う段階（T4b-2）の結合 test で確かめる。この段階では本番の caller が無い。
 - `crates/desktop-runtime/src/stack.rs` が 1,000 行を超えたので、docs sync の転送の test を `tests/reloadable_docs_sync.rs` へ移した（内容は同じ）。
 
+## T4b-2: 購読タスクの全件走査の置き換え（基準 commit `9fe399fa`）
+
+T4b-1 は PR #1266（merge commit `9fe399fa`）で完了した。独立監査は PASS、必須 CI は全 job 成功。
+
+### 着手前に洗い出した、購読タスクの全件走査（S-1〜S-5）が覆っていた対象
+
+| 走査が覆っていた対象 | 同期 / 背景 | 置き換え後 |
+| --- | --- | --- |
+| 購読の開始前に手元へ入っていた投稿・取り下げ（窓の範囲） | 背景（購読タスクの起動時） | 起動時の窓の追いつき（`LocalOnly`。窓の object の取り下げも確かめる） |
+| 同、窓より古い範囲 | 背景 | 反映しない。利用者が遡ったときのページの範囲の照合（T5a・T4a）が反映する（best effort） |
+| 取りこぼした event（buffer の溢れ）の投稿・取り下げ・reaction | 背景（recovery tick、hint の miss） | docs の通知 `Lagged` からの追いつき（窓の object の取り下げと reaction も読み直す） |
+| 本体が後から届いた entry | 背景（recovery tick の `LocalThenRemote`） | `SyncFinished`・`ContentReady` と、個別反映が 0 件だった event からの追いつき（`LocalThenRemote`） |
+| docs の同期より先に届いた hint の対象 | 背景（hint の miss の走査） | 追いつきの依頼。対象が届けば docs の event が反映する |
+| reaction（全件） | 背景 | docs の event（key 単位）、投稿が projection に入るときの上限つきの読み出し、取りこぼしの後の窓の object の読み直し。32 件を超える古い reaction は入らない（best effort） |
+| live session・game room（全件） | 背景 | 追いつきのたびに、新しい側の固定件数（それぞれ 32 件）を反映し直す。それより古い session は、その state の event が届いたときに入る |
+| 通知の起点（`objects/` の全 entry） | 背景（起動時） | 窓の object の key と hash だけ |
+| #1252 の migration の後の reaction・session の再反映 | 背景 | 起動時の追いつき（窓の object の reaction、session の固定件数）。窓より古い投稿の reaction は、遡ったときの照合が反映する |
+
+### 変更の要約
+
+- `crates/app-api/src/service/subscription_catch_up.rs`（新規）: 窓の追いつき `catch_up_replica_window`、session の固定件数の反映、追いつきの契機をまとめる `CatchUpSchedule`、
+  窓の object だけから作る通知の起点 `snapshot_window_notification_baseline`。
+- `crates/app-api/src/service/private_channels_support.rs`: 購読タスクが `subscribe_replica_notices` を購読し、`hydrate_subscription_state` の呼び出し 4 か所（起動時、private channel の doc event の
+  fallback、hint の miss、recovery tick）を無くした。`HintRecoveryGate` は削除した。行数は 1,074 行から減った。
+- `crates/app-api/src/service/reaction_hydration.rs`: 上限つきの読み出しが、打ち切られたときに reaction id の先頭の 1 文字ごとに読む（PR #1247 の 4 回目の監査の 1）。上限なしの `hydrate_reaction_cache_for_target` は削除した（P-4）。
+- `crates/app-api/src/service/profile_docs_support.rs`: `snapshot_object_notification_baseline`（`objects/` の全件読み）を削除した。
+- PR #1266 の監査の non-blocker: 2 node の同期で `SyncFinished`・`ContentReady` が届くことの test（監査の test を恒久化）、移した test のコメントと後始末。
+
+### 残した事項
+
+- 全件走査の関数（`hydrate_subscription_state` など）は、`list_live_sessions`・`list_game_rooms`（S-9、T5b）と test が使うので残る。削除は T7。
+- author 購読（S-10）と follow の通知の起点は T6。
+- 32 件を超える reaction の背景の backfill は入れていない。1 回の照合・追いつきが読む reaction の総数の上限も入れていない（投稿 1 件あたりの上限だけ）。T5b で扱う。
+
+### 独立監査の 1 回目（対象 `e670b80d`、FAIL）と修正
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| 空振りで伸びた追いつきの間隔（最大 5 分）が、取りこぼしや相手から届いた entry の契機でも縮まらない。静かな public topic では、recovery tick の再 sync のたびに `SyncFinished` が届いて空振りが積み、定常的に間隔が伸びる。その後に取りこぼした新着や取り下げの反映が、数十秒〜5 分遅れる（以前は 3 秒で走査していた） | `CatchUpSchedule` が、契機の種類を区別せずに同じ期限を使っていた。`record_progress` も回数を戻すだけで、決まった期限を縮めなかった | 反映するものがあると分かっている契機（`Lagged`・`ContentReady`・相手から届いた entry と hint の miss）と `record_progress` は、期限を「前回の追いつき + 最小間隔」まで縮める。`SyncFinished` だけは伸びた間隔を待つ。回帰 test `a_lag_after_an_idle_period_is_caught_up_within_the_minimum_interval`（単体）、`a_lag_after_empty_catch_ups_is_reflected_within_the_minimum_interval`（購読タスク。監査の再現 test） |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- 相手から届いた索引の entry（個別反映が必ず 0 件）が、投稿 1 件ごとに追いつきを依頼していた。指す object が projection に既にあれば依頼しない（`missed_entry_needs_catch_up`）。
+  test `a_remote_index_entry_requests_a_catch_up_only_for_an_unprojected_object`（自分が書いた entry で依頼しないことも固定する。`MemoryDocsSync` の event は `source_peer` が無いので、通知を流し込む test double で確かめる）。
+- 追いつきが失敗したとき、読み直しの依頼が失われていた。`CatchUpSchedule::restore` で戻す。
+- 取りこぼした取り下げが、`Lagged` の後と起動時の追いつきで反映されることの test（監査の test を恒久化）。
+
+残した non-blocker: session と reaction の読み直しを直接確かめる test、追いつきが走っているあいだ event を消費しない点と `refresh_all` の最悪の読み出し回数（約 1 万回。T5b の「1 回の追いつきが読む reaction の総数の上限」で扱う）。
