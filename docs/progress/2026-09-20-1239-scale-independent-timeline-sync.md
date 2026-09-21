@@ -693,3 +693,79 @@ docs author を指定した読み出しに未対応の DocsSync では反映全�
 | 指摘 | 原因 | 修正 |
 | --- | --- | --- |
 | B-6: 同期の途中で、ほかの端末が自分の docs author で書いた新しい状態（例: follow の解除）がまだ届いていない key を、旧名義の古い状態で新しい時刻に書き直すと、同期がそろった後に全端末の状態が巻き戻る（follow の解除が follow に戻る） | 読み出しの中で書き直していた。同じ（docs author、key）では新しい時刻が勝つ | 書き直しを外した。B-5 の解消は名義を問わない一覧での読み出しだけで足りる。自分の docs author へ移るのは、利用者がその edge を書いたとき（ADR 0053 §6 に理由を書いた）。test は、読み出しが docs に何も書かないことを確かめる形にした |
+
+## T6-2: プロフィールのタイムライン（S-10 の取得側、P-9、Q-3）
+
+`list_profile_timeline` は、author replica の `profile/posts/`・`profile/reposts/` の全 entry と envelope を読み、並べ替えてからページを切っていた。
+返す `next_cursor` はページの次の行の位置で、次のページは cursor より古い行だけを返すので、ページの境目の行が 1 件ずつ飛んでいた（以前からの不具合）。
+
+- 投稿・repost を書くとき、`indexes/profile/<created_at 20 桁>-<object id>/<object id>` の索引も書く（`persist_profile_index_entry`）。
+- 取得（`profile_timeline_page_from_docs`）は、索引を cursor から新しい順に `limit` 件ずつ読み、ページの行だけを key 指定で読む（投稿、無ければ repost。
+  検証は以前の全件読みと同じ条件）。非表示の著者の行は除き、読むページ数は 4 まで（上限に達したら読み進めた位置を返す）。
+  `next_cursor` は、`limit` 件そろえば最後に返した行の位置、尽きたら `None`。全件読みの関数（`load_profile_posts_from_author_replica`・
+  `load_profile_reposts_from_author_replica`・`profile_timeline_page`）は削除した。
+- 互換: 自分の replica は、author 購読が背景で、索引の無い投稿・repost に索引を補い（key の一覧は 256 件ずつ、超えたら object id の次の桁で分ける）、
+  補い終えたら `indexes/profile-complete` を書く。読み終えた桶の位置を store の `sync_checkpoints` に残し、購読タスクが止まっても続きから補う（索引が既にある行は書かない）。
+  この一度きりの補完は自分の投稿の数に比例するが、背景で小分けに進み、印を書いた後は行わない。索引の entry は追記だけで、既存の状態を巻き戻さない。
+  その key の無い replica（索引を書く前の版の client の replica）では、索引の読み出しに、`profile/posts/`・`profile/reposts/` の key の上限つきの一覧
+  （各 128 件）から読んだ行を合わせる（best effort。上限を超える投稿は表示されないことがある）。
+- 索引の entry があるが本体がまだ手元に無い行は、そのページでは飛ばす（best effort。先頭から読み直すと出る）。
+- 行（`profile/posts/<id>`・`profile/reposts/<id>`）は、著者の docs author が分かっていれば docs author と key の組で先に読む（ADR 0053 §6。T6-1 と同じ規則）。
+- 索引の 1 回の一覧は `limit` に形の違う key の余裕を足した件数まで読むので、読み始める時刻の桁の範囲の件数がそれより少ないと、返る key の数はその件数になる
+  （件数を増やしても、それ以上は増えない）。test はどちらの側でも範囲の件数が上限を超える件数（100 件と 1,000 件）で比べる。
+
+test（`crates/app-api/src/tests/sync/profile_index.rs`）: 取得が読む量が投稿の数（100 件と 1,000 件）によらず同じで prefix を読まないこと、
+続きの位置をたどるとすべての投稿が 1 回ずつ新しい順に出ること（索引のある replica、索引の無い replica、両方が混ざった replica）、
+非表示の著者の行が続くと 4 ページで止まり読み進めた位置を返し、読む量が投稿の数によらないこと、
+索引の補完が 1 回の一覧の件数を超える投稿（300 件）をすべて補い、2 回目は何もしないこと、query の上限で止まっても読み終えた桶から続けること、
+自分の author 購読が背景で補うこと、著者の docs author が分かれば同じ key のごみの後ろの行を組で読むこと。要点を戻す mutation 5 件（組での読み出し・読み飛ばしの上限・旧 record の合流・補完の再開・索引の書き込み）で、それぞれ test が失敗する。
+
+### 独立監査の 1 回目（PR #1276、head `c1183fa2`、FAIL）と修正
+
+背景の補完の書き込みが追記だけで状態を巻き戻さないこと、ページの境界（同じ秒・索引と旧 record の境界）で重複・欠落・順序の崩れが無いことは確認された。blocker が 4 件あった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-1: 補い終えた印 `indexes/profile-complete` は誰でも置けるので、他人が置くと旧 record の合流が止まり、索引の無い投稿が本人を含む全員から見えなくなる | 印を名義を問わずに見ていた | 印は著者の docs author の名義のものだけを見る。docs author が分からないときは印が無いものとして扱う。test `a_completion_marker_by_another_docs_author_does_not_hide_legacy_posts` |
+| B-2: 補完が同期の前に一巡して印を書くと、後から届いた索引の無い投稿（アカウントの取り込み、旧版の端末の投稿）が永久に見えなくなる | 補完を続けるかを replica の印で決め、後から届く投稿を扱っていなかった | 補完を続けるかは端末内の位置で決める。自分の replica の event を取りこぼしたら補完を最初からやり直す。自分の replica に届いた投稿・repost の key に索引が無ければ、その event で足す（追記だけ）。test `own_legacy_posts_arriving_after_the_backfill_are_indexed` |
+| B-3: 同じ object id の偽の索引の entry（新しい時刻）1 件で、本物の投稿を隠せる | 読んだ印を、行の検証と位置の照合の前に付けていた | 検証と照合に通った後で付ける。test `a_forged_index_entry_for_the_same_object_does_not_hide_the_post`（docs author を知る閲覧者と知らない閲覧者の両方） |
+| B-4: 他の名義が未来の時刻の索引の key を 80 件置くと、最初のページが空になる（desktop はプロフィールの続きを読まない） | 索引を名義を問わずにたどっていた | 著者の docs author が分かれば、その名義の key だけで索引をたどる（`query_time_index_desc_by_author`。時系列の索引の読み出しに名義を渡せるようにした）。test `future_index_keys_by_another_docs_author_do_not_empty_the_first_page` |
+
+4 件の修正をそれぞれ戻す mutation で、対応する test が失敗することを確かめた（`crates/app-api/src/tests/sync/profile_index_attacks.rs`。著者の名義と他の名義の 2 つの docs を 1 つの replica として見せる double）。
+件数の比較の test は、著者の docs author を知る閲覧者で比べる形にした（知らない閲覧者は旧 record の合流を毎回読むので、読む量が件数とともに 128 件まで増える。best effort の経路）。
+
+残した non-blocker: 印の無い replica では取得のたびに最大 256 行を読む、desktop がプロフィールの続き（`next_cursor`）を読まない、空の結果での購読のやり直しの条件の変化、
+索引の値の `kind` を読み手が使っていない、`profile-index-backfill/…` の checkpoint が削除されない。
+
+### 独立監査の 2 回目（delta `c1183fa2..e09ebc5a`、FAIL）と修正
+
+B-1・B-3・B-4 の解消と、`query_time_index_desc_by_author` の追加が既存の名義を問わない読み出し（タイムライン・thread の照合・窓）を変えないことは確認された。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-2': 同期で届いた自分の投稿は、key の event の時点では本体がまだ無い。event での索引の追記が何もせずに終わり、後から本体がそろっても試し直さないので、印のある replica ではその投稿が見えないまま | 読めなかった key を覚えていなかった | 読めなかった key を上限つき（512 件）で覚え、本体の到着（`ContentReady`）・同期の区切り・envelope の event のときに試し直す。覚えた key は store の `sync_checkpoints` に置き、購読の張り直し（空の結果での張り直しなど）をまたいで引き継ぐ。上限を超えたら補完のやり直しを依頼する（`own_replica_work.rs` の `OwnReplicaWork`）。test `an_own_legacy_post_whose_content_arrives_later_is_indexed`（本体を後から出す double で、購読の経路を通す。覚える処理・購読からの受け渡しを外す mutation で失敗する） |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- 取りこぼしのたびに補完と自分の edge の読み出しを止めて最初からやり直していた。依頼として覚え、走っている仕事が終わってから 1 回にまとめてやり直す（止めた仕事の位置の書き込みが後から着地する競合も無くなる）。
+- 自分の索引の有無を自分の名義で見ることを test で固定した（`an_index_key_placed_by_another_docs_author_does_not_stop_the_own_index`）。
+- 索引の値の `kind` を、key の prefix ではなく読んだ行から決める。
+- docs author を知らない閲覧者の読み出し量が、投稿の数が上限を超えると増えないことを test で固定した（`a_stranger_reads_a_bounded_amount_regardless_of_the_post_count`、200 件と 1,000 件）。
+- docs author を知らない閲覧者の限界（他の名義の key でページを埋められうる）を ADR 0052 §6 に書いた。
+
+### 独立監査の 3 回目（delta `e09ebc5a..a0c0fc0c`、FAIL）と修正
+
+B-2' は同じ購読の中では解消していることが確認された。この delta で入れた「やり直しの依頼」が新たな blocker だった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-5: 取りこぼしによるやり直しの依頼と、上限を超えたときの依頼がメモリにしか無く、購読の張り直し（空の結果、ticket の取り込み、再起動など。頻繁に起きる）で失われる。補完は `done` のまま残り、印のある replica ではその投稿が見えないまま。前の版は依頼の時点で位置を書いていたので失われなかった（自分の edge の読み出しの退行でもある） | 依頼を store に書いていなかった | 依頼を store（`own-replica-restart/<author>`）に書いて残し、張り直した購読の最初の tick で読み込む。位置を戻した後で依頼を消す。上限を超えたときは、覚えた key を捨てる前に依頼を書く。test `a_restart_request_survives_a_resubscription`・`overflowing_the_pending_keys_leaves_a_restart_request` |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- 自分の docs author が書いた entry（今の版の投稿。索引も同時に書く）は、読めなくても覚えない（覚える・保存するのは旧名義の entry だけになり、まれになる）。
+- `envelopes/` の event での全件の試し直しをやめた（その時点では本体がまだ無いことが多い）。試し直しは本体の到着と同期の区切りだけ。
+- 補完の `kind` も読んだ行から決める。
+- 本体の到着での試し直しを test で固定した（購読の経路の test は、途中で一覧を取得せず、張り直しを経ない形にした）。
+
+今回の修正を戻す mutation 4 件（本体の到着で試し直さない・依頼を store に書かない・上限の超過で依頼を残さない・自分の名義の entry も覚える）で、それぞれ test が失敗する。
