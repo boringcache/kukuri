@@ -21,7 +21,7 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 
 | ID | 入口・契機 | 読む範囲 | 比例する総数 | 解消する段階 |
 | --- | --- | --- | --- | --- |
-| S-1 | 購読タスクの起動時・再起動時（`private_channels_support.rs` の `hydrate_subscription_state(LocalOnly)`）。再起動は `restart_active_subscriptions`（`set_discovery_seeds`・`import_peer_ticket`・CN 自己修復）で全購読ぶん | 5 prefix の全 entry | topic / channel epoch の投稿・リアクション・取り下げ・session の総数 × 購読数 | T4b-2（解消済み。起動時は窓の追いつき `catch_up_replica_window`）。関数の削除は T7（一括の再起動の廃止は #1224） |
+| S-1 | 購読タスクの起動時・再起動時（`private_channels_support.rs` の `hydrate_subscription_state(LocalOnly)`）。再起動は `restart_active_subscriptions`（`set_discovery_seeds`・`import_peer_ticket`・CN 自己修復）で全購読ぶん | 5 prefix の全 entry | topic / channel epoch の投稿・リアクション・取り下げ・session の総数 × 購読数 | T4b-2（解消済み。起動時は窓の追いつき `catch_up_replica_window`）。関数は T5b-1 で削除した（一括の再起動の廃止は #1224） |
 | S-2 | 購読タスクの起動時の通知の baseline（`snapshot_object_notification_baseline`・`snapshot_follow_notification_baseline`）。結果を task の寿命のあいだ memory に保持する | `objects/` の全 entry、`graph/follows/` の全 entry | topic の投稿総数、author の follow 総数 | T4b-2（投稿の側は解消済み。窓の object の key と hash だけを読む `snapshot_window_notification_baseline`）。follow の側は T6 |
 | S-3 | public topic の recovery tick（最大 30 秒間隔） | 5 prefix の全 entry（`LocalThenRemote`） | 同 S-1 | T4b-2（解消済み。recovery tick は docs を読まず、再 sync を促すだけ） |
 | S-4 | replica の内容を指す hint で個別反映が 0 件（3 秒の最小間隔） | 同上 | 同 S-1 | T4b-2（解消済み。追いつきの依頼にした） |
@@ -67,9 +67,9 @@ key 指定・上限つき（8 件）で読む。読む量は「1 回の照合が
 
 ## 反映の検証が足す読み出し（Issue #1252）
 
-reaction・live session・game room の検証は、prefix の読み出しを足さない。reaction は、P-3・P-4 の同じ prefix の読み出しに含まれる `envelope` の record から行を作る。
+reaction・live session・game room の検証は、prefix の読み出しを足さない。reaction は、上限つきの key の一覧(1 対象あたり reaction 32 件ぶん、key は 64 件まで。上限に達したら reaction id の先頭の文字ごとに 16 回の一覧を足す)で見つけた key ごとに、`envelope` の record を読んで行を作る(P-3・P-4 の prefix の読み出しは削除済み)。
 live session と game room は、state 1 件につき `envelopes/<envelope id>` を key 指定・上限つき（8 件）で 1 回読む。key 指定の個別反映は、`state` の key も上限つきで読む。
-どれも object 1 件あたり定数で、replica の総 entry 数に依存しない。P-5・P-6 の全件走査では、session の総数ぶんの key 指定の読み出しが足される（T5・T7 で走査ごと無くなる）。
+どれも object 1 件あたり定数で、replica の総 entry 数に依存しない。P-5・P-6 の全件走査では、session の総数ぶんの key 指定の読み出しが足されていた（T5b-1 で走査ごと無くなった）。
 
 ## view の生成に残る docs の読み出し（key 指定）
 
@@ -80,7 +80,7 @@ T3 の後も、view の生成の経路に docs の読み出しが 2 か所残る
 
 | ID | 箇所 | 読む範囲・契機 | 比例する総数 | 分類 |
 | --- | --- | --- | --- | --- |
-| V-1 | `timeline_view_support.rs` `hydrate_reply_preview_row`（`load_verified_post`） | 返信先が projection に無いときだけ、`objects/<返信先 id>/envelope` を 1 回（`LocalOnly`、最大 8 record）。署名つき envelope と replica の scope を確かめてから反映する（#1248）。反映できれば次回以降は読まない | 依存しない（表示する行ごとに 1 key 以下） | 対象。T5b で、返信先の反映を取得側（窓の追いつき・ページの範囲の照合）と背景へ移す |
+| V-1 | `timeline_view_support.rs` `hydrate_reply_preview_row`（`load_verified_post`） | 返信先が projection に無いときだけ、`objects/<返信先 id>/envelope` を 1 回（`LocalOnly`、最大 8 record）。署名つき envelope と replica の scope を確かめてから反映する（#1248）。反映できれば次回以降は読まない | 依存しない（表示する行ごとに 1 key 以下） | 残す（総件数に依存せず、表示する行ごとに 1 key 以下の `LocalOnly` の読み出し。返信先の反映を取得側と背景へ移すのは #1277） |
 | V-2 | `timeline_view_support.rs` `attachment_views_for_projection_row` の fallback | 削除済み（#1248）。署名の無い `state` の添付を表示する経路だった。旧い行（`projection_version < 3`）は migration が消し、docs から反映し直す | — | 解消済み |
 
 ## projection 側
@@ -105,3 +105,24 @@ T3 の後も、view の生成の経路に docs の読み出しが 2 か所残る
 - iroh-docs の同期と保存は replica の総 entry 数に比例する（ADR 0052 §7）。replica の時間分割は #1243 が所有する。
 - UTF-8 でない key の entry は、`IrohDocsSync` の prefix の読み出しと key の一覧（`query_replica_keys`）が飛ばす（#1253）。飛ばした entry は返る件数に入らないので、
   `query_replica_keys` は「`limit` 件を読んで打ち切られたか」を別に返し、時系列の索引の読み出し（`query_time_index_window`・`query_time_index_desc`・`query_time_index_asc`）はそれで「尽きたか」を判定する（#1257。T5a の PR で対応）。
+
+## 完了の確認（T7）
+
+全件走査の入口（S-1〜S-10）と prefix の全件読み（P-1〜P-11、P-15）は、Non-goal（P-12〜P-14）を除いてすべて解消した。
+複数の private channel をまたぐページの取得が、許可されない channel の行を読み飛ばす点は #1280 で扱う。
+設計上残る、総件数に比例する読み出しは、自分の replica の背景の仕事だけである（自分の follow・block の読み出し `sweep_own_author_edges` と、
+プロフィールの索引の補完 `backfill_own_profile_index`）。どちらも自分の replica の件数に比例するが、背景で小分けに進み、読み終えた位置を残して再開し、
+読み終えたら行わない。自分の replica の event を取りこぼしたとき（`Lagged`）だけ、最初から読み直す（ADR 0052 §6、ADR 0053 §6）。
+replica の件数を 1,000 / 10,000 / 100,000 にしても、次の操作が docs から読む record と key の数が同じであることを、
+`crates/app-api/src/tests/sync/scale_counts.rs` の test が数で確かめる（所要時間の閾値は使わない。上限を外す mutation で、読む量が件数に比例して増えることが検出される）。
+
+| 操作 | 種類 | 読む量（件数によらず） |
+| --- | --- | --- |
+| topic の購読タスクの起動（通知の起点・起動時の窓の追いつきを含む） | 定期処理 | 1,298 |
+| プロフィールを初めて開く（author 購読の起動・通知の起点・起動時の反映を含む。他人のプロフィールなので、自分の replica の背景の仕事は走らない） | 表示・定期処理 | 3,188 |
+| 購読タスクの窓の追いつき | 定期処理 | 604 |
+| author 購読の追いつき（follow・block の窓） | 定期処理 | 1,536 |
+| タイムラインの新しい側のページ（購読の起動の後。projection から読む） | 表示 | 0（projection が空で初めて開くときの照合は、`range_reconcile.rs` の `head_page_reads_only_the_newest_entries` が 300 件と 1,500 件で読む量が同じことを示す） |
+| タイムラインの遡ったページ（埋め草の中ほど） | 表示 | 676 |
+| プロフィールのタイムライン | 表示 | 116 |
+| reaction | 利用者の操作 | 3 |
