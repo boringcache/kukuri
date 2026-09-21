@@ -138,12 +138,16 @@ export function useDesktopShellData({
   const setTimelinesByKey = useDesktopShellFieldSetter('timelinesByKey');
   const setTimelineNextCursorByKey = useDesktopShellFieldSetter('timelineNextCursorByKey');
   const setTimelineLoadingMoreByKey = useDesktopShellFieldSetter('timelineLoadingMoreByKey');
+  const setTimelineUnavailableByKey = useDesktopShellFieldSetter('timelineUnavailableByKey');
   const setPendingTimelineSnapshotsByKey = useDesktopShellFieldSetter(
     'pendingTimelineSnapshotsByKey'
   );
   const setPendingTimelineCountsByKey = useDesktopShellFieldSetter('pendingTimelineCountsByKey');
   const setPendingTimelineNextCursorByKey = useDesktopShellFieldSetter(
     'pendingTimelineNextCursorByKey'
+  );
+  const setPendingTimelineUnavailableByKey = useDesktopShellFieldSetter(
+    'pendingTimelineUnavailableByKey'
   );
   const setJoinedChannelsByTopic = useDesktopShellFieldSetter('joinedChannelsByTopic');
   const setChannelPanelStateByTopic = useDesktopShellFieldSetter('channelPanelStateByTopic');
@@ -174,6 +178,7 @@ export function useDesktopShellData({
   const setThreadsById = useDesktopShellFieldSetter('threadsById');
   const setThreadNextCursorById = useDesktopShellFieldSetter('threadNextCursorById');
   const setThreadLoadingMoreById = useDesktopShellFieldSetter('threadLoadingMoreById');
+  const setThreadUnavailableById = useDesktopShellFieldSetter('threadUnavailableById');
   const setCommunityNodeStatuses = useDesktopShellFieldSetter('communityNodeStatuses');
   const setMediaObjectUrls = useDesktopShellFieldSetter('mediaObjectUrls');
   const setSyncStatus = useDesktopShellFieldSetter('syncStatus');
@@ -382,11 +387,13 @@ export function useDesktopShellData({
         return next;
       });
       setPendingTimelineNextCursorByKey(removeRecordEntry(key));
+      setPendingTimelineUnavailableByKey(removeRecordEntry(key));
     },
     [
       setPendingTimelineCountsByKey,
       setPendingTimelineNextCursorByKey,
       setPendingTimelineSnapshotsByKey,
+      setPendingTimelineUnavailableByKey,
     ]
   );
 
@@ -408,6 +415,7 @@ export function useDesktopShellData({
       }
       const currentTimelinePosts = currentState.timelinesByKey[key] ?? EMPTY_POSTS;
       const pendingCursor = currentState.pendingTimelineNextCursorByKey[key] ?? null;
+      const pendingUnavailable = currentState.pendingTimelineUnavailableByKey[key];
       // refresh と同じ判定で、表示中の古い行を残すかを決める(#1239、#1274)。refresh が読み進めた位置を残したとき、
       // 保留の続きの位置は保留中の先頭のページより先にある。判定が refresh と食い違うと、表示と続きの位置が
       // 食い違う(行が消える、または順序が崩れる)。
@@ -426,6 +434,10 @@ export function useDesktopShellData({
             preserveOlderPages
           )));
         setTimelineNextCursorByKey(setRecordEntry(key, pendingCursor));
+        // 読んだ範囲を捨てるときは、保留した先頭のページの数に置き換える(#1239 AC-4、独立監査 B2)。
+        if (!preserveOlderPages) {
+          setTimelineUnavailableByKey(setRecordEntry(key, pendingUnavailable ?? 0));
+        }
       });
       clearPendingTimeline(key);
       return true;
@@ -433,6 +445,7 @@ export function useDesktopShellData({
     [
       clearPendingTimeline,
       setTimelineNextCursorByKey,
+      setTimelineUnavailableByKey,
       setTimelinesByKey,
       storeApi,
     ]
@@ -520,6 +533,9 @@ export function useDesktopShellData({
             setPendingTimelineSnapshotsByKey(setRecordEntry(timelineKey, normalizedTimelineItems));
             setPendingTimelineCountsByKey(setRecordEntry(timelineKey, pendingCount));
             setPendingTimelineNextCursorByKey(setRecordEntry(timelineKey, resolvedTimelineCursor));
+            setPendingTimelineUnavailableByKey(
+              setRecordEntry(timelineKey, timeline.unavailable_count ?? 0)
+            );
           } else {
             setTimelinesByKey(updateRecordEntry(timelineKey, (prev) => mergeRefreshedVisiblePosts(
                 prev ?? EMPTY_POSTS,
@@ -527,6 +543,12 @@ export function useDesktopShellData({
                 preserveTimelinePages
               )));
             setTimelineNextCursorByKey(setRecordEntry(timelineKey, resolvedTimelineCursor));
+            // 読んだ範囲を残すときは、その範囲の数も残す(#1239 AC-4)。
+            if (!preserveTimelinePages) {
+              setTimelineUnavailableByKey(
+                setRecordEntry(timelineKey, timeline.unavailable_count ?? 0)
+              );
+            }
             clearPendingTimeline(timelineKey);
           }
         }
@@ -557,6 +579,11 @@ export function useDesktopShellData({
           setTimelineNextCursorByKey(
             setRecordEntry(publicTimelineKey, resolvedPublicTimelineCursor)
           );
+          if (!preservePublicTimelinePages) {
+            setTimelineUnavailableByKey(
+              setRecordEntry(publicTimelineKey, publicTimeline.unavailable_count ?? 0)
+            );
+          }
         }
 
         if (joinedChannelsResult.status === 'fulfilled') {
@@ -601,6 +628,11 @@ export function useDesktopShellData({
               ),
             }));
             setThreadNextCursorById(setRecordEntry(currentThread, resolvedThreadCursor));
+            if (!preserveThreadPages) {
+              setThreadUnavailableById(
+                setRecordEntry(currentThread, threadView?.unavailable_count ?? 0)
+              );
+            }
           }
         }
 
@@ -621,9 +653,12 @@ export function useDesktopShellData({
       setPendingTimelineCountsByKey,
       setPendingTimelineNextCursorByKey,
       setPendingTimelineSnapshotsByKey,
+      setPendingTimelineUnavailableByKey,
       setThreadsById,
       setThreadNextCursorById,
+      setThreadUnavailableById,
       setTimelineNextCursorByKey,
+      setTimelineUnavailableByKey,
       setTimelinesByKey,
       storeApi,
       translate,
@@ -656,6 +691,7 @@ export function useDesktopShellData({
         startTransition(() => {
           setTimelinesByKey(updateRecordEntry(timelineKey, (prev) => mergeUniquePosts(prev ?? EMPTY_POSTS, timeline.items)));
           setTimelineNextCursorByKey(setRecordEntry(timelineKey, timeline.next_cursor ?? null));
+          setTimelineUnavailableByKey(setRecordEntry(timelineKey, timeline.unavailable_count ?? 0));
         });
       } finally {
         setTimelineLoadingMoreByKey(setRecordEntry(timelineKey, false));
@@ -665,6 +701,7 @@ export function useDesktopShellData({
       api,
       setTimelineLoadingMoreByKey,
       setTimelineNextCursorByKey,
+      setTimelineUnavailableByKey,
       setTimelinesByKey,
       storeApi,
     ]
@@ -686,6 +723,7 @@ export function useDesktopShellData({
             [threadId]: mergeUniquePosts(current[threadId] ?? [], threadView.items),
           }));
           setThreadNextCursorById(setRecordEntry(threadId, threadView.next_cursor ?? null));
+          setThreadUnavailableById(setRecordEntry(threadId, threadView.unavailable_count ?? 0));
         });
       } finally {
         setThreadLoadingMoreById(setRecordEntry(threadId, false));
@@ -696,6 +734,7 @@ export function useDesktopShellData({
       setThreadsById,
       setThreadLoadingMoreById,
       setThreadNextCursorById,
+      setThreadUnavailableById,
       storeApi,
     ]
   );
