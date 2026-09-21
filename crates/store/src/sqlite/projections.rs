@@ -1,5 +1,196 @@
 use super::*;
 
+const TIMELINE_SELECT: &str = r#"
+    SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
+           reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
+           repost_of_json, content_labels_json, source_replica_id, source_key,
+           source_envelope_id, source_blob_hash, derived_at, projection_version,
+           source_docs_author
+"#;
+
+const THREAD_SELECT: &str = r#"
+    SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
+           oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
+           oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
+           oic.content_labels_json, oic.source_replica_id, oic.source_key,
+           oic.source_docs_author, oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
+           oic.projection_version
+    FROM object_thread_cache tc
+    INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
+"#;
+
+/// cursor より古い行だけを読む条件を足す(#1239)。
+///
+/// 行の値の比較で書く。`created_at < ? OR (created_at = ? AND object_id < ?)` の形や、`? IS NULL OR …` と
+/// 1 つの SQL にまとめた形は、索引の範囲の読み出しにならず、遡った深さに比例して行を読み飛ばす。
+fn push_timeline_cursor(builder: &mut QueryBuilder<'_, Sqlite>, cursor: Option<&TimelineCursor>) {
+    if let Some(cursor) = cursor {
+        builder.push(" AND (created_at, object_id) < (");
+        builder.push_bind(cursor.created_at);
+        builder.push(", ");
+        builder.push_bind(cursor.object_id.as_str().to_string());
+        builder.push(")");
+    }
+}
+
+/// タイムラインの 1 ページを読む SQL を組み立てる。`allowed_channels` が `None` なら channel で絞らない。
+///
+/// `prefix` は SQL の前に置く文字列(取得は空、query plan の test は `EXPLAIN QUERY PLAN `)。test が実装と同じ
+/// SQL の plan を確かめられるように、組み立てをここに 1 つだけ置く。
+pub(crate) fn timeline_page_query<'a>(
+    prefix: &str,
+    topic_id: &'a str,
+    allowed_channels: Option<&'a std::collections::BTreeSet<String>>,
+    cursor: Option<&TimelineCursor>,
+    limit: usize,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    builder.push(TIMELINE_SELECT);
+    let channels = allowed_channels
+        .map(|channels| channels.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    match channels.as_slice() {
+        // 空の集合を渡されたら、何も読まない(channel で絞らない、にしない)。
+        [] if allowed_channels.is_some() => {
+            builder.push(" FROM object_index_cache WHERE 0 AND topic_id = ");
+            builder.push_bind(topic_id);
+        }
+        [] => {
+            builder.push(" FROM object_index_cache WHERE topic_id = ");
+            builder.push_bind(topic_id);
+        }
+        // channel が 1 つなら、(topic, channel, 時刻, id) の索引の範囲をそのまま読める。
+        [channel_id] => {
+            builder.push(" FROM object_index_cache WHERE topic_id = ");
+            builder.push_bind(topic_id);
+            builder.push(" AND channel_id = ");
+            builder.push_bind(channel_id.as_str());
+        }
+        // 複数の channel を時刻順に読むときは、(topic, 時刻, id) の索引を時刻順にたどって channel で絞る
+        // (索引を明示して、条件に合う全行を集めて並べ替える plan を選ばせない)。
+        _ => {
+            builder.push(
+                " FROM object_index_cache INDEXED BY idx_object_index_cache_topic_created_all WHERE topic_id = ",
+            );
+            builder.push_bind(topic_id);
+            builder.push(" AND channel_id IN (");
+            let mut separated = builder.separated(", ");
+            for channel_id in channels {
+                separated.push_bind(channel_id.as_str());
+            }
+            separated.push_unseparated(")");
+        }
+    }
+    push_timeline_cursor(&mut builder, cursor);
+    builder.push(" ORDER BY created_at DESC, object_id DESC LIMIT ");
+    builder.push_bind(limit as i64);
+    builder
+}
+
+/// thread の root の行を 1 行引く SQL(`after` が `None`)、または返信の範囲を読む SQL を組み立てる。
+pub(crate) fn thread_page_query<'a>(
+    prefix: &str,
+    topic_id: &'a str,
+    root_id: &'a str,
+    channel_id: Option<&'a str>,
+    part: ThreadPagePart<'_>,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    builder.push(THREAD_SELECT);
+    builder.push(" WHERE tc.topic_id = ");
+    builder.push_bind(topic_id);
+    builder.push(" AND tc.root_object_id = ");
+    builder.push_bind(root_id);
+    if let Some(channel_id) = channel_id {
+        builder.push(" AND tc.channel_id = ");
+        builder.push_bind(channel_id);
+    }
+    match part {
+        ThreadPagePart::Root => {
+            builder.push(" AND tc.object_id = ");
+            builder.push_bind(root_id);
+        }
+        ThreadPagePart::Replies { after, limit } => {
+            builder.push(" AND tc.object_id != ");
+            builder.push_bind(root_id);
+            if let Some(after) = after {
+                builder.push(" AND (tc.created_at, tc.object_id) > (");
+                builder.push_bind(after.created_at);
+                builder.push(", ");
+                builder.push_bind(after.object_id.as_str().to_string());
+                builder.push(")");
+            }
+            builder.push(" ORDER BY tc.created_at ASC, tc.object_id ASC LIMIT ");
+            builder.push_bind(limit as i64);
+        }
+    }
+    builder
+}
+
+pub(crate) enum ThreadPagePart<'a> {
+    Root,
+    Replies {
+        after: Option<&'a TimelineCursor>,
+        limit: usize,
+    },
+}
+
+impl SqliteStore {
+    /// thread の 1 ページ(root が先頭、返信は古い順)。
+    ///
+    /// 返信は `object_thread_cache` の (topic, root, 時刻, id) の索引の範囲を、cursor の位置から読む。root を先頭に
+    /// 置くために全行を並べ替える形(`ORDER BY CASE …`)にすると、1 ページの取得が thread の返信の総数に比例する。
+    /// root は最初のページでだけ 1 行引きし、返信の範囲からは除く。
+    async fn thread_page(
+        &self,
+        topic_id: &str,
+        thread_root_object_id: &EnvelopeId,
+        channel_id: Option<&str>,
+        cursor: Option<TimelineCursor>,
+        limit: usize,
+    ) -> Result<Page<ObjectProjectionRow>> {
+        if limit == 0 {
+            return Ok(Page {
+                items: Vec::new(),
+                next_cursor: cursor,
+            });
+        }
+        let root_id = thread_root_object_id.as_str();
+        // root を返すのは、cursor の無い最初のページだけ。root の位置の cursor は「返信の先頭から」を表す
+        // (返信の時刻が root より前でも、時計のずれで飛ばさない)。
+        let first_page = cursor.is_none();
+        let after = cursor.filter(|cursor| cursor.object_id.as_str() != root_id);
+        let mut rows = Vec::new();
+        if first_page {
+            rows.extend(
+                thread_page_query("", topic_id, root_id, channel_id, ThreadPagePart::Root)
+                    .build()
+                    .fetch_all(&self.pool)
+                    .await?,
+            );
+        }
+        let remaining = limit.saturating_sub(rows.len());
+        if remaining > 0 {
+            rows.extend(
+                thread_page_query(
+                    "",
+                    topic_id,
+                    root_id,
+                    channel_id,
+                    ThreadPagePart::Replies {
+                        after: after.as_ref(),
+                        limit: remaining,
+                    },
+                )
+                .build()
+                .fetch_all(&self.pool)
+                .await?,
+            );
+        }
+        object_projection_page_from_rows(rows, limit)
+    }
+}
+
 #[async_trait]
 impl ObjectProjectionStore for SqliteStore {
     async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
@@ -225,31 +416,10 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
-                   reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
-                   repost_of_json, content_labels_json, source_replica_id, source_key,
-                   source_envelope_id, source_blob_hash, derived_at, projection_version,
-                   source_docs_author
-            FROM object_index_cache
-            WHERE topic_id = ?1
-              AND (
-                ?2 IS NULL
-                OR created_at < ?2
-                OR (created_at = ?2 AND object_id < ?3)
-              )
-            ORDER BY created_at DESC, object_id DESC
-            LIMIT ?4
-            "#,
-        )
-        .bind(topic_id)
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
+        let rows = timeline_page_query("", topic_id, None, cursor.as_ref(), limit)
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
         object_projection_page_from_rows(rows, limit)
     }
 
@@ -266,51 +436,11 @@ impl ObjectProjectionStore for SqliteStore {
                 next_cursor: cursor,
             });
         }
-
-        let mut builder = QueryBuilder::<Sqlite>::new(
-            r#"
-            SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
-                   reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
-                   repost_of_json, content_labels_json, source_replica_id, source_key,
-                   source_envelope_id, source_blob_hash, derived_at, projection_version,
-                   source_docs_author
-            FROM object_index_cache
-            WHERE topic_id = "#,
-        );
-        builder.push_bind(topic_id);
-        builder.push(" AND channel_id IN (");
-        let mut separated = builder.separated(", ");
-        for channel_id in allowed_channels {
-            separated.push_bind(channel_id);
-        }
-        separated.push_unseparated(")");
-        builder.push(
-            r#"
-              AND (
-                "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(
-            r#" IS NULL
-                OR created_at < "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(
-            r#"
-                OR (created_at = "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(" AND object_id < ");
-        builder.push_bind(cursor.as_ref().map(|value| value.object_id.as_str()));
-        builder.push(
-            r#")
-              )
-            ORDER BY created_at DESC, object_id DESC
-            LIMIT "#,
-        );
-        builder.push_bind(limit as i64);
-
-        let rows = builder.build().fetch_all(&self.pool).await?;
+        let rows =
+            timeline_page_query("", topic_id, Some(allowed_channels), cursor.as_ref(), limit)
+                .build()
+                .fetch_all(&self.pool)
+                .await?;
         object_projection_page_from_rows(rows, limit)
     }
 
@@ -321,39 +451,8 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
-                   oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
-                   oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
-                   oic.content_labels_json, oic.source_replica_id, oic.source_key,
-                   oic.source_docs_author, oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
-                   oic.projection_version
-            FROM object_thread_cache tc
-            INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
-            WHERE tc.topic_id = ?1
-              AND tc.root_object_id = ?2
-              AND (
-                ?3 IS NULL
-                OR oic.created_at > ?3
-                OR (oic.created_at = ?3 AND oic.object_id > ?4)
-              )
-            ORDER BY
-              CASE WHEN oic.object_id = tc.root_object_id THEN 0 ELSE 1 END ASC,
-              oic.created_at ASC,
-              oic.object_id ASC
-            LIMIT ?5
-            "#,
-        )
-        .bind(topic_id)
-        .bind(thread_root_object_id.as_str())
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        object_projection_page_from_rows(rows, limit)
+        self.thread_page(topic_id, thread_root_object_id, None, cursor, limit)
+            .await
     }
 
     async fn list_thread_filtered(
@@ -364,52 +463,14 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let Some(channel_id) = allowed_channel else {
-            return ObjectProjectionStore::list_thread(
-                self,
-                topic_id,
-                thread_root_object_id,
-                cursor,
-                limit,
-            )
-            .await;
-        };
-
-        let rows = sqlx::query(
-            r#"
-            SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
-                   oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
-                   oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
-                   oic.content_labels_json, oic.source_replica_id, oic.source_key,
-                   oic.source_docs_author, oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
-                   oic.projection_version
-            FROM object_thread_cache tc
-            INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
-            WHERE tc.topic_id = ?1
-              AND tc.root_object_id = ?2
-              AND tc.channel_id = ?3
-              AND (
-                ?4 IS NULL
-                OR oic.created_at > ?4
-                OR (oic.created_at = ?4 AND oic.object_id > ?5)
-              )
-            ORDER BY
-              CASE WHEN oic.object_id = tc.root_object_id THEN 0 ELSE 1 END ASC,
-              oic.created_at ASC,
-              oic.object_id ASC
-            LIMIT ?6
-            "#,
+        self.thread_page(
+            topic_id,
+            thread_root_object_id,
+            allowed_channel,
+            cursor,
+            limit,
         )
-        .bind(topic_id)
-        .bind(thread_root_object_id.as_str())
-        .bind(channel_id)
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        object_projection_page_from_rows(rows, limit)
+        .await
     }
 
     async fn rebuild_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {

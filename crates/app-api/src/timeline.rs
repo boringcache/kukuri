@@ -767,6 +767,7 @@ impl AppService {
             .await;
         let restart_after_empty = had_topic_subscription
             && page.items.is_empty()
+            && page.next_cursor.is_none()
             && self
                 .should_restart_after_empty_result(empty_recovery_key.as_str())
                 .await;
@@ -783,7 +784,7 @@ impl AppService {
             }
             // 照合した範囲に、最初のページより多くの object が projection に在ると分かったときだけ、ページを
             // 読み直す(今回反映した、または購読タスクが同じ範囲を先に反映していた)。それ以外は読み直さない。
-            if reconcile.page_is_stale(page.items.len()) {
+            if reconcile.page_is_stale(page.items.len(), !hidden_author_pubkeys.is_empty()) {
                 page = filtered_timeline_page(
                     self.services.projection_store.as_ref(),
                     topic_id,
@@ -844,6 +845,7 @@ impl AppService {
         // #1225: `list_timeline_scoped` と同じく、本文が欠けた行は復旧の理由にしない。
         let restart_after_empty = had_topic_subscription
             && page.items.is_empty()
+            && page.next_cursor.is_none()
             && self
                 .should_restart_after_empty_result(empty_recovery_key.as_str())
                 .await;
@@ -853,7 +855,8 @@ impl AppService {
         let reconcile = self
             .reconcile_thread_checked(topic_id, &thread_root, cursor.as_ref(), limit)
             .await?;
-        let page_is_stale = reconcile.page_is_stale(page.items.len());
+        let page_is_stale =
+            reconcile.page_is_stale(page.items.len(), !hidden_author_pubkeys.is_empty());
         if page_is_stale || page.items.is_empty() {
             if reconcile.hydrated > 0 {
                 *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());

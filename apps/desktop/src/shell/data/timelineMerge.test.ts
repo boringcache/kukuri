@@ -12,6 +12,10 @@ import type { PostView } from '@/lib/api';
 
 import { buildPaginatedPost } from '../DesktopShellPage.testHelpers';
 import {
+  cursorIsBeyond,
+  cursorIsBeyondVisiblePosts,
+  hasReadPastHeadPage,
+  headPageReachesVisiblePosts,
   hasLoadedOlderAuthoritativePosts,
   mergeRefreshedVisiblePosts,
   mergeUniquePosts,
@@ -317,3 +321,81 @@ describe('mergeRefreshedVisiblePosts', () => {
     expect(result[0]?.created_at).toBe(111);
   });
 });
+
+describe('cursorIsBeyond', () => {
+  const at = (created_at: number, object_id: string) => ({ created_at, object_id });
+
+  test('新しい順のページでは、古い位置が先', () => {
+    expect(cursorIsBeyond(at(90, 'b'), at(100, 'a'), 'desc')).toBe(true);
+    expect(cursorIsBeyond(at(100, 'a'), at(100, 'b'), 'desc')).toBe(true);
+    expect(cursorIsBeyond(at(110, 'a'), at(100, 'a'), 'desc')).toBe(false);
+    expect(cursorIsBeyond(at(100, 'b'), at(100, 'a'), 'desc')).toBe(false);
+  });
+
+  test('古い順のページでは、新しい位置が先', () => {
+    expect(cursorIsBeyond(at(110, 'a'), at(100, 'b'), 'asc')).toBe(true);
+    expect(cursorIsBeyond(at(100, 'b'), at(100, 'a'), 'asc')).toBe(true);
+    expect(cursorIsBeyond(at(90, 'z'), at(100, 'a'), 'asc')).toBe(false);
+  });
+
+  test('同じ位置と、どちらかが無いときは先ではない', () => {
+    expect(cursorIsBeyond(at(100, 'a'), at(100, 'a'), 'desc')).toBe(false);
+    expect(cursorIsBeyond(null, at(100, 'a'), 'desc')).toBe(false);
+    // 先頭のページに続きが無いとき(全件が 1 ページに収まる)は、古い位置を残さない。
+    expect(cursorIsBeyond(at(90, 'a'), null, 'desc')).toBe(false);
+  });
+});
+
+describe('hasReadPastHeadPage', () => {
+  const at = (created_at: number, object_id: string) => ({ created_at, object_id });
+  const row = (object_id: string, created_at: number) =>
+    post(object_id, { created_at, local_state: null });
+
+  test('新着で先頭のページの続きの位置が動いただけなら、読み進めたとはみなさない', () => {
+    const visible = [row('r1', 30), row('r2', 20), row('r3', 10)];
+    const incoming = [row('n1', 40), row('r1', 30), row('r2', 20)];
+    // 保存している続きの位置は、表示中の最後の行(r3)。先頭のページの続きの位置は r2 へ動いた。
+    expect(hasReadPastHeadPage(visible, incoming, at(10, 'r3'), at(20, 'r2'), 'desc')).toBe(false);
+  });
+
+  test('行を増やさずに読み進めた位置は残す', () => {
+    // 表示できる行が 0 件のまま、続きの位置だけが進んだ。
+    expect(hasReadPastHeadPage([], [], at(5, 'hidden-4'), at(9, 'hidden-1'), 'desc')).toBe(true);
+    // 表示中の行はあるが、続きの位置はその先まで進んだ。
+    expect(
+      hasReadPastHeadPage([row('a', 30)], [row('a', 30)], at(5, 'hidden-4'), at(9, 'hidden-1'), 'desc')
+    ).toBe(true);
+  });
+
+  test('先頭のページと表示中の行のあいだに新着の隙間があれば、読み進めた位置を残さない', () => {
+    // 表示中は r1 だけ。その先を読み進めた後に、1 ページ(3 行)を超える新着が届いた。
+    const visible = [row('r1', 10)];
+    const incoming = [row('n1', 40), row('n2', 30), row('n3', 20)];
+    expect(headPageReachesVisiblePosts(visible, incoming)).toBe(false);
+    expect(hasReadPastHeadPage(visible, incoming, at(1, 'h9'), at(20, 'n3'), 'desc')).toBe(false);
+    // 新着が 1 ページに収まり、先頭のページが表示中の行と重なれば、位置を残す。
+    const reaching = [row('n1', 40), row('n2', 30), row('r1', 10)];
+    expect(headPageReachesVisiblePosts(visible, reaching)).toBe(true);
+    expect(hasReadPastHeadPage(visible, reaching, at(1, 'h9'), at(10, 'r1'), 'desc')).toBe(true);
+    // 先頭のページに新しい行が無ければ(非表示の範囲の途中)、あいだは無い。
+    expect(headPageReachesVisiblePosts([], [])).toBe(true);
+  });
+
+  test('thread は古い順', () => {
+    expect(
+      hasReadPastHeadPage([row('root', 1)], [row('root', 1)], at(321, 'hidden-4'), at(81, 'hidden-1'), 'asc')
+    ).toBe(true);
+    expect(cursorIsBeyondVisiblePosts(at(1, 'root'), [row('root', 1)], 'asc')).toBe(false);
+  });
+
+  test('local の投稿は、表示中の位置に数えない', () => {
+    expect(
+      cursorIsBeyondVisiblePosts(
+        at(10, 'r3'),
+        [post('local-1', { created_at: 5, local_state: 'pending' })],
+        'desc'
+      )
+    ).toBe(true);
+  });
+});
+

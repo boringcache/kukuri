@@ -485,3 +485,102 @@ T4b-2 は PR #1267（merge commit `323be894`）で完了した。独立監査は
   索引の entry を書かない fixture は、追いつきが索引から読むので、索引の entry を足した。
 - PR #1267 の監査が「直接の test が無い」とした経路の test を足した（`session_catch_up.rs`）: session の追いつき、取りこぼしの後の reaction の読み直し、hint からの依頼、
   同期の終わりの通知が伸びた間隔を待つこと。
+
+## T5b-2: ページの取得の上限と、索引の範囲の読み出し（基準 commit `7f19158d`）
+
+T5b-1 は PR #1268（merge commit `7f19158d`）で完了した。独立監査は PASS、必須 CI は全 job 成功。
+
+- PR #1268 の監査の non-blocker: 監査の test 4 本（session の一覧の間隔、`game-` の降順、固定件数と読む量、live の「viewer が 0」の分岐）を恒久化し、全件走査の削除の後に残っていたコメントと inventory の列挙方法を直した。
+- Q-2（`filtered_timeline_page`・`filtered_thread_page`）: 非表示の著者の行を除いて `limit` 件集まるまで、上限なくページを読み続けていた。読むページ数に上限（4）を置き、届かなかったときは集まった分と読み進めた位置を返す。
+  `limit` 件に届いたときの `next_cursor` がページの末尾を指していて、`limit` が 20 未満のときに同じページの残りの行を飛ばしていた点も直した。
+  test `hidden_author_rows_are_skipped_with_a_bounded_number_of_pages`、`next_cursor_points_at_the_last_returned_row`。
+- Q-1（`crates/store/src/sqlite/projections.rs`）: cursor の条件が `? IS NULL OR created_at < ? OR (…)` の形で、索引の範囲の読み出しにならなかった。行の値の比較にし、cursor の有無で SQL を分けた。
+  thread は `ORDER BY CASE …`（root を先頭に置くための並べ替え）が全行の並べ替えを強いていた（1 ページの取得が thread の返信の総数に比例する）。root は最初のページでだけ 1 行引きし、
+  返信は `object_thread_cache` の索引の範囲を読む。test `page_queries_are_index_range_reads`（`EXPLAIN QUERY PLAN` に並べ替えの一時的な木が出ないこと）、
+  `thread_pages_list_the_root_first_and_every_reply_once`（root の時刻が返信より後でも、全行を 1 回ずつ読める）、`timeline_pages_list_every_row_once_for_each_channel_filter`。
+- 照合が非表示の著者の行を「projection に在る」と数えるので、非表示の著者の投稿がある範囲では照合のたびにページを読み直していた。ページが行を除いて作られているときは、今回反映したときだけ読み直す。
+- 1 回の照合・追いつきが reaction を読む投稿の数に上限（64）を置いた（PR #1267 の監査の N-3 のうち、最悪の読み出し回数）。test `one_reconcile_reads_the_reactions_of_a_bounded_number_of_posts`。
+
+### 残した事項
+
+- view の生成に残る docs の key 指定の読み出し（V-1: 返信先が projection に無いときの 1 回の `LocalOnly` の読み出し）と、TR-6 の画面側（遡って取得できなかった範囲の表示）は、この段階では変えていない。
+  どちらも総件数には依存しない。T7 の統合確認で、Issue の AC との対応を整理する。
+- 追いつきが走っているあいだ購読タスクが event を消費しない点は、1 回の追いつきの量を定数で抑えたうえで残している。
+- 32 件を超える reaction の背景の backfill は入れていない（best effort。ADR 0052 §2）。
+
+### 独立監査の 1 回目（対象 `fd56636d`、FAIL）と修正
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| mute した著者の投稿が新しい側に 80 件（4 ページ × 20 行）以上続くと、タイムラインが空の表示になり、その先の表示できる投稿へ進めない（以前は、上限なく読み飛ばして表示できる投稿を返していた） | 取得は「空の items + `next_cursor`」を返すが、`TimelineFeed` と `ThreadTree` は、行が 0 件のとき空の文言だけを描き、続きを読む手段（sentinel も button も）を描かなかった | 行が 0 件でも `hasMore` のあいだは、続きを読む手段を描く。Vitest `TimelineFeed.emptyWithCursor.test.tsx`（監査の再現 test を恒久化）、`ThreadTree.emptyWithCursor.test.tsx` |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- query plan の test が SQL を書き写していて、実装の SQL を確かめていなかった（thread を `ORDER BY CASE …` へ戻す mutation が生き残った）。SQL の組み立てを関数（`timeline_page_query`・`thread_page_query`）に分け、
+  取得と test が同じ関数を使う形にした。cursor の無い形と root の 1 行引きも対象に入れた。thread の並べ替えを戻す mutation で失敗することを確認した。
+- reaction を読む投稿の数の上限が、照合の batch ごとに効いていた。照合 1 回・追いつき 1 回あたりで数える形にした（取り下げの反映は枠を消費しない）。test `one_catch_up_reads_the_reactions_of_a_bounded_number_of_posts`。
+- thread のページ数の上限の test（`hidden_author_replies_are_skipped_with_a_bounded_number_of_pages`）。
+- `MemoryStore` の thread のページを `SqliteStore` と同じ意味に合わせ、同じ test を両方の store で走らせる。
+- 続きのある空のページ（非表示の著者の範囲の途中）を、購読と再 sync の再起動の理由にしない。
+
+残した non-blocker: `timeline.rs` が `rows_may_be_hidden` を渡すことの結合 test（判定式は単体 test で固定）、root の位置の cursor での thread の照合（`limit` 1 のときだけ）、
+非表示の著者がいる利用者の、同じ呼び出しの中での購読タスクとの競合（次の取得で解消する）。
+
+### 独立監査の 2 回目（delta `fd56636d..7c2b3b0d`、FAIL）と修正
+
+2 回目の監査は、Fable の利用上限で中断したため、Opus 5 の監査人が引き継いだ。この delta の修正（SQL の組み立ての関数化、reaction の上限の数え方、`MemoryStore` の thread、再起動の条件）は、
+いずれも主張どおりに動くことを確かめたうえで、B-1 の残りを blocker として FAIL だった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| 画面は行が 0 件でも続きを読むようになったが、表示できる行が 0 件のあいだは、3 秒ごとの refresh（buffer）が、読み進めた cursor を先頭のページの cursor に戻す。非表示の著者の範囲が長いと、その先の投稿へ届かない | refresh が「読み進めたか」を、表示中の行数が先頭のページの行数より多いか（`hasLoadedOlderAuthoritativePosts`）だけで判定していた。行が 0 件のまま読み進めると、判定が偽になる | 表示中の続きの位置が、先頭のページの続きの位置より先へ進んでいれば、読み進めたとみなす（`cursorIsBeyond`。タイムラインは新しい順、thread は古い順）。Vitest `useDesktopShellData.emptyCursorRefresh.test.tsx`（監査の再現 test を恒久化。thread の fixture は、実際の並びに合わせて cursor を古い順に進める形に直した）、`timelineMerge.test.ts` の単体 test |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- query plan の test が、cursor の位置が索引の範囲の条件に入っていることを確かめていなかった（cursor の条件を OR の形へ戻す mutation が生き残った）。plan の検索条件に `(created_at,object_id)<(?,?)` が入ることを確かめる。
+- `timeline_page_query` が、空の channel 集合を「channel で絞らない」と扱っていた（唯一の caller が先に弾くので、いまは漏れない）。空の集合なら何も読まない。test `an_empty_channel_set_reads_nothing`。
+- ADR 0052 §5 の reaction の上限の文言を、replica ごとに数える実装に合わせた。
+
+### 独立監査の 3 回目（delta `7c2b3b0d..f9a591c8`、FAIL）と修正
+
+2 回目の blocker（行が 0 件のまま読み進めた cursor を refresh が先頭へ戻す）は解消したが、その修正が新しい Regression を生んでいた。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| 読み進めていない利用者に新着が届き、新着の banner を適用すると、続きの読み込みが投稿を黙って飛ばす（新着が k 件なら k 行） | 新着が届くと先頭のページの続きの位置は新しい側へ動く。「保存している続きの位置が、先頭のページの続きの位置より先か」だけで判定したので、読み進めていないのに古い位置を残した。banner の適用は表示を先頭のページに置き換えるので、押し出された行が抜けた | 読み進めたとみなすのは、行を読み足したとき（以前からの行数の判定）か、保存している続きの位置が、先頭のページの続きの位置より先で、かつ表示中の最後の行より先にあるとき（行を増やさずに読み進めた）だけ（`hasReadPastHeadPage`）。Vitest `useDesktopShellData.newPostGap.test.tsx`（監査の再現 test を恒久化）、`timelineMerge.test.ts` の単体 test。判定の片方を外す mutation で、それぞれ対応する test が失敗することを確認した |
+
+教訓: 画面の続きの位置を残す判定は、「続きの位置がどこか」だけでなく「表示中の行との関係」で決める。先頭のページの位置は、新着で動く。
+
+### 独立監査の 4 回目（delta `f9a591c8..a8ac94aa`、FAIL）と修正
+
+3 回目の blocker（新着だけで読み進めたとみなす）は解消したが、同じ仕組みの別の形が残っていた。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| 表示できる行の先で非表示の著者の範囲を読み進めた後に新着を適用すると、表示していた行が 1 つ消え、遡っても戻らない | refresh は読み進めた位置を保留の続きの位置として残すが、新着の適用（`applyPendingTimeline`）は、古い行を残すかを行数だけで判定していた。表示は先頭のページに置き換わり、続きの読み込みは読み進めた位置から始まる | 保留の続きの位置が、保留中の先頭のページの最後の行より先なら（refresh が読み進めた位置を残した）、新着の適用も古い行を残して merge する。Vitest `useDesktopShellData.readPastThenNewPost.test.tsx`（監査の再現 test を恒久化） |
+
+画面側の続きの位置の扱いは、同じ仕組みの別の形で 3 回続けて blocker になった。個別の再現 test に加えて、操作の組み合わせを乱数で作る test を足した
+（`useDesktopShellData.paginationModel.test.tsx`。backend は非表示の著者の読み飛ばしの上限と `next_cursor` の規則を真似た model。続きの読み込み・新着・周期の refresh・新着の適用を 150 通りの順に重ね、
+最後まで読むと表示できる投稿がすべて 1 回ずつ、新しい順に出ることを確かめる）。今回の修正を戻すと 18 通り、2 回目の修正を戻すと 24 通りで失敗する。
+3 回目の修正（refresh 側の判定）を戻しても通るのは、今回の修正（新着の適用側の判定）が同じ形を防ぐため。refresh 側の判定は二重の守りとして残した。
+
+この test は、前回の新着の適用から 1 ページを超える数の新着をためる形を作らない。その形では、新着の一部が表示されない。
+画面の code を main の版に戻し、読み飛ばしの上限の無い backend の model でも同じ seed で欠けるので、#1239 より前からの挙動で、#1274 として起票した。
+
+### 独立監査の 5 回目（delta `a8ac94aa..0468aa60`、FAIL）と修正
+
+4 回目の blocker（読み進めた後の新着の適用で行が消える）は解消したが、表示できる行が少ない状態で非表示の範囲を読み進めた後、1 ページを超える新着が届くと、
+先頭のページと表示中の行のあいだの新着が恒久的に欠けた（B-4。main では、refresh が続きの位置を先頭のページへ戻すので起きない）。
+
+画面側の続きの位置の扱いは、同じ仕組みの別の形で 4 回続けて blocker になった。場当たりの修正を重ねず、原則を 1 つにした。
+
+- 表示は「先頭から続きの位置まで」を欠けなく並べたもの。周期の refresh（選択中の scope と公開の scope）と新着の適用は、同じ判定 `hasReadPastHeadPage` で、表示中の古い行と続きの位置を残すかを決める。
+- 残すのは、先頭のページと表示中の行のあいだに読んでいない行が無く（`headPageReachesVisiblePosts`: 先頭のページに新しい行が無いか、表示中の行と重なる）、かつ先頭のページより先を読んでいるとき
+  （行を読み足した、または行を増やさずに読み進めた）だけ。
+- あいだがあるとき（1 ページを超える数の新着）は、先頭のページから読み直す。読んだ範囲は読み直しになるが、行は欠けず、順序も崩れない。
+  これで、以前からの「1 ページを超える新着の一部が表示されない」（#1274）も直る。以前は行数だけで古い行を残していた。
+
+組み合わせの test（`useDesktopShellData.paginationModel.test.tsx`）は、新着をためる形の制限を外し、150 通りすべてで、最後まで読むと表示できる投稿がすべて 1 回ずつ、新しい順に出る。
+判定の各部分を外す mutation はすべて検出される（隙間の判定を外すと 32 通り、新着の適用を行数だけにすると 31 通り、続きの位置の判定を外すと 25 通りで失敗。表示中の行との比較を外すと単体 test が失敗）。
+監査の再現 test `useDesktopShellData.hiddenHeadManyNew.test.tsx` を恒久化した。
+

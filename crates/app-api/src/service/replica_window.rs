@@ -25,6 +25,9 @@ pub(crate) const RANGE_CHECK_STALLED_MAX_INTERVAL_MS: i64 = 300_000;
 pub(crate) const RANGE_CHECK_LEDGER_LIMIT: usize = 4_096;
 /// 照合が新しく反映した投稿 1 件について、一緒に反映する reaction の上限。
 pub(crate) const RANGE_CHECK_REACTIONS_PER_OBJECT: usize = 32;
+/// 1 回の照合・追いつきで、reaction を読む投稿の数の上限。超えた投稿の reaction は、その reaction の docs の
+/// event でしか入らない(best effort)。1 回の読み出しの最悪の量を抑える。
+pub(crate) const RANGE_CHECK_REACTION_TARGETS: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 struct RangeCheckState {
@@ -207,6 +210,7 @@ pub(crate) async fn ensure_index_entries_projected(
     replica: &ReplicaId,
     entries: &[TimeIndexEntry],
     policy: DocFetchPolicy,
+    reaction_targets_left: &mut usize,
 ) -> Result<RangeCheckOutcome> {
     let docs_sync = services.docs_sync.as_ref();
     let projection_store = services.projection_store.as_ref();
@@ -234,6 +238,10 @@ pub(crate) async fn ensure_index_entries_projected(
             {
                 ObjectHydration::Hydrated => {
                     outcome.hydrated += 1;
+                    if *reaction_targets_left == 0 {
+                        continue;
+                    }
+                    *reaction_targets_left -= 1;
                     // 新しく反映した投稿の reaction も、上限つきで反映する。以前は、空ページの全件走査が
                     // reaction も反映していた。docs の event が届かない古い reaction は、ここでしか入らない。
                     hydrate_reaction_cache_for_target_bounded(
@@ -296,8 +304,12 @@ impl RangeReconcile {
     /// 今回反映したときのほか、最初にページを読んでから照合するまでのあいだに、購読タスクが同じ範囲を
     /// 反映していたときも当てはまる(照合は「既にある」と数えるだけになる)。欠けの無い定常状態では読み直さない。
     /// ページの読み出しを、必要の無いときに重ねないため。
-    pub(crate) fn page_is_stale(&self, page_rows: usize) -> bool {
-        self.hydrated > 0 || self.projected > page_rows
+    ///
+    /// `rows_may_be_hidden` は、ページが行を除いて作られているとき(非表示の著者がいる)。そのときは、projection に
+    /// 在る件数がページの行数より多くても当たり前なので、今回反映したときだけ読み直す(そうしないと、非表示の
+    /// 著者の投稿がある範囲では、照合のたびにページを読み直す)。
+    pub(crate) fn page_is_stale(&self, page_rows: usize, rows_may_be_hidden: bool) -> bool {
+        self.hydrated > 0 || (!rows_may_be_hidden && self.projected > page_rows)
     }
 }
 
@@ -418,6 +430,8 @@ impl AppService {
         let mut total = RangeCheckOutcome::default();
         let mut entries_read = 0usize;
         let mut index_queries = 0usize;
+        // reaction を読む投稿の数の上限は、照合 1 回あたり(読む件数を増やして繰り返す batch の合計)。
+        let mut reaction_targets_left = RANGE_CHECK_REACTION_TARGETS;
         let mut index_exhausted = false;
         // 1 回目は、ページに要る件数だけを読む(欠けが無ければこれで終わる)。反映できない entry があって
         // 届かなかったときは、読む件数を 4 倍ずつ増やす。同じ位置からの読み直しの回数を抑えるため。
@@ -471,6 +485,7 @@ impl AppService {
                         replica,
                         &page.entries,
                         DocFetchPolicy::LocalOnly,
+                        &mut reaction_targets_left,
                     )
                     .await?,
                 );
@@ -716,21 +731,24 @@ mod tests {
             hydrated: 0,
             projected: 20,
         };
-        assert!(!steady.page_is_stale(20), "nothing changed");
+        assert!(!steady.page_is_stale(20, false), "nothing changed");
         assert!(
-            !RangeReconcile::default().page_is_stale(0),
+            !RangeReconcile::default().page_is_stale(0, false),
             "no check ran, or the index is empty"
         );
         let hydrated_now = RangeReconcile {
             hydrated: 3,
             projected: 20,
         };
-        assert!(hydrated_now.page_is_stale(17));
+        assert!(hydrated_now.page_is_stale(17, false));
+        assert!(hydrated_now.page_is_stale(17, true));
         // 最初にページを読んでから照合するまでのあいだに、購読タスクが同じ範囲を反映していた。
         let hydrated_by_someone_else = RangeReconcile {
             hydrated: 0,
             projected: 20,
         };
-        assert!(hydrated_by_someone_else.page_is_stale(0));
+        assert!(hydrated_by_someone_else.page_is_stale(0, false));
+        // 非表示の著者がいるときは、行数の差だけでは読み直さない。
+        assert!(!hydrated_by_someone_else.page_is_stale(0, true));
     }
 }

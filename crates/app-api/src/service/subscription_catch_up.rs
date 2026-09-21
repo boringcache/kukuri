@@ -7,8 +7,8 @@
 use super::game_projection_support::hydrate_game_room_from_record;
 use super::hydration_support::hydrate_live_session_from_record;
 use super::replica_window::{
-    RANGE_CHECK_REACTIONS_PER_OBJECT, TIME_INDEX_FUTURE_ALLOWANCE_SECS,
-    ensure_index_entries_projected,
+    RANGE_CHECK_REACTION_TARGETS, RANGE_CHECK_REACTIONS_PER_OBJECT,
+    TIME_INDEX_FUTURE_ALLOWANCE_SECS, ensure_index_entries_projected,
 };
 use super::*;
 use kukuri_docs_sync::{DocKeyOrder, DocKeyQuery, query_time_index_window};
@@ -174,12 +174,21 @@ pub(crate) async fn catch_up_replica_window(
             targets.push(entry.clone());
         }
     }
-    let outcome =
-        ensure_index_entries_projected(services, topic_id, replica, &targets, policy).await?;
+    // reaction を読む投稿の数の上限は、追いつき 1 回あたり(新しく反映した投稿と、読み直しの合計)。
+    let mut reaction_targets_left = RANGE_CHECK_REACTION_TARGETS;
+    let outcome = ensure_index_entries_projected(
+        services,
+        topic_id,
+        replica,
+        &targets,
+        policy,
+        &mut reaction_targets_left,
+    )
+    .await?;
     if refresh_all {
         // 取りこぼした event には reaction も含まれる。窓の object の reaction を、上限つきで読み直す
         // (新しく反映した object の reaction は、上の反映が既に読んでいる)。
-        for entry in &window.entries {
+        for entry in window.entries.iter().take(reaction_targets_left) {
             hydrate_reaction_cache_for_target_bounded(
                 docs_sync,
                 services.projection_store.as_ref(),

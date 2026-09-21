@@ -30,7 +30,7 @@ import { useNotificationLoaders } from '@/shell/data/loaders/useNotificationLoad
 import { useDesktopShellSectionLoaders } from '@/shell/data/loaders/useDesktopShellSectionLoaders';
 import { useQueuedLoadTopics } from '@/shell/data/useQueuedLoadTopics';
 import {
-  hasLoadedOlderAuthoritativePosts,
+  hasReadPastHeadPage,
   mergeRefreshedVisiblePosts,
   mergeUniquePosts,
   postIdentityKey,
@@ -407,14 +407,25 @@ export function useDesktopShellData({
         return false;
       }
       const currentTimelinePosts = currentState.timelinesByKey[key] ?? EMPTY_POSTS;
-      const preserveOlderPages = hasLoadedOlderAuthoritativePosts(currentTimelinePosts, pendingItems);
+      const pendingCursor = currentState.pendingTimelineNextCursorByKey[key] ?? null;
+      // refresh と同じ判定で、表示中の古い行を残すかを決める(#1239、#1274)。refresh が読み進めた位置を残したとき、
+      // 保留の続きの位置は保留中の先頭のページより先にある。判定が refresh と食い違うと、表示と続きの位置が
+      // 食い違う(行が消える、または順序が崩れる)。
+      const lastPending = pendingItems.filter((post) => !post.local_state).at(-1);
+      const preserveOlderPages = hasReadPastHeadPage(
+        currentTimelinePosts,
+        pendingItems,
+        pendingCursor,
+        lastPending ? { created_at: lastPending.created_at, object_id: lastPending.object_id } : null,
+        'desc'
+      );
       startTransition(() => {
         setTimelinesByKey(updateRecordEntry(key, (prev) => mergeRefreshedVisiblePosts(
             prev ?? EMPTY_POSTS,
             pendingItems,
             preserveOlderPages
           )));
-        setTimelineNextCursorByKey(setRecordEntry(key, currentState.pendingTimelineNextCursorByKey[key] ?? null));
+        setTimelineNextCursorByKey(setRecordEntry(key, pendingCursor));
       });
       clearPendingTimeline(key);
       return true;
@@ -482,7 +493,13 @@ export function useDesktopShellData({
           const baselinePosts = currentState.timelinesByKey[timelineKey] ?? EMPTY_POSTS;
           const preserveTimelinePages =
             mode === 'buffer' &&
-            hasLoadedOlderAuthoritativePosts(baselinePosts, normalizedTimelineItems);
+            hasReadPastHeadPage(
+              baselinePosts,
+              normalizedTimelineItems,
+              currentState.timelineNextCursorByKey[timelineKey],
+              timeline.next_cursor,
+              'desc'
+            );
           const resolvedTimelineCursor = preserveTimelinePages
             ? (currentState.timelineNextCursorByKey[timelineKey] ?? null)
             : (timeline.next_cursor ?? null);
@@ -519,9 +536,16 @@ export function useDesktopShellData({
           const publicTimelineKey = timelineScopeStorageKey(topic, PUBLIC_TIMELINE_SCOPE);
           const baselinePublicTimeline =
             currentState.timelinesByKey[publicTimelineKey] ?? EMPTY_POSTS;
+          // 公開の scope の列も、選択中の scope と同じ判定で古い行と続きの位置を残す(#1239、#1274)。
           const preservePublicTimelinePages =
             mode === 'buffer' &&
-            hasLoadedOlderAuthoritativePosts(baselinePublicTimeline, publicTimeline.items);
+            hasReadPastHeadPage(
+              baselinePublicTimeline,
+              publicTimeline.items,
+              currentState.timelineNextCursorByKey[publicTimelineKey],
+              publicTimeline.next_cursor,
+              'desc'
+            );
           const resolvedPublicTimelineCursor = preservePublicTimelinePages
             ? (currentState.timelineNextCursorByKey[publicTimelineKey] ?? null)
             : (publicTimeline.next_cursor ?? null);
@@ -558,7 +582,13 @@ export function useDesktopShellData({
             const currentThreadPosts = currentState.threadsById[currentThread] ?? EMPTY_POSTS;
             const preserveThreadPages =
               mode === 'buffer' &&
-              hasLoadedOlderAuthoritativePosts(currentThreadPosts, incomingThreadItems);
+              hasReadPastHeadPage(
+                currentThreadPosts,
+                incomingThreadItems,
+                currentState.threadNextCursorById[currentThread],
+                threadView?.next_cursor,
+                'asc'
+              );
             const resolvedThreadCursor = preserveThreadPages
               ? (currentState.threadNextCursorById[currentThread] ?? null)
               : (threadView?.next_cursor ?? null);
