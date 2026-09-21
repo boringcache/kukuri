@@ -584,3 +584,112 @@ T5b-1 は PR #1268（merge commit `7f19158d`）で完了した。独立監査は
 判定の各部分を外す mutation はすべて検出される（隙間の判定を外すと 32 通り、新着の適用を行数だけにすると 31 通り、続きの位置の判定を外すと 25 通りで失敗。表示中の行との比較を外すと単体 test が失敗）。
 監査の再現 test `useDesktopShellData.hiddenHeadManyNew.test.tsx` を恒久化した。
 
+## T6-1: author 購読の key 単位の反映（S-10 の購読側、P-8、P-10、P-11 の follow 側）
+
+author 購読（`social_runtime_support.rs` `spawn_author_subscription`）は、doc event のたびに `hydrate_author_state` を呼び、author replica の
+`graph/follows/`・`graph/blocks/` の全 entry を読んでいた。follow の通知の起点も `graph/follows/` の全 entry を読んでいた。
+
+- doc event は、その key だけを反映する（`hydrate_author_key`。`profile/latest`・`graph/follows/<相手>`・`graph/blocks/<相手>` 以外の key は何も読まない）。
+- 起動時と復旧（`hydrate_author_state`）、取りこぼし・本体の到着・同期の区切り（`catch_up_author_state`。`CatchUpSchedule` で間隔を空けて 1 回にまとめる）は、
+  `profile/latest` と、follow・block の key の上限つきの一覧（それぞれ `AUTHOR_EDGE_KEYS` = 512 件）から反映する。上限を超える edge は、その key の event が届いたときに反映する（best effort）。
+- 関係（`rebuild_author_relationships`）の再計算は、手元に無かった envelope が入ったときだけ行う（起動時は従来どおり毎回）。追いつきの間隔も、この「変化」で伸び縮みする。
+  再計算自体は手元の store の follow edge を読む（自分の follow の数に比例する）。replica の読み出しではないので本 Issue の範囲外とし、観察に残す。
+- follow の通知の起点は、通知の対象になる自分を指す follow（`graph/follows/<自分>`）の key 1 件の key と hash だけを読む。
+- 自分の custom reaction の asset（`list_my_custom_reaction_assets`）は、key の上限つきの一覧（asset 512 件ぶん）から `state` の key ごとに読む。
+
+test（`crates/app-api/src/tests/sync/author_key_reflection.rs`）:
+起動時の反映が follow の数（上限 +20 と +300）によらず同じ量を読み、prefix を読まないこと、doc event が key だけを読み（follow 10 件と 400 件で同じ量）、
+同じ edge の再反映は変化 0 件で、対象外の key は何も読まないこと、follow の通知の起点が 1 件だけを読むこと、
+購読タスクが entry の event を取りこぼしても、取りこぼしの通知・同期の区切り・本体の到着のそれぞれで追いつくこと、entry の event がその key を反映して通知を作ること。
+
+### 独立監査の 1 回目（PR #1275、head `3dcef92d`、FAIL）と修正
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-1: 同じ key を別の名義（docs author の昇順で先に並ぶ）が書くと、follow・block の edge が反映されない。以前は prefix の全 record を回していたので反映された | key ごとの読み出しで、`Exact` の結果の先頭 1 件しか見なかった。author replica は誰でも書けるので、ごみを置くだけで follow・block を隠せる | 同じ key の record を上限つき（`MAX_ENVELOPE_RECORDS_PER_OBJECT` 件）で調べ、検証（doc の author・envelope の署名と signer・target と status の一致・key と target の一致）に通ったものから最も新しい envelope を選ぶ。`fetch_author_envelope_by_id` と custom reaction の asset も、先頭 1 件だけを見ない形にした。test `a_shadowed_edge_key_still_reflects_the_valid_record`・`a_shadowed_custom_reaction_asset_is_still_listed` |
+| B-2: 相手の follow が 512 件を超えると、相手から自分への follow・block が、起動時にも追いつきでも反映されない（key の昇順の窓の外に落ちる）。新しい端末で自分の follow が 512 件を超えると、自分の follow の一覧も欠ける | 窓は key の昇順の先頭 512 件だけで、関係の再計算に要る key を特別に扱っていなかった | 自分を指す follow・block の key（`graph/follows/<自分>`・`graph/blocks/<自分>`）は、窓とは別に必ず読む。自分の replica の edge は、自分の author 購読の開始時に背景で小分けにすべて読む（`sweep_own_author_edges`。key の一覧は 256 件ずつ、超えたら pubkey の次の桁で分ける。query 数の上限 4,096）。test `the_catch_up_reads_the_follow_of_me_beyond_the_edge_key_window`（自分を指す key の読み出しを外す mutation で失敗する）・`the_own_edge_sweep_reads_every_own_follow_in_batches` |
+
+同じ監査の non-blocker のうち、この段階で直したもの。
+
+- 起動時と追いつきの key の一覧で、同じ key（docs author ごとの entry）を 1 回だけ読む。
+- 相手から届いた profile・follow・block の key が反映できなかったとき（本体がまだ届いていないなど）は、追いつきを依頼する。
+- 相手から届いた entry の event で、同期の時刻（`last_sync`）を進める（以前の挙動に合わせた）。
+- author の状態の反映を `author_state_support.rs` に分けた。
+
+残した non-blocker: asset の窓が作成順ではない（asset id の昇順）、follow の通知の起点が同じ key の 1 entry だけ、`notification_candidate_from_follow_event` の先頭 1 件（以前から）、
+DM の購読の張り直しの頻度の低下、通知を流さない test 用の DocsSync で追いつきが起きないこと。
+
+### 独立監査の 2 回目（delta `3dcef92d..ae0621a7`、FAIL）と修正
+
+B-1・B-2 の解消は確認された（修正を戻す mutation でそれぞれの test が失敗する）。新たな blocker が 1 件あった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-3: 自分の edge を背景で読む処理が、購読を張り直すたびに最初から全件を読み直す。張り直しは 5 秒間隔で起こりうるので、自分の follow が多いと一度も終わらず、同じ全件の読み出しを繰り返す。query 数の上限に達すると、後ろの key が黙って落ちる | 読んだ位置も、読み終えた印も残していなかった。手元にある envelope も書き直していた | 読み終えた桶（key の prefix）の位置を store の新しい表 `sync_checkpoints`（migration `20260921030000`）に残し、次の実行は続きから読む（`HexBucketedKeys` の `done_through`。前回の桶の祖先は読まずに分け、それより前の桶は読まない）。1 回の実行は query 数の上限で止まり、位置を残す。読み終えたら印を残し、以後この端末では行わない。test `the_own_edge_sweep_resumes_and_stops_after_completion`（query の上限を小さくして複数回に分け、どの桶も 2 回読まないこと、読み終えた後は docs を 1 件も読まないこと） |
+
+同じ監査の non-blocker のうち、この段階で直したもの（test で固定し、それぞれ規則を外す mutation で失敗することを確かめた）。
+
+- 同じ key の正しい record のうち最も新しいものを選ぶ（古い envelope を指す record を後から置く再送で、状態を巻き戻せない）。test `the_newest_valid_edge_wins_over_a_replayed_older_record`。
+- key と相手の一致。test `a_valid_edge_record_under_another_key_is_ignored`。
+- `fetch_author_envelope_by_id` の id の一致。test `the_envelope_fetch_returns_the_envelope_with_the_requested_id`。
+- 自分の author 購読からの背景の読み出しの起動。test `the_own_author_subscription_runs_the_edge_sweep`。
+
+残した non-blocker: 16 進の小文字でない key は、桶を分けた後は読まない。共通の接頭辞を持つごみの key で 1 回の実行の query 上限を使わせられる（位置は進むので、次の実行で先へ進む）。
+反映できない相手の key のたびに追いつきを依頼する（追いつきは間隔と上限つき）。custom reaction の asset の検証が author の文字列一致だけ（以前から）。
+
+### 独立監査の 3 回目（delta `ae0621a7..8b8ac591`、FAIL）と修正
+
+B-3 の解消（実行ごとに位置が進み、読み終えた桶を読み直さず、読み終えた後は docs を読まない。桶の分け方が前回と変わっても読み漏れ・無限 loop・二重読みが起きない）は確認された。新たな blocker が 1 件あった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-4: 新しい端末で、自分の replica が同期される前に読み出しが読み終えて印を書くと、その後の同期で届いた窓を超える自分の follow が、その端末では二度と入らない（前の版は張り直しのたびに読み直していたので回復した） | 読み終えた印を、手元を読み終えた時点で書き、同期で後から届く key を考えていなかった。本体がまだ手元に無い key も、読み終えた扱いで進んでいた | 自分の replica の event を取りこぼしたとき（`Lagged`）は、走っている読み出しを止め、位置を最初に戻して読み直す（`restart_own_author_edge_sweep`。どの key を取りこぼしたかは分からない）。取りこぼしの無い同期では、届いた key は docs の event で 1 件ずつ入るので読み直さない。読み出しは本体が手元に無い key を相手から取り（`LocalThenRemote`）、1 件の失敗で同じ位置に留まらないよう、その key を飛ばして進む。test `a_lag_after_the_own_edge_sweep_restarts_it`（読み直しを外す mutation で失敗する） |
+
+読み直しは自分の follow・block の数に比例するが、契機は自分の replica の event の取りこぼし（通知の buffer の 256 件を超える entry が一度に届いたとき）だけで、背景で小分けに進み、止まっても続きから読む。
+取りこぼした key を特定する手段（時刻や順序での差分の読み出し）は iroh-docs に無い。replica の時間分割（#1243）で、読み直しの範囲を新しい bucket に限れる。
+
+残した non-blocker: `sync_checkpoints` の行はアカウントごとに 4 行（自分の edge の follow・block、プロフィールの索引の補完の投稿・repost）で、アカウントの削除では消えない。
+「手元にある envelope は書き直さない」ことを固定する test が無い。
+
+### author replica を docs author と key の組で読む（ADR 0053 §6）
+
+独立監査の B-1（同じ key に他の名義の record を積むと著者の record を隠せる）は、上限つき（8 件）の読み出しで解消したが、
+9 件以上積まれると隠せる（ADR 0053 §4 の旧 record と同じ best effort）。利用者の指示で、投稿と同じく名義を決定的に選ぶ形にした（ADR 0053 §6）。
+
+- profile・follow・block・custom reaction の asset の envelope に `docs_author` の tag を入れる（`build_*_with_docs_author`）。
+- 読む側は、署名を検証した著者の envelope の tag から著者の docs author を覚え（store の `author_docs_authors`。migration `20260921030000` に追加）、
+  分かっていれば、profile・follow・block の record とその envelope を docs author と key の組で 1 件読み、follow・block の窓も docs author を指定した key の一覧
+  （`DocsSync::query_replica_keys_by_author`。iroh-docs の `Query::author(..).key_prefix(..)`）で作る。
+  follow の通知の起点、自分の edge の背景の読み出し、自分の custom reaction の asset の一覧も、docs author を指定して読む。
+- 分からないとき（tag の無い旧 record、docs author を申告する前の著者）と、組の record が無い・検証に通らないときは、上限つきの読み出しに落とす。
+- test: `crates/app-api/src/tests/sync/author_docs_author.rs`（10 件のごみの後ろの follow を、profile の tag から覚えた docs author で読む。tag の無い envelope からは覚えない。
+  自分の asset は自分の docs author で読むので、ごみが何件あっても消えない）、`crates/docs-sync/src/iroh_sync.rs` の `key_query_by_author_skips_entries_of_other_authors`
+  （実際の iroh-docs で、他の名義の key が窓を埋めないこと）。組での読み出し・profile の後の覚え直し・tag から覚える処理・asset の組での読み出しを外す mutation で、それぞれ test が失敗する。
+
+ローカルの全件の test で、desktop の friend-plus の再起動の test（`friend_plus_channel_restore_accepts_fresh_share_after_restart`）が、T6-1 の 2 回目の監査への修正（`8b8ac591`）から失敗していた
+（main と `ae0621a7` では通る。コミットをたどって特定した）。再起動した端末で、自分の follow の envelope は手元にあるのに follow の行が無く、
+「手元にある envelope は書き直さない」判定のため、行が二度と作られなかった。`put_envelope` は envelope から follow・block・profile の行も作り直すので、
+envelope が手元にあっても毎回書く形に戻した（`changed` は関係の再計算の要否にだけ使う）。
+
+### 独立監査の 4 回目（delta `8b8ac591..cdc45c77`、FAIL）と修正
+
+B-4 の修正（取りこぼしで読み直す）と、docs author の覚え方の安全性（署名を検証した著者の envelope の tag だけから覚え、他人は偽れない。
+分かった後は他の名義で隠す・窓を埋める経路が無い）は確認された。新たな blocker が 1 件あった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-5: 今の利用者の自分の follow・block は ADR 0053 以前の端末ごとの名義（旧名義）で書かれている。自分の edge の背景の読み出しと起動時の窓が、自分の docs author の key だけを一覧するので、取りこぼした旧名義の edge は、その端末では二度と入らない | 背景の読み出しを docs author を指定した一覧にしていた | 自分の edge の背景の読み出しは、名義を問わない一覧で読む（位置を残して小分けに進むので、他の名義のごみの key は読み進めを遅らせるだけ）。test `own_legacy_edges_are_read_without_being_rewritten`（旧名義の record を返す double） |
+
+ADR 0053 §6 に、自分の旧名義の edge の読み方と、旧版の client との混在期間の扱い（組の record が先に使われる）を追記した。
+
+残した non-blocker: 反映に失敗した自分の edge の event（本体の取得の失敗）で読み出しをやり直さない、`changed` が「envelope が手元に無かった」だけを表す、
+`author_docs_authors` の削除の契機が無い（行は author 購読を開いた著者の数だけ。profile cache と同じ規模）、`Lagged` のときの位置の書き込みの競合（次の `Lagged` で直る）、
+docs author を指定した読み出しに未対応の DocsSync では反映全体が失敗する（本番の実装はすべて対応）。
+
+### 独立監査の 5 回目（delta `cdc45c77..e6c2a2c8`、FAIL）と修正
+
+名義を問わない一覧での読み出し（B-5 の解消）は確認された。4 回目への修正で入れた「旧名義でしか読めなかった自分の edge を自分の docs author で書き直す」処理が、新たな blocker だった。
+
+| 指摘 | 原因 | 修正 |
+| --- | --- | --- |
+| B-6: 同期の途中で、ほかの端末が自分の docs author で書いた新しい状態（例: follow の解除）がまだ届いていない key を、旧名義の古い状態で新しい時刻に書き直すと、同期がそろった後に全端末の状態が巻き戻る（follow の解除が follow に戻る） | 読み出しの中で書き直していた。同じ（docs author、key）では新しい時刻が勝つ | 書き直しを外した。B-5 の解消は名義を問わない一覧での読み出しだけで足りる。自分の docs author へ移るのは、利用者がその edge を書いたとき（ADR 0053 §6 に理由を書いた）。test は、読み出しが docs に何も書かないことを確かめる形にした |

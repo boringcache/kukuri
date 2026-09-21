@@ -36,16 +36,18 @@ pub(crate) use kukuri_core::{
     PrivateChannelMetadataDocV1, PrivateChannelParticipantDocV1, PrivateChannelPolicyDocV1,
     Profile, ProfilePost, ProfileRepost, Pubkey, ReactionDocV1, ReactionKeyKind, ReactionKeyV1,
     ReplicaId, RepostSourceSnapshotV1, TimelineScope, TopicId, WithdrawalReasonVisibility,
-    author_profile_topic_id, build_block_edge_envelope, build_custom_reaction_asset_envelope,
-    build_direct_message_ack, build_dome_connection_agreement_envelope,
-    build_dome_connection_proposal_envelope, build_dome_connection_selection_envelope,
-    build_dome_instance_envelope, build_dome_move_envelope, build_dome_preset_envelope,
-    build_follow_edge_envelope, build_friend_only_grant_token, build_friend_plus_share_token,
-    build_game_session_envelope, build_live_session_envelope, build_media_manifest_envelope,
-    build_metaverse_room_event_envelope, build_post_envelope_with_docs_author,
-    build_post_withdrawal_envelope, build_private_channel_epoch_handoff_grant_envelope,
-    build_private_channel_invite_token, build_private_channel_participant_envelope,
-    build_private_channel_policy_envelope, build_profile_envelope, build_profile_post_envelope,
+    author_profile_topic_id, build_block_edge_envelope_with_docs_author,
+    build_custom_reaction_asset_envelope_with_docs_author, build_direct_message_ack,
+    build_dome_connection_agreement_envelope, build_dome_connection_proposal_envelope,
+    build_dome_connection_selection_envelope, build_dome_instance_envelope,
+    build_dome_move_envelope, build_dome_preset_envelope,
+    build_follow_edge_envelope_with_docs_author, build_friend_only_grant_token,
+    build_friend_plus_share_token, build_game_session_envelope, build_live_session_envelope,
+    build_media_manifest_envelope, build_metaverse_room_event_envelope,
+    build_post_envelope_with_docs_author, build_post_withdrawal_envelope,
+    build_private_channel_epoch_handoff_grant_envelope, build_private_channel_invite_token,
+    build_private_channel_participant_envelope, build_private_channel_policy_envelope,
+    build_profile_envelope_with_docs_author, build_profile_post_envelope,
     build_profile_repost_envelope, build_reaction_envelope, build_repost_envelope_with_docs_author,
     decrypt_direct_message_attachment, decrypt_direct_message_frame,
     decrypt_private_channel_epoch_handoff_grant, derive_direct_message_topic,
@@ -122,6 +124,7 @@ pub(crate) use crate::views::{
 };
 
 mod attachment_support;
+mod author_state_support;
 mod direct_messages_delivery_support;
 mod direct_messages_subscription_support;
 mod dome_connection_support;
@@ -183,6 +186,10 @@ pub(crate) use attachment_support::{
     register_private_channel_replica_secrets, sanitize_game_participants, short_id_suffix,
     subscription_replicas_for_topic, validate_game_room_scores, validate_game_room_transition,
 };
+pub(crate) use author_state_support::{
+    catch_up_author_state, hydrate_author_key, hydrate_author_state, known_docs_author,
+    restart_own_author_edge_sweep, sweep_own_author_edges,
+};
 pub(crate) use gossip_subscription_support::gossip_disabled_channel_key;
 pub(crate) use hydration_support::{
     hint_refers_to_replica_content, hint_targets_topic, hydrate_subscription_doc_event,
@@ -227,7 +234,7 @@ pub(crate) use post_withdrawal_hydration::{
     hydrate_post_withdrawal_for_object_with_hints, object_id_from_post_withdrawal_key,
 };
 pub(crate) use profile_docs_support::{
-    fetch_author_envelope_by_id, hydrate_author_state,
+    fetch_author_envelope, fetch_author_envelope_by_id,
     load_custom_reaction_assets_from_author_replica, load_profile_posts_from_author_replica,
     load_profile_reposts_from_author_replica, merge_seed_peers, persist_block_edge_doc,
     persist_custom_reaction_asset_doc, persist_follow_edge_doc, persist_profile_doc,
@@ -540,17 +547,6 @@ pub(crate) struct NotificationDocEventBaseline {
 }
 
 impl NotificationDocEventBaseline {
-    pub(crate) fn from_records(records: &[DocRecord]) -> Self {
-        Self {
-            fingerprints: records
-                .iter()
-                .map(|record| {
-                    notification_doc_event_fingerprint_parts(&record.key, &record.content_hash)
-                })
-                .collect(),
-        }
-    }
-
     /// key だけの読み出しの結果(key と content hash)から作る。値は読まない。
     pub(crate) fn from_key_entries<'a>(
         entries: impl IntoIterator<Item = &'a kukuri_docs_sync::DocKeyEntry>,

@@ -6,9 +6,9 @@ use kukuri_docs_sync::{ReplicaNotice, ReplicaNoticeStream};
 
 /// docs の通知を test から流し込む docs。entry の event は購読側へ届けない(取りこぼした状態を作る)。
 #[derive(Clone)]
-struct InjectedNoticesDocsSync {
+pub(super) struct InjectedNoticesDocsSync {
     inner: CountingDocsSync,
-    notices: tokio::sync::broadcast::Sender<ReplicaNotice>,
+    pub(super) notices: tokio::sync::broadcast::Sender<ReplicaNotice>,
 }
 
 impl Default for InjectedNoticesDocsSync {
@@ -47,6 +47,17 @@ impl DocsSync for InjectedNoticesDocsSync {
         query: kukuri_docs_sync::DocKeyQuery,
     ) -> Result<kukuri_docs_sync::DocKeyPage> {
         self.inner.query_replica_keys(replica_id, query).await
+    }
+
+    async fn query_replica_keys_by_author(
+        &self,
+        replica_id: &ReplicaId,
+        docs_author: &str,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        self.inner
+            .query_replica_keys_by_author(replica_id, docs_author, query)
+            .await
     }
 
     async fn subscribe_replica(
