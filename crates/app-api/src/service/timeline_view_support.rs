@@ -230,62 +230,6 @@ impl AppService {
         })
     }
 
-    /// 返信先が projection に無ければ、返信と同じ replica から key 指定で反映する(`LocalOnly`)。
-    ///
-    /// `source` は返信の行の replica と topic。返信先も同じ replica にある投稿として、署名つき envelope と
-    /// replica の scope を確かめてから反映する(#1248)。
-    pub(crate) async fn hydrate_reply_preview_row(
-        &self,
-        object_id: &EnvelopeId,
-        source: Option<(&ReplicaId, &str)>,
-    ) -> Result<Option<ObjectProjectionRow>> {
-        if let Some(row) = self
-            .services
-            .projection_store
-            .get_object_projection(object_id)
-            .await?
-        {
-            return Ok(Some(row));
-        }
-        let Some((source_replica_id, source_topic_id)) = source else {
-            return Ok(None);
-        };
-        // 手元の docs が読めないとき(権限を失った private replica など)は、preview を出さずに続ける。
-        let Ok(Some(post)) = load_verified_post(
-            self.services.docs_sync.as_ref(),
-            source_replica_id,
-            source_topic_id,
-            object_id,
-            DocFetchPolicy::LocalOnly,
-        )
-        .await
-        else {
-            return Ok(None);
-        };
-        let is_withdrawn = self
-            .services
-            .projection_store
-            .get_post_withdrawal(object_id)
-            .await?
-            .is_some();
-        let row = if is_withdrawn {
-            projection_row_from_post(&post.withdrawn(), Some(String::new()))
-        } else {
-            let content = match &post.header().payload_ref {
-                PayloadRef::InlineText { text } => Some(text.clone()),
-                PayloadRef::BlobText { hash, .. } => {
-                    fetch_projection_blob_text(self.services.blob_service.as_ref(), hash).await
-                }
-            };
-            projection_row_from_post(&post, content)
-        };
-        self.services
-            .projection_store
-            .put_object_projection(row.clone())
-            .await?;
-        Ok(Some(row))
-    }
-
     pub(crate) async fn reply_preview_for_object_id(
         &self,
         object_id: Option<&EnvelopeId>,
@@ -301,7 +245,7 @@ impl AppService {
             .get_post_withdrawal(object_id)
             .await?
             .is_some();
-        let Some(row) = self.hydrate_reply_preview_row(object_id, source).await? else {
+        let Some(row) = self.reply_target_row(object_id, source).await? else {
             return Ok(None);
         };
         let provenance = self

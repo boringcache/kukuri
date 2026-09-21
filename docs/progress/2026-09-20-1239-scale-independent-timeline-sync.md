@@ -3,7 +3,7 @@
 - 対象 Issue: #1239（区分 C、Scope revision 2026-09-20-v2）。統括は #1221。子は #1243（replica の時間分割）。
 - 設計: [ADR 0052](../adr/0052-scale-independent-timeline-sync.md)。inventory: [replica の読み出しの inventory](../architecture/replica-read-inventory.md)。
 - 段階ごとに PR と独立監査を分ける。本書は段階ごとに追記する。
-- 段階の順序: T1 → T2 → T3 → T5a（タイムラインと thread の取得）→ T4（購読タスク）→ T5b → T6 → T7 → T8。T5a を T4 より先に行う理由は、inventory の「段階の順序の変更」に書いた。
+- 段階の順序: T1 → T2 → T3 → T5a（タイムラインと thread の取得）→ T4（購読タスク）→ T5b → T6 → T7 → T8 → T9 → T10。T5a を T4 より先に行う理由は、inventory の「段階の順序の変更」に書いた。
 
 ## T1: ADR と inventory（PR #1244、merge commit `1c70abd3`）
 
@@ -862,3 +862,50 @@ blocker は無かった。non-blocker のうち、次を直した。
 
 残した non-blocker: 追いつきは `profile/latest` を読まない（取りこぼした profile の更新は、購読を張り直すまで入らない。利用者の決定 5 のとおり）。
 旧 record の一覧は docs author を指定しない（この PR の前から同じ）。新しい端末の自分の follow・block は、購読の開始時の窓と event の分だけになる（アカウントの取り込みを実装するときの前提）。
+
+## T9: view の生成の docs の読み出しの削除（AC-6）と、projection の読み書きと新着の受信の計測（AC-7）（2026-09-22）
+
+- AC-6（#1277）: 返信先の preview（inventory の V-1）は、view の生成では projection だけを読む。返信先が projection に無ければ、返信と同じ replica からの
+  key 指定の反映（`reflect_reply_target`。署名つき envelope と replica の scope を確かめる #1248 の検証はそのまま）を背景へ出し、この回の preview は出さない。
+  背景の反映は、確認先（replica と object id の組）ごとに 60 秒の間隔を空け、台帳（4,096 件）と同時実行（4 件）に上限を置く。取り下げの確認と同じ台帳の型
+  （`BackgroundCheckLedger`。用途ごとに別の台帳）を使う。画面は、preview の無い返信の行に返信先の枠を描かない（`PostCard.test.tsx` の
+  `reply context stays hidden when missing`）。反映できれば、次の取得で preview が出る。
+  タイムラインと thread の取得は、view の生成の前に、ページの行の返信先を同じ台帳の間隔で key 指定で反映する（`reflect_reply_targets_for_rows`）。
+  遡ったページの行も、その取得で preview が出る（独立監査の non-blocker。画面の定期の取得は先頭のページだけなので、背景の反映だけでは遡ったページの preview が出ないままになる）。
+- AC-7: `scale_counts` に、新着 1 件の受信（相手の peer から、投稿の entry と本体が届く）を足した。projection にも件数と同じ行を置き、
+  projection の読み書きを SQLite の仮想機械が実行した命令の数で数える（`SqliteStore::connect_memory_counting_vm_steps`。store の `test-support` feature）。
+  1,000 / 10,000 / 100,000 件で、どの操作の docs の読む量も命令の数も同じ。タイムラインのページの SQL が索引を使わなくなる mutation
+  （`ORDER BY created_at + 0`）で、新しい側のページの命令の数が 12,326 → 102,326 → 1,002,326 と件数に比例して増え、test が失敗することを確かめた。
+- 新着の受信の計測で、反映済みの投稿の `objects/<id>/state`・`objects/<id>/envelope` の entry が、そのたびに窓の追いつき（docs 264 件、命令 15,000）を
+  依頼していたことが分かった。1 件の投稿の entry は続けて届き、最初の event で反映した後の event は 0 件になるため、新着 1 件ごとに追いつきが走っていた
+  （最小間隔 3 秒）。索引の entry と同じく、指す object が projection にあれば依頼しないようにした（`missed_entry_needs_catch_up`）。
+
+### 証跡
+
+| 条件 | 証跡 |
+| --- | --- |
+| AC-6: view の生成は docs を読まない | `a_missing_reply_target_is_reflected_in_the_background_without_docs_reads_in_the_view`（背景の permit を止めた状態で、view の生成の docs の query が 0 回、record も 0 件。背景の反映の後に preview が出る） |
+| AC-6: 背景の反映の間隔 | `background_reflection_of_a_reply_target_is_spaced_per_target`（反映できない返信先を 5 回表示しても、docs の読み出しは 1 回） |
+| AC-6: 遡ったページの preview | `an_older_page_reflects_the_reply_target_before_building_the_view`（取得側の反映を外す mutation で失敗することを確かめた） |
+| AC-6: 反映の検証（#1248） | `reply_preview_row_is_built_from_the_signed_envelope`（`reflect_reply_target` を直接呼ぶ形にした） |
+| AC-7 | `reads_do_not_grow_from_one_thousand_to_one_hundred_thousand_entries`（docs と projection の両方。inventory の「完了の確認」の表） |
+| 新着の受信で追いつきを依頼しない | `a_remote_index_entry_requests_a_catch_up_only_for_an_unprojected_object`（反映済みの投稿の envelope の entry を足した。変更を戻す mutation で失敗することを確かめた） |
+
+### 独立監査の 1 回目（PR #1283、head `cb681ed2`、PASS）と non-blocker の対応
+
+blocker は無かった。non-blocker のうち、遡ったページの行の preview が出ないままになる後退（上記の取得側の反映で直した）、`scale_counts` の古い comment、
+命令の数で検出できない SQL と埋め草の無い表の限界の記録（inventory）を直した。残した non-blocker: 新着の受信の double は本体がそろってからの受信順だけを測る
+（本体が遅れる順は窓の追いつきに回り、その量は別に測っている）。背景の task は shutdown を待たない（既存の取り下げの確認と同じ形）。
+
+### 独立監査の 2 回目（delta `cb681ed2..01e8898b`、PASS）と non-blocker の対応
+
+blocker は無かった。non-blocker のうち、次を直した。
+
+- 取得側の反映が、返信先の本文の blob を remote から取りにいき、取得の経路で 1 件ごとに timeout まで待ちうる。取得側は手元の blob だけを読み、
+  手元に無ければ反映せずに、remote から取る背景の反映へ回す（`ReplyTargetBody`。返信先の反映は `service/reply_target_support.rs` へ分けた）。test `the_listing_does_not_wait_for_a_remote_body_of_the_reply_target`
+  （取得側で remote から取る mutation で失敗することを確かめた）。
+- `list_thread` の取得側の反映を test が覆っていなかった。`a_thread_page_reflects_the_reply_target_before_building_the_view` を足した。取得側の 2 つの test は、
+  購読タスクの窓の追いつきが返信先を先に反映しないよう、test が流した通知だけが届く double を使う（`list_timeline`・`list_thread` の呼び出しをそれぞれ外す
+  mutation で、3 回とも失敗することを確かめた）。
+
+残した non-blocker: 取得側の反映をしない経路（プロフィール、bookmark、community index）の遡ったページは、背景の反映の後の取り直しまで preview が出ない。

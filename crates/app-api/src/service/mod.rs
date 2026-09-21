@@ -167,6 +167,7 @@ pub(crate) use subscription_catch_up::{
     CatchUpSchedule, catch_up_replica_window, missed_entry_needs_catch_up,
     snapshot_window_notification_baseline,
 };
+mod reply_target_support;
 mod subscription_registry;
 mod timeline_subscription_support;
 mod timeline_view_support;
@@ -394,7 +395,9 @@ pub struct ServiceHandles {
     /// #1225: 欠損した本文 blob の試行台帳。
     pub(crate) missing_body_ledger: Arc<hydration_limits::MissingBodyLedger>,
     /// #1239: 表示した投稿の取り下げの、背景での確認の台帳。
-    pub(crate) withdrawal_checks: Arc<hydration_limits::WithdrawalCheckLedger>,
+    pub(crate) withdrawal_checks: Arc<hydration_limits::BackgroundCheckLedger>,
+    /// #1239: projection に無い返信先の、背景での反映の台帳(view の生成は docs を読まない)。
+    pub(crate) reply_target_checks: Arc<hydration_limits::BackgroundCheckLedger>,
     /// #1239: ページの範囲と時系列の索引の照合の台帳。
     pub(crate) range_checks: Arc<replica_window::RangeCheckLedger>,
 }
@@ -421,6 +424,7 @@ impl ServiceHandles {
             dome_mutations: Arc::default(),
             missing_body_ledger: Arc::default(),
             withdrawal_checks: Arc::default(),
+            reply_target_checks: Arc::default(),
             range_checks: Arc::default(),
         }
     }
