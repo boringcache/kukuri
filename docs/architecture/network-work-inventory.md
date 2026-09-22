@@ -42,6 +42,23 @@ intervalは現行値であり新設計の推奨値ではない。
 | N26 `iroh-node/src/node.rs::apply_relay_config/shutdown`、`transport/src/discovery.rs/iroh/discovery.rs` | 起動/relay設定、endpoint.online待機 | node shutdownは所有付き。online待機はdetached | endpoint世代単位。P3で監視taskを所有し重複設定をno-op | NW-6/7、既存node終了契約 |
 | N27 `cn-runtime/requests_support.rs/session_runtime_support.rs` | auth/consent要求、token/heartbeat/rendezvous/metadataの期限、設定変更 | HTTP timeoutと401再認証。ready node/seed集合を再適用 | 全ready node/購読/seedの再合成。P3差分/due索引 | NW-5/6、mixed node auth/consent |
 | N28 `cn-core/src/rendezvous.rs::heartbeat`、`cn-user-api/handlers/bootstrap.rs::topic_rendezvous_heartbeat` | 認証・同意後のjoins/refreshes/leaves | request期限。Redis TTL、期限切れpeerを照会中に削除 | topicごとのSMEMBERS/sort/peer GETが全登録peer比例。P3有界cursorとTTL索引 | NW-2/5/8、auth/endpoint binding |
+| N35 Tauri `LinkPreviewState::request/spawn_fetch`、`commands/link_preview.rs` | URL表示/操作。cache成功10分・失敗1分、connect3秒/request6秒 | 32 in-flight/4実行、cache128件/16MiB。caller取消後も取得継続、task handleは未所有 | 件数/bytesは既存で有界。P3の共通容量・task寿命へ接続し、SSRF/redirect/本文上限を維持 | NW-2/4、ADR0051 |
+| N36 UI `useDesktopShellDataEffects/useAuthorTrustGateLookup/useTimelineContentAdvisoryLookup/useRuntimeEventBridge` | 表示/DM3秒、通知60秒、trust sweep30秒・debounce300ms。advisory300ms、500件batch | effect cleanupでtimer解除。表示/DMはhidden時抑止。mediaは最短retry時刻のtimer | 読込済み行/author/URLの全体処理とeventごとの通知読取りをP3で窓・差分・coalesce | UI-AC群、NW-1/8 |
+| N37 `IndexerWorker::{spawn,run,full_pass,spawn_subscription}`、`cn-indexer/src/worker.rs` | 全scope再確認300秒、event debounce2秒、backoff5〜300秒 | watch停止、shutdown待ち10秒。timeout後のJoinHandle放棄は実停止を保証しない | unbounded event channel、scope/task/backoff全体、full pass。P4で有界queue/due cursor/owned停止 | CN-AC群、NW-2/7/10 |
+| N38 `spawn_status_server/StatusServerHandle::shutdown`、`cn-indexer/src/status.rs` | 設定時の単一HTTP listener、status GET | graceful shutdownを5秒待つ。timeoutは強制終了ではない | status snapshotのscope集合はP4で有界な診断窓へ。外部への復旧要求は起動しない | CN診断、停止/未完了の区別 |
+| N39 `timeline.rs` の投稿後hint送信 | 保存/反映後に3回、250/500ms待機 | caller futureの終了で残送信も終了 | 1投稿あたり固定回数。P3へ同じ送信目的を登録し、enqueueのOkを接続回復と解釈しない | NW-4/6、投稿保存維持 |
+| N40 `private_channels.rs` のleave hint | private退出、全体peer有無判定後2秒timeout | hint失敗でもcapability/参加状態の除去へ進む | 全peers snapshotをP3の対象別観測へ置換。P1 close/revokeを維持 | NW-7/9、private leave |
+
+検索候補のうち、次の入口は通信復旧の周期処理と区別する。
+
+- `app_update.rs::{download_app_update,install_checked}` と `useAppUpdateScheduler`はhost単位の更新処理。
+  確認は30分間隔、download/installは`try_lock`で一つのsessionに限定する。accountのpeer台帳を持たず、
+  署名確認と既存のapp lifecycle guardを維持する。
+- `commands/{device_backup,identity,os_notification,os_notification_windows,external_url}`、`file_dialog`の
+  spawn_blocking/OS threadは明示的なlocal/OS操作。peer再接続timerとして数えない。
+  backup/restoreやdesktop lifecycleからのruntime復帰はN25/27の入口として追跡する。
+- `MetaverseScene`、focus/scrollのrequestAnimationFrame、draft保存debounceは描画/local処理。
+  live/Domeの通信heartbeatはN19/20、room/connectionの取得はそのapp-api shared helperからN02/21へ追跡する。
 
 ## 上流APIで確認した前提不足
 
@@ -50,7 +67,7 @@ iroh-docs 0.101.0（pin `e7233d14853cb4db9966e30050bac1e689cdeec8`）。
 
 | ID | source / 動作 | P3で満たす必要がある契約 |
 | --- | --- | --- |
-| U01 | iroh-docs `engine/live.rs::start_sync` は保存済sync peerを引数peerへappendし、`join_peers`で各peerの同期を起動 | 選択peer限定の開始API。leave/startだけでは修正にならない。保存peerは `PEERS_PER_DOC_CACHE_SIZE=5` で既に有界だが、選択外の5件を再開し得る |
+| U01 | iroh-docs `engine/live.rs::start_sync` は保存済sync peerを引数peerへappendし、`join_peers`で各peerの同期を起動 | 保存peerは5件で有界だが選択外を再開し得る。公開 `net::connect_and_sync` の1回実行では保存peerを追加しないことを実証。native高水準startを経由しないowner構成を採る |
 | U02 | 同 `leave` はsync停止とgossip quitを行う。進行中syncのJoinSetとneighbor経由のsync受付は別経路 | 停止応答後の旧世代のnetwork/保存とneighborによる選択外開始を制御。P1 closeの再検証ではなくowner統合のdelta |
 | U03 | iroh-gossip `api.rs` は `join_peers` を公開し個別peer削除APIなし。sender/receiverの両方dropでtopic leave | 影響topicの全handle/task所有と解放。別topicを巻き込まず、残存sender cloneを残さない |
 | U04 | iroh-gossip `proto/state.rs` はpeer切断を全稼働topicへ通知 | 対象topic数を有界にし、休止topicを内部stateへ残さない。意味上の全登録topicとは分ける |
@@ -59,6 +76,26 @@ iroh-docs 0.101.0（pin `e7233d14853cb4db9966e30050bac1e689cdeec8`）。
 | U07 | gossip hyparviewの既定active viewは5、passive viewは30、topicごとの有界集合 | per-topic上限を既存成果として再利用。全topicの合計/共有接続はowner予算と整合させる |
 | U08 | iroh-docs `on_replica_event -> start_download` はremote entryから独自downloader/task/hash provider台帳へ進む。app-apiのblob受付を通らない | docsのdownload policyとownerへの取得委譲を設計する。neighbor content-ready経路と未実行hash台帳も確認し、app-api側8枠だけで全取得有界としない |
 | U09 | iroh-gossipの既定message上限は4,096bytes。private replica IDの最大形はこれを超え得る | 最大長locatorをhintへ丸ごと入れない。固定サイズの暗号化参照から、署名provider/epoch制限付きで有界payloadを取得するwireを先に検証 |
+| U10 | 公開 `actor::SyncHandle` と `net::{connect_and_sync,handle_connection}` はstorage actor、接続先1件、namespace受信callbackを組み合わせられる | `explicit_docs_sync_ignores_cached_peer_and_rejects_other_namespace` / `explicit_docs_sync_cancel_closes_remote_connection` が成功。選択peer/受信拒否/cancelのための依存forkは不要。本実装の全caller移行、通知変換、内部address台帳は別途未完了 |
+
+### U06/U07の回収漏れ修正
+
+採用候補を固定して再現・回帰を確認した。irohは`adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155`
+（上流#4447）、gossipは`c42f40a1346200ae2b18d41596a2a8a02047e600`（#161を含む#162）。
+rootとstandalone Tauriの5packageを同じsourceへ揃え、型の二重化を避ける。
+package version、MSRV、wire、永続形式を変更せず、両lockの無関係な依存edgeも維持する。
+
+- mapped address: 100件の退役履歴で101件が残る失敗を再現。修正後は100/1,000件とも64件。
+  active peerのmapping、relay逆引きの整理、再利用時の新mappingも`harness/upstream`のcontractで確認。
+- gossip: topic lease終了後の実QUIC closeをweak handleで確認。元コードは12秒でも未終了、候補は約5秒で終了。
+  別topic継続、同時dial、pending joinのquitと再joinも関連contractで確認する。
+- これは協調peerの退役漏れの修正。64は全active actor込みの絶対上限ではなく、actor idleの60秒も別にある。
+  relay mapのretain走査、remoteがstream/headerを終わらせない場合、pending joinの容量は共通ownerに残す。
+  現行で未使用のcustom transportを、この修正で対応済みとは扱わない。
+
+`TransportAddrUsage::Active`を接続生存の代用にした最初の試験は判定方法が不適切だったため、
+before/afterの根拠に使わない。path cacheを観測しないweak connection終了通知へ修正してから、
+旧gossip `2ce78afe`でも同じ失敗を再確認した。
 
 irohのmapped address表は `mapped_addrs.rs::AddrMap` の正引き/逆引きHashMapであり、actorの終了と別の寿命を持つ。
 内部接続とmapped addressの容量・停止、docsの進行中sync取消、blobs downloader内部の受付は残確認。

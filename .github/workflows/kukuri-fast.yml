@@ -12,6 +12,7 @@ on:
       - 'crates/**'
       - 'apps/**'
       - 'harness/**'
+      - 'tools/check_iroh_resource_contract.py'
       - '.github/workflows/kukuri-fast.yml'
       - '.github/workflows/kukuri-nightly.yml'
       - '.github/workflows/kukuri-release.yml'
@@ -27,6 +28,7 @@ on:
       - 'crates/**'
       - 'apps/**'
       - 'harness/**'
+      - 'tools/check_iroh_resource_contract.py'
       - '.github/workflows/kukuri-fast.yml'
       - '.github/workflows/kukuri-nightly.yml'
       - '.github/workflows/kukuri-release.yml'
@@ -139,6 +141,14 @@ jobs:
 
       - name: Rust tests
         run: cargo xtask-lite rust-test
+
+      - name: Setup Python for upstream resource contract
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Pinned iroh resource contract
+        run: python tools/check_iroh_resource_contract.py
 
       # #1120: workspace crate の成果物は checkout ごとに再 compile されるため、Cache Volume に残さない。
       - name: Prune workspace build artifacts
