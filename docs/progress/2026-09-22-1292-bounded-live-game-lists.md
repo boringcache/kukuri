@@ -25,6 +25,7 @@ SEARCH live_session_cache USING COVERING INDEX idx_live_session_cache_topic_star
 - SQLiteは本番とquery plan testで同じSQL builderを使い、既存のchannel別複合索引から固定件数を読む。
 - MemoryStoreは `(topic_id, channel_id)` ごとの時刻・ID降順secondary indexを持ち、upsertによる時刻・channel変更とprojection再構築時に同期する。
 - app-apiの初回取得とcatch-up後の再取得はどちらも100行を上限とする。
+- 初回取得と条件付き再取得は共通helperを通し、store一覧の呼出回数を通常1回、refresh時2回、refresh失敗時1回に固定する。
 - 参加中liveのheartbeatは対象sessionを単一行で確認し、一覧窓より古いsessionでも終了projectionを観測したら自身のtaskを停止する。
 - ScoreGameの反映済みcache比較は、一覧窓外でも対象を失わない `get_game_room` の単一行取得へ移した。
 - 旧topic全件一覧APIと、app-api側の事後channel filterを削除した。
@@ -33,7 +34,7 @@ SEARCH live_session_cache USING COVERING INDEX idx_live_session_cache_topic_star
 
 | 条件 | 実装・test |
 | --- | --- |
-| AC-1 / AC-2 / AC-5 | `sqlite/live_game.rs` の共通SQL builder、`page_query_plans::live_and_game_lists_are_channel_bounded_index_reads` |
+| AC-1 / AC-2 / AC-5 | `sqlite/live_game.rs` の共通SQL builder、query plan / backend parity、`projection_list_calls_the_store_once_or_twice_only` |
 | AC-3 / INVAR-3 | `get_game_room`、`game_projection_freshness` の15 test |
 | AC-4 / INVAR-2 / TR-6 | MemoryStore secondary index、`live_and_game_lists_are_bounded_and_channel_indexed_in_both_backends` |
 | INVAR-1 / TR-3 / TR-4 | app-apiのlive、Dome listing、session catch-up、session integrityのtargeted test |
@@ -47,7 +48,8 @@ SEARCH live_session_cache USING COVERING INDEX idx_live_session_cache_topic_star
   - SQLite / MemoryStoreのchannel・limit・更新・単一行取得
   - live、Dome listing、game projection freshness、session catch-up、session integrity、hint rehydration
   - 一覧窓外の終了live heartbeat停止
-- `cargo xtask rust-test` — PASS（1,327 passed、5 skipped）
+  - 一覧store呼出回数は通常1回、refresh時2回、refresh失敗時は再取得なし
+- `cargo xtask rust-test` — PASS（最終delta後は1,329 passed、5 skipped）
 - `cargo xtask scenario desktop_smoke_live_session_persist` — PASS（8 steps）
 - `cargo xtask scenario desktop_smoke_game_room_persist` — PASS（7 steps）
 - `cargo xtask check` — PASS

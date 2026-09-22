@@ -250,10 +250,10 @@ pub(crate) use projection_support::{
     LIVE_GAME_LIST_LIMIT, active_private_channel_participants, archive_private_channel_epoch,
     bookmarked_post_row_is_hidden, current_private_channel_replica_id, filtered_thread_page,
     filtered_timeline_page, initial_private_channel_epoch_id,
-    joined_private_channel_state_from_capability, merged_private_channel_state_from_epoch_join,
-    next_private_channel_epoch_id, private_channel_epoch_capabilities,
-    private_channel_is_epoch_aware, private_channel_replica_for_epoch,
-    profile_timeline_item_is_hidden,
+    joined_private_channel_state_from_capability, load_projection_rows_with_one_refresh,
+    merged_private_channel_state_from_epoch_join, next_private_channel_epoch_id,
+    private_channel_epoch_capabilities, private_channel_is_epoch_aware,
+    private_channel_replica_for_epoch, profile_timeline_item_is_hidden,
 };
 pub(crate) use reaction_integrity::{ReactionKey, VerifiedReaction, load_verified_reaction};
 pub(crate) use session_integrity::{
