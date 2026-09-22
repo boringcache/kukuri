@@ -161,3 +161,19 @@ updater、ファイルdialog、identity export、外部URL起動はそれだけ�
 P2終了時に各groupのmember・caller・停止・連鎖と上流APIの実現可能性を確認し、未分類を0へ更新する。
 固定AC/INVARとNW transitionへの対応を独立監査する。P3/P4では差分を入れたgroupだけを更新し、
 同一headの成功監査と無関係な全suiteを繰り返さない。詳細な作業状態は#1221本文へ記録する。
+
+## 共通受付の状態機械（P2/P3、I/O adapter未接続）
+
+| ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N41 | `NetworkWorkOwner::register_scope/revoke_scope` → scope逆引き → 有限scope/停止指示 | 認証済みscopeのtokenを発行。owner別・再登録別の一意世代、上限64。失効は対象scopeだけに適用 | ADMIT-4/5、revoked_scope / foreign_owner / tenfold_history tests |
+| N42 | `admit/release_waiter` → key索引とwaiter集合 → 受付台帳 | 要求256、64waiters/要求、payload計4MiB。固定長key、scope現在性、LocalOnly拒否、同一metadataのみ合流。通常の実行は最後のwaiter離脱でも所有 | ADMIT-1/2/4、bounds / unchanged_demand / display_cancel tests |
+| N43 | `start_next/expire/next_deadline/next_cancellation/complete` → lane/deadline索引 → 実行許可・停止・完了判定 | 実行8にStoppingも計数。4:2:1、期限に待機時間を含む。取消・期限切れ・失効の結果はDiscard。I/Oと保存guardはadapterが所有 | ADMIT-3/4/5、weighted_lanes / queued_deadline / running_expiry tests |
+
+この3行のproduction callerはまだなく、追加したcontractから全public入口を通す段階。全caller検索は `rg -n 'NetworkWorkOwner|WorkAdmission|WorkCompletion' crates`。メモリ台帳以外のsensitive sinkは追加しない。4MiBはpayload計であり、固定長key・索引・waiterの管理領域は件数上限で別に有界にする。dispatch後のpayloadもcompleteまで予算へ計上する。executorによるI/O停止とguard直下の保存を後続で結合し、この部品の成功を通信全体の上限達成と混同しない。
+
+## gossip I/Oの公開API実証（D9）
+
+N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 contractでnative peerとの双方向wireと未完結header中の取消を確認した。`proto::topic::State`/`topic::Message`を使い、membership本体は再実装しない。`proto::State`の外側Messageはtopicも含む内部配送型で、実wireはheader後にtopic Messageだけを書く点を区別する。所有connectionのDropでcloseし、nativeの内部RecvLoopへ取消を委ねない。
+
+このfixtureは1topic/1peerの短い往復でtimerを発火しない。production入口は増えず、timer容量・複数topicの共有接続・再試行・受信/送信workerの上限は残る。`EndpointHooks`は送信前拒否とhandshake後観測、`RouterBuilder::incoming_filter`は受信spawn前選別に使用可能だが、接続試行futureの失敗/cancel精算はownerが持つ。
