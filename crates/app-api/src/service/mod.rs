@@ -262,6 +262,8 @@ pub(crate) use session_integrity::{
     VerifiedGameRoom, VerifiedLiveSession, load_verified_game_room, load_verified_live_session,
     owner_bound_id_suffix,
 };
+#[cfg(test)]
+pub(crate) use session_integrity::{verify_game_room_record, verify_live_session_record};
 pub(crate) use social_helpers::{
     current_mutual_direct_message_peers, rebuild_author_relationships,
     reconcile_direct_message_subscriptions, schedule_direct_message_reconcile,

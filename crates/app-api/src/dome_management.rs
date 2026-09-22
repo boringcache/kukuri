@@ -100,6 +100,7 @@ pub(crate) fn instance_management_manifest(
 ) -> GameRoomManifestBlobV1 {
     GameRoomManifestBlobV1 {
         room_id: instance.instance_id.clone(),
+        score_revision: None,
         topic_id: instance.spatial_context.topic_id().clone(),
         channel_id: instance.spatial_context.channel_id().cloned(),
         owner_pubkey: instance.owner_pubkey.clone(),

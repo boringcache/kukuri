@@ -301,6 +301,7 @@ pub(crate) fn row_to_live_session_projection(
 ) -> Result<LiveSessionProjectionRow> {
     Ok(LiveSessionProjectionRow {
         session_id: row.get("session_id"),
+        revision: row.get("revision"),
         topic_id: row.get("topic_id"),
         channel_id: row.get("channel_id"),
         host_pubkey: row.get("host_pubkey"),
@@ -324,6 +325,7 @@ pub(crate) fn row_to_game_room_projection(
 ) -> Result<GameRoomProjectionRow> {
     Ok(GameRoomProjectionRow {
         room_id: row.get("room_id"),
+        score_revision: opt_col(&row, "score_revision"),
         topic_id: row.get("topic_id"),
         channel_id: row.get("channel_id"),
         host_pubkey: row.get("host_pubkey"),

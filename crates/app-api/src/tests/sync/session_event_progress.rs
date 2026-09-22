@@ -65,16 +65,25 @@ type LocalReadGate = (BlobHash, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notif
 struct RemoteManifest {
     local: MemoryBlobService,
     remote: MemoryBlobService,
-    fetches: std::sync::atomic::AtomicUsize,
-    fail: std::sync::atomic::AtomicBool,
+    publish_remote: std::sync::atomic::AtomicBool,
+    fetches: Arc<std::sync::atomic::AtomicUsize>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
     gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    admission_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     local_gate: std::sync::Mutex<Option<LocalReadGate>>,
 }
 
 #[async_trait]
 impl BlobService for RemoteManifest {
     async fn put_blob(&self, bytes: Vec<u8>, mime: &str) -> Result<StoredBlob> {
-        self.remote.put_blob(bytes, mime).await
+        if self
+            .publish_remote
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.remote.put_blob(bytes, mime).await
+        } else {
+            self.local.put_blob(bytes, mime).await
+        }
     }
     async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         let gate = self
@@ -88,16 +97,33 @@ impl BlobService for RemoteManifest {
         }
         self.local.fetch_local_blob(hash).await
     }
-    async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        self.fetches
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    async fn prepare_display_fetch(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::DisplayBlobFetch> {
+        let admission = self.admission_gate.lock().unwrap().clone();
+        let permit = match admission {
+            Some(gate) => Some(gate.acquire_owned().await?),
+            None => None,
+        };
+        let fetches = self.fetches.clone();
         let gate = self.gate.lock().unwrap().clone();
-        if let Some(gate) = gate {
-            let _ = gate.acquire().await.unwrap();
-        }
-        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(None);
-        }
+        let fail = self.fail.clone();
+        let remote = self.remote.clone();
+        let hash = hash.clone();
+        Ok(Box::pin(async move {
+            let _permit = permit;
+            fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(gate) = gate {
+                let _ = gate.acquire().await?;
+            }
+            if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(None);
+            }
+            remote.fetch_blob(&hash).await
+        }))
+    }
+    async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         let bytes = self.remote.fetch_blob(hash).await?;
         if let Some(bytes) = &bytes {
             self.local
@@ -135,7 +161,10 @@ struct SessionFixture {
 impl SessionFixture {
     async fn new(kind: &'static str) -> Self {
         let docs = Arc::new(CountingDocsSync::default());
-        let blobs = Arc::new(RemoteManifest::default());
+        let blobs = Arc::new(RemoteManifest {
+            publish_remote: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        });
         let owner_store = Arc::new(MemoryStore::default());
         let owner = app_service_from_dependencies(
             owner_store.clone(),
@@ -172,6 +201,9 @@ impl SessionFixture {
                 .unwrap()
         };
         owner.shutdown().await;
+        blobs
+            .publish_remote
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let store = Arc::new(MemoryStore::default());
         let app = app_service_from_dependencies(
             store.clone(),
@@ -306,6 +338,44 @@ async fn missing_manifest_does_not_retry_on_events_or_rerenders_and_manual_retry
     f.app.shutdown().await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn displayed_manifest_finishing_after_five_seconds_projects_without_another_event() {
+    let f = SessionFixture::new("live").await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.blobs.gate.lock().unwrap() = Some(gate.clone());
+    f.event(&f.key).await;
+    let before = *f.app.last_sync_ts.lock().await;
+    f.app
+        .set_session_display(crate::SessionDisplayRequest {
+            topic: f.topic.into(),
+            scope: TimelineScope::Public,
+            replica_id: f.replica.as_str().into(),
+            session_id: f.id.clone(),
+            kind: "live".into(),
+            observer: "slow-visible".into(),
+            visible: true,
+            retry: false,
+        })
+        .await
+        .unwrap();
+    wait_for_fetches(&f.blobs, 1).await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    gate.add_permits(1);
+    f.app.services.session_projections.wait_idle().await;
+    assert!(
+        f.app
+            .services
+            .projection_store
+            .get_live_session(f.topic, &f.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(*f.app.last_sync_ts.lock().await > before);
+    assert_eq!(f.fetches(), 1);
+    f.app.shutdown().await;
+}
+
 #[tokio::test]
 async fn session_envelope_arrival_projects_without_window_catch_up() {
     for kind in ["live", "game"] {
@@ -427,6 +497,29 @@ async fn queued_cancellation_does_not_spend_budget_and_fetch_concurrency_is_two(
         f.fetches(),
         3,
         "the queued card still has its first attempt"
+    );
+    // 本文取得と共有する内側walk枠を待つ間にも、表示取消で予算を使わない。
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.blobs.admission_gate.lock().unwrap() = Some(admission.clone());
+    for _ in 0..5 {
+        registry
+            .visibility(f.topic, &f.replica, third, "card-2", false, false)
+            .await
+            .unwrap();
+        registry
+            .visibility(f.topic, &f.replica, third, "card-2", true, false)
+            .await
+            .unwrap();
+        registry.schedule(&f.app.services).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(f.fetches(), 3);
+    admission.add_permits(1);
+    registry.wait_idle().await;
+    assert_eq!(
+        f.fetches(),
+        4,
+        "inner admission cancellation must not exhaust the remaining budget"
     );
     f.app.shutdown().await;
     assert!(
@@ -816,6 +909,9 @@ async fn private_channel_removal_cancels_displayed_fetch_and_rejects_stale_regis
         })
         .await
         .unwrap();
+    f.blobs
+        .publish_remote
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let id = f
         .app
         .create_live_session_in_channel(
@@ -830,6 +926,9 @@ async fn private_channel_removal_cancels_displayed_fetch_and_rejects_stale_regis
         )
         .await
         .unwrap();
+    f.blobs
+        .publish_remote
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     let scope = TimelineScope::Channel {
         channel_id: ChannelId::new(channel.channel_id.clone()),
     };

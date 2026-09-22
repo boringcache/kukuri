@@ -252,6 +252,14 @@ impl DelayedBlobService {
 
 #[async_trait]
 impl BlobService for DelayedBlobService {
+    async fn prepare_display_fetch(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::DisplayBlobFetch> {
+        let blobs = self.clone();
+        let hash = hash.clone();
+        Ok(Box::pin(async move { blobs.fetch_blob(&hash).await }))
+    }
     async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         if self
             .remaining_misses
@@ -439,6 +447,7 @@ mod scale_counts;
 mod scale_independence;
 mod session_catch_up;
 mod session_event_progress;
+mod session_manifest_fetch;
 mod shadowing_docs;
 pub(super) use shadowing_docs::ShadowingDocsSync;
 mod subscription_catch_up;

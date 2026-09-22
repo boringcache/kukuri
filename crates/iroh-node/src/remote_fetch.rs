@@ -32,6 +32,41 @@ async fn within_remote_fetch_budget<T>(future: impl Future<Output = T>) -> Optio
     timeout(REMOTE_FETCH_TOTAL_TIMEOUT, future).await.ok()
 }
 
+/// 表示要求が所有する取得。共有walkと合流/切り離しをせず、取消で待機permitとQUIC streamもdropする。
+/// bytesの検証だけを行い、保存は表示権限を再確認する呼出元が所有する。
+pub type DisplayBlobFetch = std::pin::Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send>>;
+
+pub async fn prepare_display_fetch(
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Mutex<RemoteFetchRetryState>,
+    hash: iroh_blobs::Hash,
+) -> Result<DisplayBlobFetch> {
+    let permits = retries.lock().await.walk_permits();
+    let permit = permits.acquire_owned().await?;
+    let node = node.clone();
+    let peers = peers.clone();
+    Ok(Box::pin(async move {
+        let _permit = permit;
+        run_display_fetch(fetch_bytes_from_remote(
+            &node,
+            &peers,
+            "displayed session",
+            &hash.to_string(),
+            hash,
+            "local manifest unavailable",
+            FetchMode::Ephemeral,
+        ))
+        .await
+    }))
+}
+
+async fn run_display_fetch(
+    future: impl Future<Output = Result<Option<Vec<u8>>>>,
+) -> Result<Option<Vec<u8>>> {
+    within_remote_fetch_budget(future).await.unwrap_or(Ok(None))
+}
+
 /// remote fetch の取得モード。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FetchMode {
@@ -543,6 +578,57 @@ mod tests {
 
     fn retries() -> Arc<Mutex<RemoteFetchRetryState>> {
         Arc::new(Mutex::new(RemoteFetchRetryState::default()))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn display_fetch_does_not_continue_io_after_caller_timeout() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let after = writes.clone();
+        let walk = async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            after.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![1_u8]))
+        };
+        let result = timeout(Duration::from_secs(1), run_display_fetch(walk)).await;
+        assert!(result.is_err());
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "a closed display must not cause later I/O"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_display_waiter_never_starts_a_later_walk() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let waiting = {
+            let permits = permits.clone();
+            let started = started.clone();
+            run_display_fetch(async move {
+                let _permit = permits.acquire().await?;
+                started.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(vec![1]))
+            })
+        };
+        assert!(timeout(Duration::from_secs(1), waiting).await.is_err());
+        permits.add_permits(1);
+        tokio::time::advance(REMOTE_FETCH_TOTAL_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn displayed_transfer_can_finish_after_the_old_projection_timeout() {
+        let bytes = run_display_fetch(async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Ok(Some(vec![1]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(bytes, Some(vec![1]));
     }
 
     /// 応答しない peer を模した走査。開始回数だけを数え、総予算まで完了しない。

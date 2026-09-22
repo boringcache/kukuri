@@ -83,7 +83,7 @@ frontend/IPC変更は`cargo xtask desktop-ui-check`、`cargo xtask tauri-test`�
 - 更新前のxtask binaryでのprivate channel scenarioは表示要求を含まずtimeout。無効な検証として扱い、最新runnerで再実行する。post/live/game永続smokeの先行実行は成功。
 - CLI parityで追加2commandの未分類/件数の不一致を検出し、handler・schema・対応表（168入口）とscope revisionを同期。CLIの実peer consumerも表示対象を明示する形へ更新し、認可拒否/伝播のassertionは維持する。
 
-### 最終検証結果（先行の失敗記録を置き換える現在判定）
+### 初回実装49fb601dの検証結果（監査修正前）
 
 | 検証 | 結果 |
 | --- | --- |
@@ -109,3 +109,13 @@ oversized baselineはこれら登録点の増加を明記して更新し、更�
 
 予備レビューの指摘（複数recordによる予算reset、取消待ちでの予算消費、private退出時の解除、liveの古いcommit、ContentReady通知対象の区別、詳細の表示位置）を修正しtestへ対応した。
 正式監査はPR head固定後に実施する。ローカル検証・必須CI・独立監査PASS・merge後の対象surface一致を満たすまでCloseしない。
+
+## 独立監査B-1とmain統合の修正
+
+49fb601dの正式監査はFAIL（inventory 7件、適合6件、INV-5不適合1件、未分類0）。B-1はAC-3/AC-4/INVAR-1、TR-3/6/7に対応するExisting-gap。外側の取消後も既存single-flightの別taskが通信・保存を続け、遅い取得結果が反映されなかった。
+
+旧single-flightを使った取消testは保存回数1（期待0）で失敗した。表示専用のowned futureを導入し、共通walk枠の入場後に試行予算を消費する。表示専用取得はephemeral bytesを返し、保存とprojectionは表示/退出の排他内で行う。共通枠待機を含む30秒の予算内で完了を待ち、取消時には実QUIC streamを閉じる。既存MissingBodyのsingle-flight契約は維持する。
+
+修正後のremote_fetch 10件、session_event_progress 14件、実QUIC取消testが成功。共通枠待機中の取消では予算を使わず、従来の5秒を超える取得もevent追加なしで反映・通知される。
+
+main fa9496a5（署名revision #1260、manifest hash検証 #1261を含む）を統合。live選択が未署名updated_atを使う競合をlive_session_selection_uses_signed_revisionの失敗（Live / Ended不一致）として再現し、署名revisionでの比較へ修正。同testとsession_manifest_fetch 8件が成功。修正後の全体検証とdelta監査を続ける。

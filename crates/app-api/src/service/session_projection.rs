@@ -298,6 +298,7 @@ impl SessionProjections {
                 else {
                     continue;
                 };
+                entry.requested.remove(hash.as_str());
                 let token = registry.tokens.fetch_add(1, Ordering::Relaxed);
                 let (topic, replica, key) = (
                     entry.topic.clone(),
@@ -311,35 +312,47 @@ impl SessionProjections {
                     let Ok(permit) = registry.permits.clone().acquire_owned().await else {
                         return;
                     };
-                    {
-                        let _access = services.session_display_access.lock().await;
-                        let mut state = registry.state.lock().await;
-                        let Some(entry) = state.entries.iter_mut().find(|e| {
-                            e.replica == replica
-                                && e.key == key
-                                && e.running.as_ref().is_some_and(|r| r.token == token)
-                                && !e.observers.is_empty()
-                        }) else {
-                            return;
-                        };
-                        // 待機中の取消には予算を使わない。
-                        entry.spend(&task_hash);
-                        entry.requested.remove(task_hash.as_str());
-                    }
-                    let fetched = tokio::time::timeout(
-                        projection_blob_fetch_timeout(),
-                        services.blob_service.fetch_blob(&task_hash),
+                    let deadline =
+                        tokio::time::Instant::now() + kukuri_blob_service::DISPLAY_FETCH_TIMEOUT;
+                    let prepared = tokio::time::timeout_at(
+                        deadline,
+                        services.blob_service.prepare_display_fetch(&task_hash),
                     )
                     .await;
+                    let fetched = if let Ok(Ok(fetch)) = prepared {
+                        let allowed = {
+                            let _access = services.session_display_access.lock().await;
+                            let mut state = registry.state.lock().await;
+                            if let Some(entry) = state.entries.iter_mut().find(|e| {
+                                e.replica == replica
+                                    && e.key == key
+                                    && e.running.as_ref().is_some_and(|r| r.token == token)
+                                    && !e.observers.is_empty()
+                                    && tokio::time::Instant::now() < deadline
+                            }) {
+                                // 内側の共通walk枠も取得済み。待機取消には予算を使わない。
+                                entry.spend(&task_hash);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if allowed {
+                            tokio::time::timeout_at(deadline, fetch)
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                                .flatten()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     let access = services.session_display_access.lock().await;
-                    if matches!(fetched, Ok(Ok(Some(_))))
-                        && let Err(error) = super::hydration_support::hydrate_session_key_for_fetch(
-                            &services,
-                            &topic,
-                            &replica,
-                            &key,
-                            Some(token),
-                            None,
+                    if let Some(bytes) = fetched
+                        && let Err(error) = cache_and_project_displayed_manifest(
+                            &services, &topic, &replica, &key, &task_hash, bytes, token,
                         )
                         .await
                     {
@@ -406,4 +419,40 @@ impl SessionProjections {
         .await
         .expect("session acquisition tasks finish");
     }
+}
+
+/// 表示/退出との排他を持つ呼出元からだけ保存する。取得futureは保存も別taskも持たない。
+async fn cache_and_project_displayed_manifest(
+    services: &ServiceHandles,
+    topic: &str,
+    replica: &ReplicaId,
+    key: &str,
+    hash: &BlobHash,
+    bytes: Vec<u8>,
+    token: u64,
+) -> Result<usize> {
+    anyhow::ensure!(
+        blake3::hash(&bytes).to_hex().as_str() == hash.as_str(),
+        "manifest hash mismatch"
+    );
+    services
+        .blob_service
+        .put_blob(
+            bytes,
+            if key.starts_with("sessions/live/") {
+                LIVE_MANIFEST_MIME
+            } else {
+                GAME_MANIFEST_MIME
+            },
+        )
+        .await?;
+    super::hydration_support::hydrate_session_key_for_fetch(
+        services,
+        topic,
+        replica,
+        key,
+        Some(token),
+        None,
+    )
+    .await
 }

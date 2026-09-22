@@ -567,6 +567,7 @@ pub(crate) fn live_projection_row(verified: &VerifiedLiveSession) -> LiveSession
     let manifest = verified.manifest();
     LiveSessionProjectionRow {
         session_id: state.session_id.clone(),
+        revision: manifest.revision,
         topic_id: verified.topic_id().to_string(),
         channel_id: channel_storage_id(state.channel_id.as_ref()),
         host_pubkey: state.owner_pubkey.as_str().to_string(),
@@ -591,6 +592,7 @@ pub(crate) fn game_projection_row(verified: &VerifiedGameRoom) -> GameRoomProjec
     let manifest = verified.manifest();
     GameRoomProjectionRow {
         room_id: state.room_id.clone(),
+        score_revision: manifest.score_revision,
         topic_id: verified.topic_id().to_string(),
         channel_id: channel_storage_id(state.channel_id.as_ref()),
         host_pubkey: state.owner_pubkey.as_str().to_string(),

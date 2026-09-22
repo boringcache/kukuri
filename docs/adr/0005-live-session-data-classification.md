@@ -27,6 +27,8 @@ Accepted
 - state と manifest blob は署名を持たない。owner は manifest 全体を content にした `live-session` の envelope に署名して同じ replica の
   `envelopes/<envelope id>` へ置き、`state.last_envelope_id` がそれを指す。読む側は、署名者・id と owner の結び付け・読んだ replica との整合を確かめた
   session だけを反映し、操作にも使う（Issue #1252。規則の正本は ADR 0052 §2）。
+- manifest は owner の署名対象となる必須の `revision` を持つ。初版は 1、更新ごとに 1 増やす。同じ key の候補と永続 projection は revision で新旧を判断し、
+  `state.updated_at` や record の到着順を使わない。#1260 時点で本番 record は無いため、revision の無い旧形式は移行せず拒否する。
 - `LiveSignal` は `SessionStarted` と `SessionEnded` の通知だけに使い、viewer 数の正本にはしない。
 - viewer presence は `LivePresence` heartbeat と local SQLite projection で扱い、restart 後に自動再 join はしない。
 
@@ -34,4 +36,5 @@ Accepted
 - #1262: state/envelopeの到着による個別反映、表示中だけのmanifest取得、未取得候補と検証済みsessionの区別はADR 0052「Session の個別反映と表示要求」に従う。timerによる反映retryはしない。
 - late joiner と restart 後の復元は `docs state + manifest blob` だけで成立しなければならない。
 - 終了済み session は durable state で `Ended` として復元され、新規 join を拒否しなければならない。
+- 過去に署名された revision を置き直しても、終了済み session の表示と操作は過去へ戻らない。
 - viewer count は shared durable state ではなく local projection の TTL 管理で表現される。

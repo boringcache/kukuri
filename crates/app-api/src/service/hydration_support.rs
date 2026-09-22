@@ -443,9 +443,9 @@ pub(crate) async fn hydrate_session_key_for_fetch(
                 SessionRead::Ready(verified) => {
                     if newest_live
                         .as_ref()
-                        .is_none_or(|(time, _)| *time < verified.state().updated_at)
+                        .is_none_or(|(revision, _)| *revision < verified.revision())
                     {
-                        newest_live = Some((verified.state().updated_at, record));
+                        newest_live = Some((verified.revision(), record));
                     }
                 }
                 _ => {}

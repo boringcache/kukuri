@@ -10,6 +10,10 @@ use kukuri_transport::{PeerAddrBook, RemoteFetchRetryState, SeedPeer, parse_endp
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
+pub use kukuri_iroh_node::remote_fetch::DisplayBlobFetch;
+
+pub const DISPLAY_FETCH_TIMEOUT: std::time::Duration = remote_fetch::REMOTE_FETCH_TOTAL_TIMEOUT;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredBlob {
     pub hash: BlobHash,
@@ -31,6 +35,11 @@ pub trait BlobService: Send + Sync {
     /// ローカルのbytesだけを読む。未対応の実装は取得不可とし、remoteへfallbackしない。
     async fn fetch_local_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+    /// 表示要求のfutureが取得を所有する。drop後に取得を続けず、bytesを保存しない。
+    /// 未対応の実装は共有fetchへfallbackしない。
+    async fn prepare_display_fetch(&self, _hash: &BlobHash) -> Result<DisplayBlobFetch> {
+        anyhow::bail!("cancellable display fetch is not supported")
     }
     /// scan 用の一時取得（#609）: remote から取得した bytes を**ローカルストアへ残さない**。
     ///
@@ -164,6 +173,10 @@ impl IrohBlobService {
 
 #[async_trait]
 impl BlobService for MemoryBlobService {
+    async fn prepare_display_fetch(&self, hash: &BlobHash) -> Result<DisplayBlobFetch> {
+        let bytes = self.fetch_local_blob(hash).await?;
+        Ok(Box::pin(async move { Ok(bytes) }))
+    }
     async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         Ok(self.blobs.read().await.get(hash.as_str()).cloned())
     }
@@ -229,6 +242,18 @@ impl BlobService for MemoryBlobService {
 
 #[async_trait]
 impl BlobService for IrohBlobService {
+    async fn prepare_display_fetch(&self, hash: &BlobHash) -> Result<DisplayBlobFetch> {
+        if let Some(bytes) = self.fetch_local_blob(hash).await? {
+            return Ok(Box::pin(async move { Ok(Some(bytes)) }));
+        }
+        remote_fetch::prepare_display_fetch(
+            &self.node,
+            &self.peers,
+            &self.remote_fetch_retries,
+            iroh_blobs::Hash::from_str(hash.as_str())?,
+        )
+        .await
+    }
     async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         let hash = iroh_blobs::Hash::from_str(hash.as_str())?;
         Ok(self

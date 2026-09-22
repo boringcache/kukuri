@@ -1,7 +1,7 @@
 use super::*;
 
 const LIVE_SESSION_SELECT: &str = r#"
-    SELECT lsc.session_id, lsc.topic_id, lsc.host_pubkey, lsc.title, lsc.description,
+    SELECT lsc.session_id, lsc.revision, lsc.topic_id, lsc.host_pubkey, lsc.title, lsc.description,
            lsc.channel_id, lsc.status, lsc.started_at, lsc.ended_at, lsc.updated_at,
            lsc.source_replica_id, lsc.source_key, lsc.manifest_blob_hash, lsc.derived_at,
            lsc.projection_version,
@@ -19,7 +19,7 @@ const LIVE_SESSION_SELECT: &str = r#"
 "#;
 
 const GAME_ROOM_SELECT: &str = r#"
-    SELECT room_id, topic_id, host_pubkey, title, description, status, phase_label,
+    SELECT room_id, score_revision, topic_id, host_pubkey, title, description, status, phase_label,
            channel_id, scores_json, room_kind, metaverse_json, updated_at,
            source_replica_id, source_key, manifest_blob_hash, derived_at, projection_version
     FROM game_room_cache
@@ -68,12 +68,13 @@ impl LiveGameProjectionStore for SqliteStore {
         sqlx::query(
             r#"
             INSERT INTO live_session_cache (
-              session_id, topic_id, channel_id, host_pubkey, title, description, status,
+              session_id, revision, topic_id, channel_id, host_pubkey, title, description, status,
               started_at, ended_at, updated_at, source_replica_id, source_key, manifest_blob_hash,
               derived_at, projection_version
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(session_id) DO UPDATE SET
+              revision = excluded.revision,
               topic_id = excluded.topic_id,
               channel_id = excluded.channel_id,
               host_pubkey = excluded.host_pubkey,
@@ -88,9 +89,11 @@ impl LiveGameProjectionStore for SqliteStore {
               manifest_blob_hash = excluded.manifest_blob_hash,
               derived_at = excluded.derived_at,
               projection_version = excluded.projection_version
+            WHERE excluded.revision > live_session_cache.revision
             "#,
         )
         .bind(row.session_id.as_str())
+        .bind(row.revision)
         .bind(row.topic_id.as_str())
         .bind(row.channel_id.as_str())
         .bind(row.host_pubkey.as_str())
@@ -154,12 +157,13 @@ impl LiveGameProjectionStore for SqliteStore {
         sqlx::query(
             r#"
             INSERT INTO game_room_cache (
-              room_id, topic_id, channel_id, host_pubkey, title, description, status, phase_label,
+              room_id, score_revision, topic_id, channel_id, host_pubkey, title, description, status, phase_label,
               scores_json, room_kind, metaverse_json, updated_at, source_replica_id, source_key,
               manifest_blob_hash, derived_at, projection_version
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             ON CONFLICT(room_id) DO UPDATE SET
+              score_revision = excluded.score_revision,
               topic_id = excluded.topic_id,
               channel_id = excluded.channel_id,
               host_pubkey = excluded.host_pubkey,
@@ -176,9 +180,13 @@ impl LiveGameProjectionStore for SqliteStore {
               manifest_blob_hash = excluded.manifest_blob_hash,
               derived_at = excluded.derived_at,
               projection_version = excluded.projection_version
+            WHERE excluded.score_revision IS NULL
+               OR game_room_cache.score_revision IS NULL
+               OR excluded.score_revision > game_room_cache.score_revision
             "#,
         )
         .bind(row.room_id.as_str())
+        .bind(row.score_revision)
         .bind(row.topic_id.as_str())
         .bind(row.channel_id.as_str())
         .bind(row.host_pubkey.as_str())

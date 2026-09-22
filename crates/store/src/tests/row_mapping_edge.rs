@@ -227,6 +227,7 @@ async fn game_room_status_legacy_aliases_map_to_current_variants() {
         rooms[0],
         GameRoomProjectionRow {
             room_id: "room-open".into(),
+            score_revision: None,
             topic_id: "topic-game-legacy".into(),
             channel_id: "public".into(),
             host_pubkey: "f".repeat(64),

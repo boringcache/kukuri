@@ -774,6 +774,15 @@ impl AppService {
             )
             .await?
             {
+                if self
+                    .services
+                    .projection_store
+                    .get_live_session(topic_id, session_id)
+                    .await?
+                    .is_some_and(|row| row.revision > verified.revision())
+                {
+                    continue;
+                }
                 return Ok(Some(verified.into_parts()));
             }
         }
@@ -800,6 +809,17 @@ impl AppService {
             )
             .await?
             {
+                if let Some(revision) = verified.score_revision()
+                    && self
+                        .services
+                        .projection_store
+                        .get_game_room(topic_id, room_id)
+                        .await?
+                        .and_then(|row| row.score_revision)
+                        .is_some_and(|projected| projected > revision)
+                {
+                    continue;
+                }
                 return Ok(Some(verified.into_parts()));
             }
         }

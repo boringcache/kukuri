@@ -63,6 +63,8 @@ pub(crate) enum SessionRejection {
     IdNotBoundToOwner,
     /// state・manifest blob が、署名された manifest と合わない。
     ManifestMismatch,
+    /// owner の署名対象となる単調増加 revision が無い、または不正。
+    InvalidRevision,
     /// manifest が申告する topic・channel が、読んだ replica と合わない。
     ScopeMismatch,
 }
@@ -77,6 +79,7 @@ impl SessionRejection {
             Self::SignerIsNotOwner => "the manifest was not signed by the session owner",
             Self::IdNotBoundToOwner => "the session id is not bound to its owner",
             Self::ManifestMismatch => "the state or manifest blob differs from the signed manifest",
+            Self::InvalidRevision => "the signed session revision is missing or invalid",
             Self::ScopeMismatch => "the session does not belong to the replica it was read from",
         }
     }
@@ -126,14 +129,14 @@ fn session_id_from_key<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
-/// `envelopes/<envelope id>` の record から、署名と id と kind が正しい envelope を探し、署名者と content を返す。
+/// 署名と id と kind が正しい envelope の署名者、manifest、署名された生 bytes の hash。
 async fn load_signed_manifest<T: DeserializeOwned>(
     docs_sync: &dyn DocsSync,
     replica: &ReplicaId,
     envelope_id: &EnvelopeId,
     expected_kind: &str,
     policy: DocFetchPolicy,
-) -> Result<SessionRead<(Pubkey, T)>> {
+) -> Result<SessionRead<(Pubkey, T, kukuri_core::BlobHash)>> {
     let records = docs_sync
         .query_replica_exact_bounded(
             replica,
@@ -149,7 +152,8 @@ async fn load_signed_manifest<T: DeserializeOwned>(
             && envelope.kind == expected_kind)
             .then_some(())?;
         let manifest = serde_json::from_str::<T>(envelope.content.as_str()).ok()?;
-        Some((envelope.pubkey, manifest))
+        let hash = kukuri_core::blob_hash(envelope.content.as_bytes());
+        Some((envelope.pubkey, manifest, hash))
     });
     Ok(match verified {
         Some(value) => SessionRead::Ready(value),
@@ -181,6 +185,9 @@ impl VerifiedLiveSession {
         if *signer != manifest.owner_pubkey {
             return Err(SessionRejection::SignerIsNotOwner);
         }
+        if manifest.revision < 1 {
+            return Err(SessionRejection::InvalidRevision);
+        }
         if !id_is_bound_to_owner(manifest.session_id.as_str(), &manifest.owner_pubkey) {
             return Err(SessionRejection::IdNotBoundToOwner);
         }
@@ -209,6 +216,10 @@ impl VerifiedLiveSession {
 
     pub(crate) fn manifest(&self) -> &LiveSessionManifestBlobV1 {
         &self.manifest
+    }
+
+    pub(crate) fn revision(&self) -> i64 {
+        self.manifest.revision
     }
 
     pub(crate) fn topic_id(&self) -> &str {
@@ -277,7 +288,7 @@ pub(crate) async fn inspect_live_session_record(
         policy,
     )
     .await?;
-    let (signer, manifest) = match signed {
+    let (signer, manifest, signed_hash) = match signed {
         SessionRead::Ready(value) => value,
         SessionRead::MissingDocs => return Ok(SessionRead::MissingDocs),
         _ => return rejected(SessionRejection::SignedManifestUnavailable),
@@ -289,6 +300,9 @@ pub(crate) async fn inspect_live_session_record(
             Ok(verified) => verified,
             Err(reason) => return rejected(reason),
         };
+    if current_manifest.hash != signed_hash {
+        return rejected(SessionRejection::ManifestMismatch);
+    }
     match read_session_blob::<LiveSessionManifestBlobV1>(blob_service, &current_manifest).await {
         Ok(Some(blob)) if blob == verified.manifest => Ok(SessionRead::Ready(verified)),
         Ok(Some(_)) | Err(_) => rejected(SessionRejection::ManifestMismatch),
@@ -326,7 +340,7 @@ pub(crate) async fn load_verified_live_session(
         .await?
             && newest
                 .as_ref()
-                .is_none_or(|current| verified.state.updated_at > current.state.updated_at)
+                .is_none_or(|current| verified.revision() > current.revision())
         {
             newest = Some(verified);
         }
@@ -368,6 +382,9 @@ impl VerifiedGameRoom {
                 }
                 if !id_is_bound_to_owner(manifest.room_id.as_str(), &manifest.owner_pubkey) {
                     return Err(SessionRejection::IdNotBoundToOwner);
+                }
+                if manifest.score_revision.is_none_or(|revision| revision < 1) {
+                    return Err(SessionRejection::InvalidRevision);
                 }
             }
             GameRoomKind::MetaverseRoom => {
@@ -416,6 +433,10 @@ impl VerifiedGameRoom {
         &self.manifest
     }
 
+    pub(crate) fn score_revision(&self) -> Option<i64> {
+        self.manifest.score_revision
+    }
+
     pub(crate) fn topic_id(&self) -> &str {
         self.topic_id.as_str()
     }
@@ -432,7 +453,7 @@ impl VerifiedGameRoom {
 /// `sessions/game/<id>/state` の record を 1 件検証する。
 ///
 /// 署名つきの manifest があれば、それを確かめてから manifest blob を読む。署名つきの manifest が無い state は、
-/// Dome の id(`dome-`)を持つものだけ manifest blob から確かめる(修正前の client が書いた Dome を読めるようにする)。
+/// state の scope と owner に結び付いた Dome の id のみ manifest blob から確かめる(旧 client の互換例外)。
 pub(crate) async fn verify_game_room_record(
     docs_sync: &dyn DocsSync,
     blob_service: &dyn BlobService,
@@ -481,7 +502,7 @@ pub(crate) async fn inspect_game_room_record(
     .await?;
     let current_manifest = state.current_manifest.clone();
     match signed {
-        SessionRead::Ready((signer, manifest)) => {
+        SessionRead::Ready((signer, manifest, signed_hash)) => {
             let verified = match VerifiedGameRoom::verify(
                 state,
                 Some(&signer),
@@ -492,6 +513,9 @@ pub(crate) async fn inspect_game_room_record(
                 Ok(verified) => verified,
                 Err(reason) => return rejected(reason),
             };
+            if current_manifest.hash != signed_hash {
+                return rejected(SessionRejection::ManifestMismatch);
+            }
             match read_session_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest).await
             {
                 Ok(Some(blob)) if blob == verified.manifest => Ok(SessionRead::Ready(verified)),
@@ -500,6 +524,26 @@ pub(crate) async fn inspect_game_room_record(
             }
         }
         SessionRead::MissingDocs if state.room_id.starts_with("dome-") => {
+            // 未署名 hash の取得を許す旧 Dome 互換例外。ID の整合は認証ではないが、
+            // prefix だけ・別 scope の state を契機に remote 取得へ進めない(#1261)。
+            let Some(scope) = ReplicaPostScope::for_replica(replica, subscription_topic_id) else {
+                return rejected(SessionRejection::UnsupportedReplica);
+            };
+            if !scope.accepts(&state.topic_id, state.channel_id.as_ref()) {
+                return rejected(SessionRejection::ScopeMismatch);
+            }
+            let context = match &state.channel_id {
+                Some(channel_id) => SpatialContextV1::Channel {
+                    topic_id: state.topic_id.clone(),
+                    channel_id: channel_id.clone(),
+                },
+                None => SpatialContextV1::Topic {
+                    topic_id: state.topic_id.clone(),
+                },
+            };
+            if state.room_id != dome_instance_id(&context, &state.owner_pubkey) {
+                return rejected(SessionRejection::IdNotBoundToOwner);
+            }
             match read_session_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest).await
             {
                 Ok(Some(manifest)) => {
@@ -553,7 +597,12 @@ pub(crate) async fn load_verified_game_room(
         .await?
             && newest
                 .as_ref()
-                .is_none_or(|current| verified.state.updated_at > current.state.updated_at)
+                .is_none_or(|current| match verified.manifest.room_kind {
+                    GameRoomKind::ScoreGame => verified.score_revision() > current.score_revision(),
+                    GameRoomKind::MetaverseRoom => {
+                        verified.state.updated_at > current.state.updated_at
+                    }
+                })
         {
             newest = Some(verified);
         }

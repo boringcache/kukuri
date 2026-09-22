@@ -390,6 +390,7 @@ fn live_manifest(
 ) -> LiveSessionManifestBlobV1 {
     LiveSessionManifestBlobV1 {
         session_id: session_id.into(),
+        revision: 1,
         topic_id: topic.clone(),
         channel_id: channel_id.cloned(),
         owner_pubkey: Pubkey::from(owner),
@@ -655,6 +656,7 @@ fn game_manifest(
 ) -> GameRoomManifestBlobV1 {
     GameRoomManifestBlobV1 {
         room_id: room_id.into(),
+        score_revision: Some(1),
         topic_id: topic.clone(),
         channel_id: channel_id.cloned(),
         owner_pubkey: Pubkey::from(owner),
