@@ -77,6 +77,17 @@ irohのmapped address表は `mapped_addrs.rs::AddrMap` の正引き/逆引きHas
 この3行は§4.1の限定実装範囲。署名bindingを取り交わすだけでは、account routeのgossip配信、
 private capsule、旧DM outboxの移行を達成したとは扱わない。
 
+### 追加した暗号化参照（P2実証、I/O未接続）
+
+| ID | 入口 → helper → sink | guard / 上限 | 対応contract |
+| --- | --- | --- | --- |
+| N32 | `seal_receive_offer` → 署名/ECDH/HKDF/AEAD → wire生成 | recipient/参照field/寿命を検証、平文880byte/wire2,048byte。network/storeなし | core `receive_offer_*`、実gossip `account_receive_offer_crosses_real_gossip_with_one_recipient_route` |
+| N33 | `SealedReceiveOfferV1::decode/open` → AEAD復号/署名検証 → VerifiedReceiveOffer | decode前サイズ、版、nonce/cipher、署名sender/recipient/参照/期限。Verified型はscope許可ではない | wrong-recipient、tamper、reencryption forgery、payload上限 |
+| N34 | `seal_private_receive_payload/PrivateReceivePayloadV1::decode/open` → epoch用途分離/AEAD → manifest | channel/epoch/secret一致、平文16,384byte/wire65,536byte。全epochの試行復号なし | private epoch/secret違い、relabel、最大入力、用途/連結の分離 |
+
+N32〜34のsensitive sinkは暗号化/復号と返却値だけ。providerへのblob取得と永続mutationを追加する際は、
+N29のbinding照合およびscope/mutual/失効guardを先行させ、禁止I/Oのtestを追加する。
+
 | sink | 既知の入口group | 必須の支配guard / 禁止副作用 | 差分前の残確認 |
 | --- | --- | --- | --- |
 | endpoint connect / gossip join,publish | N01/03/04、N07〜11、N13/14 | owner受付、protocol/scope候補、同意、endpoint世代。無関係/休止topicのI/O 0 | upstream内部の接続保持/再試行、各public trait caller |

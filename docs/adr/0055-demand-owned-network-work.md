@@ -199,6 +199,46 @@ bindingの追加だけで通知/DM受信経路を置換しない。
 この交換が確認するのはaccountとendpointの対応であり、投稿scope・private能力・通知条件は
 後続の受信guardで別に確認する。外部送信は公開bindingだけで、秘密鍵・private参照・通知本文は含めない。
 
+### 4.2 暗号化された受信参照のwire契約
+
+`SealedReceiveOfferV1`は最大2,048byteのJSON。既存gossipの4,096byte上限を増やさない。
+account routeではこのJSONを専用frameとして使い、旧topic用`GossipHint`へlocatorを詰め込まない。
+gossip topic IDはrouteのUTF-8 bytesのBLAKE3で、既存topic通知の`hint/`接頭辞は付けない。
+一つの受信routeへpublic source、DM、private source、epoch controlの参照を届ける。
+
+- 外側はversion=1、一回限りのsecp256k1公開鍵、24byte nonceの小文字hex、ciphertextの小文字hex。
+  ciphertextにAEADの16byte tagを含め、平文は最大880byte。decode前と個別fieldの両方を制限する。
+- 受信者のaccount公開鍵とのECDHは既存のx-only parity正規化を再利用する。
+  HKDF-SHA256のsaltは `b"kukuri:receive-offer-key:v1"`、IKMはECDH共有値、infoは次のAAD。
+  AADは固定順JSON配列 `["kukuri:receive-offer:v1", 1, ephemeral_pubkey, recipient]` のUTF-8。
+  XChaCha20-Poly1305で暗号化し、nonceとephemeral鍵は生成ごとに更新する。
+- 内側はversion、sender、recipient、reference、issued_at_ms、expires_at_ms、signature。
+  referenceはprovider_endpoint_id、payload_hash、payload_bytes、scopeの固定fieldを持つ。
+  scopeのkindは `public_source/direct_message/private_source/epoch_control`、後二つはepoch_key_idを持つ。
+  endpoint/hash/key IDは32byteの小文字hex。未知field/版を拒否する。
+- 署名は固定順JSON配列
+  `["kukuri:receive-offer:v1", version, sender, recipient, reference, issued_at_ms, expires_at_ms]`
+  のSHA-256に対するaccount Schnorr署名。referenceのfield順は上の順、scopeはkind、epoch_key_idの順。
+  公開鍵暗号を作れるだけでsenderを名乗れないよう、復号後に署名も検証する。
+- offerの寿命は最大5分、未来許容1分、失効は排他的。期限切れofferは配送済み/既読と扱わない。
+  DM outboxと永続grantの再試行は、内容のIDを保って新しいofferを発行する。
+- payload_bytesは参照manifestの実byte数で1〜65,536。本文・DM frame・添付の全体サイズではない。
+  取得側は宣言サイズと上限を両方検査し、宣言と異なるbodyを採用しない。
+  既存の本文/DM/添付をこのmanifest上限へ縮めない。
+
+private manifestはさらに `PrivateReceivePayloadV1` としてepoch内で暗号化する。
+元の参照manifest平文は最大16,384byte、JSON wireは最大65,536byte。
+key IDはBLAKE3 keyed hashの用途 `b"kukuri:receive-epoch-key-id:v1\0"`、暗号keyは別用途
+`b"kukuri:private-receive-payload:v1\0"` を用いる。keyはepoch secret、入力は用途の後に
+channel/epochの順でそれぞれのUTF-8 byte長（big-endian u32）とbytesを連結する。各IDは1〜1,024byte。
+AADは `["kukuri:private-receive-payload:v1", 1, epoch_key_id]` のJSON bytes。
+24byte乱数nonceとXChaCha20-Poly1305を使い、channel/epoch/secretが違う復号を拒否する。
+制御manifestは既存の受信者別暗号化grantを参照し、新epoch secretを旧epochの共通平文にしない。
+
+復号済みofferの署名はI/O許可ではない。受信者はprovider binding、scope参加、DMのmutual、
+private能力と世代を確認してから、そのproviderへmanifestの取得を要求する。
+このwire部品はnetwork・store mutationを行わず、共通ownerと保存への組込みは後続工程が所有する。
+
 ## 5. 保存・再起動・bucket切替（D8・D10）
 
 [ADR 0054](0054-time-bucketed-docs-replicas.md) のlocator・writer・回収契約を共通ownerへ接続する。

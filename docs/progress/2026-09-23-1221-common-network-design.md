@@ -63,3 +63,25 @@ private制御配送・旧DM outbox移行は未完了としてP2/P3へ残す。
 - `cargo test -p kukuri-transport --lib receive_binding`: 5件成功。CNなしの実Iroh接続を含む。
 - `cargo clippy -p kukuri-core -p kukuri-transport --all-targets -- -D warnings`: 成功。
 - 全体testは実行しない。固定headの独立監査とPR/CIで全体確認を行う。
+
+このbinding実装はPR #1306でmerge `78a7b1c2663fe1a0919d34a17ec659d767169ba9`へ統合済み。
+head `9b3cb9c6`の独立監査PASS、全13CI成功、対象13pathの一致を確認した。
+監査: https://github.com/kukuri-app/kukuri/pull/1306#issuecomment-5780377820
+
+## P2実証: 暗号化した参照とprivate manifest
+
+基準は#1306のmerge `78a7b1c2`。gossipのmessage上限4,096byteに対して、
+account宛のofferを2,048byte以内にし、長いsource locatorは参照manifestへ分離した。
+private manifestはさらにchannel/epoch別に暗号化する。DM frame・添付本体のサイズを縮める変更ではない。
+
+| 固定条件 | 実装 / 証拠 |
+| --- | --- |
+| OFFER-1: 宛先以外の復号、senderの詐称、署名したprovider/参照/期限の改変を拒否（NW-8/9） | `seal_receive_offer/SealedReceiveOfferV1::open`。wrong-recipient、tamper、reencryption forgeryのcore tests |
+| OFFER-2: wire/平文/参照manifestのbytes・版・時刻・fieldを有界にする（NW-2/3） | offer平文880byte/wire2,048byte、manifest wire65,536byte、private平文16,384byte。最大入力と無効サイズのtests |
+| OFFER-3: private manifestをchannel/epoch/secretに束縛し、全epoch試行なしで照合（NW-9/DR-3） | `receive_epoch_key_id`、`PrivateReceivePayloadV1::open`。用途分離、ID連結の非曖昧性、epoch/secret違い、relabelのtests |
+| OFFER-4: 一つの受信routeで四種の小さい参照を実gossipで送受信できる（NW-8/9） | `account_receive_offer_crosses_real_gossip_with_one_recipient_route`。4,096byteを超えるmanifestへの参照も2,048byte以内 |
+| OFFER-5: 暗号部品はnetwork/storeを起動せず、署名済み参照をscope許可と混同しない（NET-INVAR-2） | inventory N32〜34。provider binding・scope/mutual/失効guardとblob取得/保存は後続のreceiverが所有 |
+
+関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
+初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
+core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。
