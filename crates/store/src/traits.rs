@@ -223,12 +223,29 @@ where
 #[async_trait]
 pub trait LiveGameProjectionStore: Send + Sync {
     async fn upsert_live_session_cache(&self, row: LiveSessionProjectionRow) -> Result<()>;
-    async fn list_topic_live_sessions(
+    async fn list_channel_live_sessions(
         &self,
         topic_id: &str,
+        channel_id: &str,
+        limit: usize,
     ) -> Result<Vec<LiveSessionProjectionRow>>;
+    async fn get_live_session(
+        &self,
+        topic_id: &str,
+        session_id: &str,
+    ) -> Result<Option<LiveSessionProjectionRow>>;
     async fn upsert_game_room_cache(&self, row: GameRoomProjectionRow) -> Result<()>;
-    async fn list_topic_game_rooms(&self, topic_id: &str) -> Result<Vec<GameRoomProjectionRow>>;
+    async fn list_channel_game_rooms(
+        &self,
+        topic_id: &str,
+        channel_id: &str,
+        limit: usize,
+    ) -> Result<Vec<GameRoomProjectionRow>>;
+    async fn get_game_room(
+        &self,
+        topic_id: &str,
+        room_id: &str,
+    ) -> Result<Option<GameRoomProjectionRow>>;
     async fn upsert_dome_connection_projection(
         &self,
         row: DomeConnectionProjectionRow,

@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -39,6 +40,9 @@ type MemoryDirectMessageTombstones = HashMap<(String, String), DirectMessageTomb
 type MemoryNotificationRows = HashMap<String, NotificationRow>;
 type MemoryContentObservationRows =
     HashMap<(String, String, String, String), ContentObservationRow>;
+type ProjectionScope = (String, String);
+type DescendingProjectionKey = (Reverse<i64>, Reverse<String>);
+type ProjectionIndex = HashMap<ProjectionScope, BTreeSet<DescendingProjectionKey>>;
 
 #[derive(Clone, Default)]
 pub struct MemoryStore {
@@ -51,7 +55,9 @@ pub struct MemoryStore {
     object_projection_rows: Arc<RwLock<HashMap<EnvelopeId, ObjectProjectionRow>>>,
     adult_media_hashes: Arc<RwLock<HashSet<String>>>,
     live_session_rows: Arc<RwLock<HashMap<String, LiveSessionProjectionRow>>>,
+    live_session_index: Arc<RwLock<ProjectionIndex>>,
     game_room_rows: Arc<RwLock<HashMap<String, GameRoomProjectionRow>>>,
+    game_room_index: Arc<RwLock<ProjectionIndex>>,
     dome_connection_rows: Arc<RwLock<HashMap<String, DomeConnectionProjectionRow>>>,
     dome_hosting_rows: Arc<RwLock<HashMap<String, DomeHostingProjectionRow>>>,
     author_relationship_rows:

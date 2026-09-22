@@ -237,11 +237,9 @@ impl Fixture {
         self.app
             .services
             .projection_store
-            .list_topic_game_rooms(TOPIC)
+            .get_game_room(TOPIC, room_id)
             .await
             .unwrap()
-            .into_iter()
-            .find(|row| row.room_id == room_id)
             .unwrap()
     }
 
@@ -875,7 +873,7 @@ async fn restart_and_missing_cache_resolve_docs_at_the_same_timestamp() {
     .await
     .unwrap();
     let row = reopened
-        .list_topic_game_rooms(TOPIC)
+        .list_channel_game_rooms(TOPIC, "public", 100)
         .await
         .unwrap()
         .remove(0);
@@ -894,7 +892,7 @@ async fn restart_and_missing_cache_resolve_docs_at_the_same_timestamp() {
     .await
     .unwrap();
     let rebuilt = reopened
-        .list_topic_game_rooms(TOPIC)
+        .list_channel_game_rooms(TOPIC, "public", 100)
         .await
         .unwrap()
         .remove(0);

@@ -247,9 +247,9 @@ pub(crate) use profile_timeline_support::{
     persist_profile_index_entry, profile_timeline_page_from_docs,
 };
 pub(crate) use projection_support::{
-    active_private_channel_participants, archive_private_channel_epoch,
-    bookmarked_post_row_is_hidden, current_private_channel_replica_id, filter_channel_rows,
-    filtered_thread_page, filtered_timeline_page, initial_private_channel_epoch_id,
+    LIVE_GAME_LIST_LIMIT, active_private_channel_participants, archive_private_channel_epoch,
+    bookmarked_post_row_is_hidden, current_private_channel_replica_id, filtered_thread_page,
+    filtered_timeline_page, initial_private_channel_epoch_id,
     joined_private_channel_state_from_capability, merged_private_channel_state_from_epoch_join,
     next_private_channel_epoch_id, private_channel_epoch_capabilities,
     private_channel_is_epoch_aware, private_channel_replica_for_epoch,

@@ -91,10 +91,8 @@ pub(crate) async fn hydrate_game_room_from_record(
             }
             if let Some(mut cached) = services
                 .projection_store
-                .list_topic_game_rooms(topic_id)
+                .get_game_room(topic_id, row.room_id.as_str())
                 .await?
-                .into_iter()
-                .find(|cached| cached.room_id == row.room_id)
             {
                 cached.derived_at = row.derived_at;
                 if cached == row {

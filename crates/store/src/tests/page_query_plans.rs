@@ -140,6 +140,45 @@ async fn page_queries_are_index_range_reads() {
     }
 }
 
+// #1292: live / game の一覧は topic 全体を読んでから channel を絞らず、
+// (topic, channel, 時刻, id) の索引範囲から固定件数だけを読む。
+#[tokio::test]
+async fn live_and_game_lists_are_channel_bounded_index_reads() {
+    use crate::sqlite::live_game::{game_room_list_query, live_session_list_query};
+
+    let store = SqliteStore::connect_memory().await.expect("sqlite store");
+    for (name, mut builder, expected_index) in [
+        (
+            "live sessions",
+            live_session_list_query(EXPLAIN, "topic", "channel", 100),
+            "idx_live_session_cache_topic_started (topic_id=? AND channel_id=?)",
+        ),
+        (
+            "game rooms",
+            game_room_list_query(EXPLAIN, "topic", "channel", 100),
+            "idx_game_room_cache_topic_updated (topic_id=? AND channel_id=?)",
+        ),
+    ] {
+        let plan = builder
+            .build()
+            .fetch_all(store.pool())
+            .await
+            .expect("query plan")
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            plan.contains(expected_index),
+            "{name} must use the channel-bounded index range: {plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "{name} must not sort every matching row: {plan}"
+        );
+    }
+}
+
 // thread のページは、root が先頭、返信は古い順。root の時刻が返信より後でも(時計のずれ)、ページを継いで
 // 全行を 1 回ずつ読める。channel で絞っても同じ。
 #[tokio::test]

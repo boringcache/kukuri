@@ -16,46 +16,39 @@ impl AppService {
     ) -> Result<Vec<GameRoomView>> {
         self.ensure_scope_subscriptions(topic_id, &scope).await?;
         let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
-        let allowed = BTreeSet::from([self.allowed_channel_id_for_scope(topic_id, &scope).await?]);
-        let mut rows = filter_channel_rows(
+        let channel_id = self.allowed_channel_id_for_scope(topic_id, &scope).await?;
+        let allowed = BTreeSet::from([channel_id.clone()]);
+        let mut rows =
             self.services
                 .projection_store
-                .list_topic_game_rooms(topic_id)
-                .await?,
-            &allowed,
-            |row| row.channel_id.as_str(),
-        )
-        .into_iter()
-        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-        .filter(|row| {
-            row.room_kind != GameRoomKind::MetaverseRoom
-                || row
-                    .metaverse
-                    .as_ref()
-                    .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-        })
-        .collect::<Vec<_>>();
+                .list_channel_game_rooms(topic_id, channel_id.as_str(), LIVE_GAME_LIST_LIMIT)
+                .await?
+                .into_iter()
+                .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
+                .filter(|row| {
+                    row.room_kind != GameRoomKind::MetaverseRoom
+                        || row.metaverse.as_ref().is_some_and(|state| {
+                            state.instance_status == DomeInstanceStatusV1::Active
+                        })
+                })
+                .collect::<Vec<_>>();
         if rows.is_empty() {
             // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
             self.catch_up_scope_sessions(topic_id, &scope).await?;
-            rows = filter_channel_rows(
-                self.services
-                    .projection_store
-                    .list_topic_game_rooms(topic_id)
-                    .await?,
-                &allowed,
-                |row| row.channel_id.as_str(),
-            )
-            .into_iter()
-            .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-            .filter(|row| {
-                row.room_kind != GameRoomKind::MetaverseRoom
-                    || row
-                        .metaverse
-                        .as_ref()
-                        .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-            })
-            .collect();
+            rows = self
+                .services
+                .projection_store
+                .list_channel_game_rooms(topic_id, channel_id.as_str(), LIVE_GAME_LIST_LIMIT)
+                .await?
+                .into_iter()
+                .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
+                .filter(|row| {
+                    row.room_kind != GameRoomKind::MetaverseRoom
+                        || row.metaverse.as_ref().is_some_and(|state| {
+                            state.instance_status == DomeInstanceStatusV1::Active
+                        })
+                })
+                .collect();
         }
         let mut items = Vec::with_capacity(rows.len());
         for mut row in rows {

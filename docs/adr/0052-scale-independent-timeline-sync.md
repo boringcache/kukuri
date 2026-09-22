@@ -232,6 +232,10 @@ Accepted
   （`created_at < ? OR (…)` や `? IS NULL OR …` の形は、遡った深さに比例して行を読み飛ばす）。タイムラインのページは 1 つの channel だけを読み、(topic, channel, 時刻, id)
   の索引の範囲を読む。複数の channel をまたぐページ（以前の `TimelineScope::AllJoined`）は、許可されない channel の行を件数に比例して読み飛ばすので、API・CLI から閉じた（#1280）。
   thread は、root を先頭に置くために全行を並べ替えない。root は最初のページでだけ 1 行引きし、返信は (topic, root, 時刻, id) の索引の範囲を cursor の位置から読む。
+- live session と game room の一覧は、scope が許可した 1 つの channel について、既存の
+  `(topic_id, channel_id, started_at, session_id)` / `(topic_id, channel_id, updated_at, room_id)` の索引範囲から新しい側を最大 100 行読む。
+  初回取得と session の追いつき後の再取得は同じ上限を使う。非表示の host と表示できない Dome を除いた結果が 100 件未満でも、表示件数を満たすために古い行を
+  読み足さない。ScoreGame の反映時に既存 cache と比較するときは一覧から探さず、room id の単一行取得を使う（#1292）。
 - 1 回の照合・追いつきが reaction を読む投稿の数に上限を置く（初期値 64。replica 1 つの照合 1 回、または追いつき 1 回あたりで、読む件数を増やして繰り返す batch の合計と、追いつきの読み直しを含む。scope の replica ごとに数えるので、参加中の全 channel を読む内部の照合（root の channel が分からない thread）1 回では replica 数 × 64 が上限になる。1 投稿あたりの reaction の上限 32 と合わせて、1 回の読み出しの最悪の量を抑える）。
 
 ### 6. key 設計と移行

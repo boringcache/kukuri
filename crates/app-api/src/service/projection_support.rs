@@ -3,6 +3,8 @@ use super::*;
 /// 非表示の著者の行を読み飛ばすために、1 回の取得で読む projection のページ数の上限(ADR 0052 §5)。
 /// 非表示の著者の投稿が続く範囲でも、1 回の取得が読む行数を定数で抑える。
 pub(crate) const HIDDEN_AUTHOR_SKIP_PAGES: usize = 4;
+/// live / game 一覧1回で読むprojection行の上限。catch-up後の再取得も同じ上限を使う(#1292)。
+pub(crate) const LIVE_GAME_LIST_LIMIT: usize = 100;
 
 enum VisibleRows {
     /// `limit` 件に届いた、または行が尽きた。値は、返すページの `next_cursor`。
@@ -121,16 +123,6 @@ pub(crate) async fn filtered_thread_page(
         items,
         next_cursor: current_cursor,
     })
-}
-
-pub(crate) fn filter_channel_rows<T>(
-    rows: Vec<T>,
-    allowed_channels: &BTreeSet<String>,
-    channel_id: impl Fn(&T) -> &str,
-) -> Vec<T> {
-    rows.into_iter()
-        .filter(|row| allowed_channels.contains(channel_id(row)))
-        .collect()
 }
 
 pub(crate) fn object_projection_row_is_hidden(
