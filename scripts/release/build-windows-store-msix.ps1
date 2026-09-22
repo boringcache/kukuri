@@ -111,7 +111,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "git status failed"
 }
 if ($gitStatus -and -not $AllowDirty) {
-    throw "Store packages require a clean worktree (use -AllowDirty only for local development validation)"
+    throw "Store packages require a clean worktree (use -AllowDirty only for local development validation): $gitStatus"
 }
 $sourceCommit = (& git -C $repoRoot rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
