@@ -1,3 +1,4 @@
+import { useSessionProjectionRefresh } from '@/shell/data/useSessionProjectionRefresh';
 import {
   startTransition,
   useCallback,
@@ -771,6 +772,8 @@ export function useDesktopShellData({
     api, activePrimarySection: shellChromeState.activePrimarySection, translate,
   });
   const {
+    loadLiveSection,
+    loadGameSection,
     loadShellSections,
     loadProfileSection,
     loadAuthorSection,
@@ -786,6 +789,8 @@ export function useDesktopShellData({
     storeApi,
     translate,
   });
+  useSessionProjectionRefresh(storeApi, loadLiveSection, loadGameSection, visibleColumnIdsRef);
+
   const runLoadTopics = useCallback(
     async (_currentTopics: string[], currentActiveTopic: string, currentThread: string | null) => {
       await refreshVisibleShellData(currentActiveTopic, currentThread, 'apply');

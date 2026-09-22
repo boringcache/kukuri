@@ -11,6 +11,9 @@ struct DelayedPresetBlob {
 
 #[async_trait]
 impl BlobService for DelayedPresetBlob {
+    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetch_blob(hash).await
+    }
     async fn put_blob(&self, bytes: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(bytes, mime).await
     }

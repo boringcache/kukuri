@@ -41,6 +41,21 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
 
     assert_eq!(
         receiver
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("local read"),
+        None
+    );
+    assert_eq!(
+        sender
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("local bytes"),
+        Some(b"remote-only-attachment".to_vec())
+    );
+
+    assert_eq!(
+        receiver
             .local_blob_status(&stored.hash)
             .await
             .expect("receiver local status"),

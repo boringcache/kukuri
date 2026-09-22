@@ -4,8 +4,6 @@
 //! 無いものを key 指定で反映する。読む量は replica の総 entry 数に依存しない。窓より古い範囲は、利用者が
 //! 遡ったときのページの範囲の照合(`replica_window.rs`)が反映する。
 
-use super::game_projection_support::hydrate_game_room_from_record;
-use super::hydration_support::hydrate_live_session_from_record;
 use super::replica_window::{
     RANGE_CHECK_REACTION_TARGETS, RANGE_CHECK_REACTIONS_PER_OBJECT,
     TIME_INDEX_FUTURE_ALLOWANCE_SECS, ensure_index_entries_projected,
@@ -218,7 +216,7 @@ pub(crate) async fn catch_up_sessions(
     services: &ServiceHandles,
     topic_id: &str,
     replica: &ReplicaId,
-    policy: DocFetchPolicy,
+    _policy: DocFetchPolicy,
 ) -> Result<()> {
     let docs_sync = services.docs_sync.as_ref();
     let mut live_keys = BTreeSet::new();
@@ -230,26 +228,7 @@ pub(crate) async fn catch_up_sessions(
         live_keys.extend(session_state_keys(docs_sync, replica, prefix, order).await?);
     }
     for key in live_keys {
-        for record in docs_sync
-            .query_replica_exact_bounded(
-                replica,
-                key.as_str(),
-                MAX_ENVELOPE_RECORDS_PER_OBJECT,
-                policy,
-            )
-            .await?
-        {
-            hydrate_live_session_from_record(
-                docs_sync,
-                services.blob_service.as_ref(),
-                services.projection_store.as_ref(),
-                topic_id,
-                replica,
-                record,
-                policy,
-            )
-            .await?;
-        }
+        super::hydration_support::hydrate_session_key(services, topic_id, replica, &key).await?;
     }
     let mut game_keys = BTreeSet::new();
     for (prefix, order) in [
@@ -260,17 +239,7 @@ pub(crate) async fn catch_up_sessions(
         game_keys.extend(session_state_keys(docs_sync, replica, prefix, order).await?);
     }
     for key in game_keys {
-        for record in docs_sync
-            .query_replica_exact_bounded(
-                replica,
-                key.as_str(),
-                MAX_ENVELOPE_RECORDS_PER_OBJECT,
-                policy,
-            )
-            .await?
-        {
-            hydrate_game_room_from_record(services, topic_id, replica, record).await?;
-        }
+        super::hydration_support::hydrate_session_key(services, topic_id, replica, &key).await?;
     }
     Ok(())
 }

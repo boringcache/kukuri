@@ -1,4 +1,4 @@
-﻿use crate::*;
+use crate::*;
 
 pub(crate) async fn wait_for_live_session(
     runtime: &DesktopRuntime,
@@ -24,6 +24,18 @@ pub(crate) async fn wait_for_live_session_in_scope(
     session_id: &str,
     step_timeout: Duration,
 ) -> Result<kukuri_app_api::LiveSessionView> {
+    runtime
+        .set_session_display(kukuri_desktop_runtime::SessionDisplayRequest {
+            topic: topic.into(),
+            scope: scope.clone(),
+            replica_id: String::new(),
+            session_id: session_id.into(),
+            kind: "live".into(),
+            observer: format!("harness-{session_id}"),
+            visible: true,
+            retry: false,
+        })
+        .await?;
     timeout(step_timeout, async {
         loop {
             let sessions = runtime
@@ -183,6 +195,18 @@ pub(crate) async fn wait_for_game_room_in_scope(
     room_id: &str,
     step_timeout: Duration,
 ) -> Result<kukuri_app_api::GameRoomView> {
+    runtime
+        .set_session_display(kukuri_desktop_runtime::SessionDisplayRequest {
+            topic: topic.into(),
+            scope: scope.clone(),
+            replica_id: String::new(),
+            session_id: room_id.into(),
+            kind: "game".into(),
+            observer: format!("harness-{room_id}"),
+            visible: true,
+            retry: false,
+        })
+        .await?;
     timeout(step_timeout, async {
         loop {
             let rooms = runtime

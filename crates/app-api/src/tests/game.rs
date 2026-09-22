@@ -66,6 +66,8 @@ async fn game_room_score_update_replicates() {
         .await
         .expect("update game room");
 
+    display_remote_session(&app_b, topic, &room_id, "game").await;
+
     let received = timeout(Duration::from_secs(60), async {
         loop {
             let rooms = app_b.list_game_rooms(topic).await.expect("list game rooms");
@@ -135,6 +137,8 @@ async fn metaverse_room_events_replicate_between_iroh_peers() {
         )
         .await
         .expect("create metaverse room");
+
+    display_remote_session(&app_b, topic, &room_id, "game").await;
 
     timeout(Duration::from_secs(60), async {
         loop {

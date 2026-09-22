@@ -798,6 +798,10 @@ export type CreateLiveSessionRequest = { topic: string, channel_ref: ChannelRef,
 
 export type LiveSessionCommandRequest = { topic: string, session_id: string, };
 
+export type SessionDisplayRequest = { topic: string, scope: TimelineScope, replica_id: string, session_id: string, kind: string, observer: string, visible: boolean, retry: boolean, };
+
+export type SessionCandidateView = { replica_id: string, session_id: string, kind: string, };
+
 export type ListGameRoomsRequest = { topic: string, scope: TimelineScope, };
 
 export type CreateGameRoomRequest = { topic: string, channel_ref: ChannelRef, title: string, description: string, participants: Array<string>, };

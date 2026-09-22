@@ -34,6 +34,9 @@ impl GatedBlobService {
 
 #[async_trait]
 impl BlobService for GatedBlobService {
+    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetch_blob(hash).await
+    }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.puts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_blob(data, mime).await
@@ -77,6 +80,7 @@ struct ControlledDocs {
     queries: AtomicUsize,
     fail_local_query: AtomicBool,
     local_gate: TokioMutex<Option<(String, Arc<FetchGate>)>>,
+    local_gate_skip: AtomicUsize,
 }
 
 #[async_trait]
@@ -107,11 +111,18 @@ impl DocsSync for ControlledDocs {
         if let DocQuery::Exact(key) = query
             && policy == DocFetchPolicy::LocalOnly
         {
-            let gate = self
-                .local_gate
-                .lock()
-                .await
-                .take_if(|(target, _)| *target == key);
+            let skip = self
+                .local_gate_skip
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            let gate = if skip {
+                None
+            } else {
+                self.local_gate
+                    .lock()
+                    .await
+                    .take_if(|(target, _)| *target == key)
+            };
             if let Some((_, gate)) = gate {
                 // The canonical snapshot is fixed; the caller must protect its commit.
                 gate.entered.notify_one();
@@ -619,6 +630,8 @@ async fn comparison_and_commit_exclude_same_room_writer(sqlite: bool) {
         .unwrap();
     assert_ne!(room_id, other_room);
     let gate = Arc::new(FetchGate::default());
+    // #1262: 最初のstate読みもLocalOnlyになった。guardを確かめる停止点は、その後のlock内のcanonical比較。
+    fixture.docs.local_gate_skip.store(1, Ordering::SeqCst);
     *fixture.docs.local_gate.lock().await =
         Some((fixture.row(&room_id).await.source_key, gate.clone()));
     let services = fixture.app.services.clone();
@@ -717,7 +730,7 @@ async fn canonical_read_failure_and_cancel_release_the_room() {
 }
 
 #[tokio::test]
-async fn missing_blob_retry_refreshes_without_overwriting_the_cache() {
+async fn missing_blob_arrival_refreshes_without_overwriting_the_cache() {
     for sqlite in [false, true] {
         let fixture = Fixture::new(sqlite).await;
         let room_id = fixture.create().await;
@@ -743,12 +756,15 @@ async fn missing_blob_retry_refreshes_without_overwriting_the_cache() {
         .unwrap();
         assert_eq!(fixture.row(&room_id).await, before);
         assert_eq!(fixture.mutation_counts().await, writes);
+        assert_eq!(
+            hydration.await.unwrap().unwrap(),
+            0,
+            "missing manifest ends this attempt"
+        );
         fixture.blobs.hidden.lock().await.clear();
         assert_eq!(
-            timeout(Duration::from_secs(15), hydration)
+            refresh_trigger(&fixture.app.services, &room_id, false)
                 .await
-                .unwrap()
-                .unwrap()
                 .unwrap(),
             1
         );

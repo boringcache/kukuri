@@ -163,6 +163,26 @@ Accepted
 - reaction・live session・game room でも、検証に通らない record と読めない record は、その object だけを飛ばす（warn）。全件走査・event・hint・利用者の操作を失敗させない。
 - reaction の行と、live session・game room の行は、`projection_version` 2 から検証済みの record だけで作る。それより前の行は migration で消し、手元の docs から反映し直す。
 
+### 2.1 Session の個別反映と表示要求（#1262）
+
+- live session / game room の state と `envelopes/<id>` は、到着したentryを契機に対象keyだけを`LocalOnly`で読む。
+  envelopeの署名・kind・idを確かめ、contentが指すsessionのstateを個別反映する。署名・owner・scope・manifest一致の既存検証は維持する。
+- 確定的な拒否、docs entry未取得、manifest欠損、検証済みを区別し、sleepを挟む読み直しはしない。
+  sessionの反映が0件という理由で窓の追いつきやreplica再同期を依頼しない。
+- entry通知がbytesの到着に先行した場合は、通知のcontent hashが読み出したrecordに含まれるかで区別する。
+  待ち先は全体64件までのkey/hashの集合に置き、`ContentReady`で対象を再確認する。同じkeyの不正recordが既存でも、
+  通知された正常recordの未取得を確定的拒否と混同しない。窓の外でもこの個別反映を使う。
+- session manifestのremote取得は表示範囲内の一覧カードと開いている詳細だけが要求できる。購読、topic選択、一覧APIの呼出しだけでは要求しない。
+  blobの局所読みは`BlobService::fetch_local_blob`を使い、未対応の実装は取得不可としてremoteにfallbackしない。
+- 未取得候補を検証済みsession projectionへ昇格させない。上限つきの候補表示は通常の参加・更新操作を持たず、表示要求による取得が完了して検証に通れば通常のsessionへ置き換わる。
+- 作業集合は64 session、1 keyの候補は既存のexact read上限以内、待機taskは1 keyに1つで全体64、実取得は全体2。
+  同一replica/session key/manifestの組につき最大3試行。同じkeyの全recordをまとめて候補集合を更新し、重複event・再描画・取得待ち中の取消で予算を初期化/消費しない。
+  試行は実取得開始時に数える。失敗したhashのtimer再試行はなく、再表示または明示的な再試行要求が必要。同じ予算内で扱う。
+  hash別予算履歴はsessionごと64件までで、現行候補以外の古い履歴を削除する。非表示の作業集合は容量到達時に削除し、退出・shutdown時は関連taskと待ち先を削除する。
+- 取得は購読loopの外で進める。完了時は現在のstateから再検証する。ScoreGameのroom単位のlock・pointer比較を維持し、
+  liveも終了操作とprojection commitを同じsession単位のlockで直列化して現在pointerを確認する。古い取得結果で新しいprojectionへ巻き戻さない。
+- 候補の増減と取得完了、`ContentReady`による反映は既存の同期状態変更通知へ反映し、画面は通知の変化で表示中のsession一覧を読み直す。同じ候補集合の反復では通知を進めない。明示的に開いた詳細の未取得候補は表示位置へ移し、窓の外でもその対象を要求できる。
+
 ### 3. docs の読み出しの規則
 
 - docs の query は、必ず key の索引（`SortBy::KeyAuthor`）で読む。`Exact` と `Prefix` の結果は key の昇順になる。

@@ -36,6 +36,7 @@ async fn late_joiner_backfills_live_session_manifest() {
         .expect("ticket b value");
     app_a.import_peer_ticket(&ticket_b).await.expect("import b");
     app_b.import_peer_ticket(&ticket_a).await.expect("import a");
+    display_remote_session(&app_b, topic, &session_id, "live").await;
 
     let received = timeout(Duration::from_secs(10), async {
         loop {

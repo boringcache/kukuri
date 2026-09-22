@@ -6,21 +6,44 @@ use super::*;
 /// 行は、owner が署名した manifest と、読んだ replica の topic / channel に照らして確かめた session から作る(#1252)。
 /// 検証に通らない record は warn を出して `false` を返し、エラーにしない。
 pub(crate) async fn hydrate_live_session_from_record(
-    docs_sync: &dyn DocsSync,
-    blob_service: &dyn BlobService,
-    projection_store: &dyn ProjectionStore,
+    services: &ServiceHandles,
     topic_id: &str,
     replica: &ReplicaId,
     record: DocRecord,
     policy: DocFetchPolicy,
 ) -> Result<bool> {
-    let Some(verified) =
-        verify_live_session_record(docs_sync, blob_service, replica, topic_id, &record, policy)
-            .await?
-    else {
+    let result = super::session_integrity::inspect_live_session_record(
+        services.docs_sync.as_ref(),
+        services.blob_service.as_ref(),
+        replica,
+        topic_id,
+        &record,
+        policy,
+    )
+    .await?;
+    let Some(verified) = result.verified() else {
         return Ok(false);
     };
-    hydrate_verified_live_session(projection_store, &verified).await
+    let _guard = services
+        .live_session_projections
+        .lock(&verified.state().session_id)
+        .await;
+    let current = services
+        .docs_sync
+        .query_replica_exact_bounded(
+            replica,
+            &record.key,
+            MAX_ENVELOPE_RECORDS_PER_OBJECT,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await?;
+    if !current
+        .iter()
+        .any(|candidate| candidate.value == record.value)
+    {
+        return Ok(false);
+    }
+    hydrate_verified_live_session(services.projection_store.as_ref(), &verified).await
 }
 
 async fn hydrate_verified_live_session(
@@ -39,63 +62,7 @@ async fn hydrate_verified_live_session(
     Ok(true)
 }
 
-pub(crate) async fn hydrate_live_session_from_key(
-    docs_sync: &dyn DocsSync,
-    blob_service: &dyn BlobService,
-    projection_store: &dyn ProjectionStore,
-    topic_id: &str,
-    replica: &ReplicaId,
-    key: &str,
-) -> Result<bool> {
-    let Some(session_id) = key
-        .strip_prefix("sessions/live/")
-        .and_then(|rest| rest.strip_suffix("/state"))
-    else {
-        return Ok(false);
-    };
-    let Some(verified) = load_verified_live_session(
-        docs_sync,
-        blob_service,
-        replica,
-        topic_id,
-        session_id,
-        DocFetchPolicy::LocalThenRemote,
-    )
-    .await?
-    else {
-        return Ok(false);
-    };
-    hydrate_verified_live_session(projection_store, &verified).await
-}
-
-pub(crate) async fn hydrate_live_session_from_key_with_retry(
-    docs_sync: &dyn DocsSync,
-    blob_service: &dyn BlobService,
-    projection_store: &dyn ProjectionStore,
-    topic_id: &str,
-    replica: &ReplicaId,
-    key: &str,
-) -> Result<usize> {
-    for attempt in 0..session_projection_retry_attempts() {
-        if hydrate_live_session_from_key(
-            docs_sync,
-            blob_service,
-            projection_store,
-            topic_id,
-            replica,
-            key,
-        )
-        .await?
-        {
-            return Ok(1);
-        }
-        if attempt + 1 < session_projection_retry_attempts() {
-            tokio::time::sleep(session_projection_retry_delay()).await;
-        }
-    }
-    Ok(0)
-}
-
+#[cfg(test)]
 pub(crate) async fn hydrate_game_room_from_key(
     services: &ServiceHandles,
     topic_id: &str,
@@ -119,23 +86,6 @@ pub(crate) async fn hydrate_game_room_from_key(
     Ok(hydrated)
 }
 
-pub(crate) async fn hydrate_game_room_from_key_with_retry(
-    services: &ServiceHandles,
-    topic_id: &str,
-    replica: &ReplicaId,
-    key: &str,
-) -> Result<usize> {
-    for attempt in 0..session_projection_retry_attempts() {
-        if hydrate_game_room_from_key(services, topic_id, replica, key).await? {
-            return Ok(1);
-        }
-        if attempt + 1 < session_projection_retry_attempts() {
-            tokio::time::sleep(session_projection_retry_delay()).await;
-        }
-    }
-    Ok(0)
-}
-
 /// key だけを指定する形(test 用)。本番の購読は、event の docs author を渡す `hydrate_subscription_doc_event` を使う。
 #[cfg(test)]
 pub(crate) async fn hydrate_subscription_event(
@@ -144,7 +94,7 @@ pub(crate) async fn hydrate_subscription_event(
     replica: &ReplicaId,
     key: &str,
 ) -> Result<usize> {
-    hydrate_doc_event_key(services, topic_id, replica, key, None).await
+    hydrate_doc_event_key(services, topic_id, replica, key, None, None).await
 }
 
 /// docs の event を 1 件、key 単位で反映する。`docs_author` は、その entry を書いた docs author(`DocEvent::docs_author`)。
@@ -156,7 +106,19 @@ pub(crate) async fn hydrate_subscription_doc_event(
     event: &DocEvent,
 ) -> Result<usize> {
     let docs_author = event.docs_author.as_deref();
-    hydrate_doc_event_key(services, topic_id, replica, event.key.as_str(), docs_author).await
+    let result = hydrate_doc_event_key(
+        services,
+        topic_id,
+        replica,
+        event.key.as_str(),
+        docs_author,
+        (!event.content_hash.is_empty()).then_some(event.content_hash.as_str()),
+    )
+    .await;
+    if event.key.starts_with("sessions/") || event.key.starts_with("envelopes/") {
+        services.session_projections.schedule(services).await;
+    }
+    result
 }
 
 async fn hydrate_doc_event_key(
@@ -165,9 +127,9 @@ async fn hydrate_doc_event_key(
     replica: &ReplicaId,
     key: &str,
     docs_author: Option<&str>,
+    expected_hash: Option<&str>,
 ) -> Result<usize> {
     let docs_sync = services.docs_sync.as_ref();
-    let blob_service = services.blob_service.as_ref();
     let projection_store = services.projection_store.as_ref();
     // `state` と `envelope` のどちらの event でも反映を試す(#1248)。行は envelope から作るので、`state` が先に
     // 届いた投稿は `envelope` の event で反映される。`envelope` の event は、行がまだ無いときだけ反映する。
@@ -219,18 +181,68 @@ async fn hydrate_doc_event_key(
         .is_some_and(PostWithdrawalHydration::applied) as usize);
     }
     if key.starts_with("sessions/live/") && key.ends_with("/state") {
-        return hydrate_live_session_from_key_with_retry(
-            docs_sync,
-            blob_service,
-            projection_store,
+        return hydrate_session_key_for_fetch(
+            services,
             topic_id,
             replica,
             key,
+            None,
+            expected_hash,
         )
         .await;
     }
     if key.starts_with("sessions/game/") && key.ends_with("/state") {
-        return hydrate_game_room_from_key_with_retry(services, topic_id, replica, key).await;
+        return hydrate_session_key_for_fetch(
+            services,
+            topic_id,
+            replica,
+            key,
+            None,
+            expected_hash,
+        )
+        .await;
+    }
+    if key.starts_with("envelopes/") {
+        let records = docs_sync
+            .query_replica_exact_bounded(
+                replica,
+                key,
+                MAX_ENVELOPE_RECORDS_PER_OBJECT,
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?;
+        if records.is_empty()
+            || expected_hash.is_some_and(|hash| !records.iter().any(|r| r.content_hash == hash))
+        {
+            services
+                .session_projections
+                .defer_entry(topic_id, replica, key, expected_hash)
+                .await;
+        }
+        let mut applied = 0;
+        for record in records {
+            let Ok(envelope) = serde_json::from_slice::<KukuriEnvelope>(&record.value) else {
+                continue;
+            };
+            if envelope.verify().is_err() || key != format!("envelopes/{}", envelope.id.as_str()) {
+                continue;
+            }
+            let target = match envelope.kind.as_str() {
+                "live-session" => {
+                    serde_json::from_str::<LiveSessionManifestBlobV1>(&envelope.content)
+                        .ok()
+                        .map(|m| format!("sessions/live/{}/state", m.session_id))
+                }
+                "game-session" => serde_json::from_str::<GameRoomManifestBlobV1>(&envelope.content)
+                    .ok()
+                    .map(|m| format!("sessions/game/{}/state", m.room_id)),
+                _ => None,
+            };
+            if let Some(target) = target {
+                applied += hydrate_session_key(services, topic_id, replica, &target).await?;
+            }
+        }
+        return Ok(applied);
     }
     Ok(0)
 }
@@ -253,7 +265,6 @@ pub(crate) async fn hydrate_subscription_hint(
     hint: &GossipHint,
 ) -> Result<usize> {
     let docs_sync = services.docs_sync.as_ref();
-    let blob_service = services.blob_service.as_ref();
     let projection_store = services.projection_store.as_ref();
     match hint {
         GossipHint::TopicObjectsChanged { objects, .. } => {
@@ -323,10 +334,8 @@ pub(crate) async fn hydrate_subscription_hint(
             ..
         } => match object_kind.as_str() {
             "live-session" => {
-                hydrate_live_session_from_key_with_retry(
-                    docs_sync,
-                    blob_service,
-                    projection_store,
+                hydrate_session_key(
+                    services,
                     topic_id,
                     replica,
                     stable_key("sessions/live", &format!("{session_id}/state")).as_str(),
@@ -334,7 +343,7 @@ pub(crate) async fn hydrate_subscription_hint(
                 .await
             }
             "game-session" => {
-                hydrate_game_room_from_key_with_retry(
+                hydrate_session_key(
                     services,
                     topic_id,
                     replica,
@@ -368,4 +377,156 @@ pub(crate) fn hint_targets_topic(hint: &GossipHint, topic: &str) -> bool {
         | GossipHint::DirectMessageAck { topic_id, .. } => topic_id.as_str() == topic,
         GossipHint::ThreadUpdated { .. } | GossipHint::ProfileUpdated { .. } => true,
     }
+}
+
+/// 一度だけ局所反映する。manifest取得は表示要求が所有する。
+pub(crate) async fn hydrate_session_key(
+    services: &ServiceHandles,
+    topic: &str,
+    replica: &ReplicaId,
+    key: &str,
+) -> Result<usize> {
+    hydrate_session_key_for_fetch(services, topic, replica, key, None, None).await
+}
+
+pub(crate) async fn hydrate_session_key_for_fetch(
+    services: &ServiceHandles,
+    topic: &str,
+    replica: &ReplicaId,
+    key: &str,
+    worker: Option<u64>,
+    expected_hash: Option<&str>,
+) -> Result<usize> {
+    if !is_session_state_key(key) {
+        return Ok(0);
+    }
+    let records = services
+        .docs_sync
+        .query_replica_exact_bounded(
+            replica,
+            key,
+            MAX_ENVELOPE_RECORDS_PER_OBJECT,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await?;
+    if records.is_empty()
+        || expected_hash.is_some_and(|hash| !records.iter().any(|r| r.content_hash == hash))
+    {
+        services
+            .session_projections
+            .defer_entry(topic, replica, key, expected_hash)
+            .await;
+    }
+    let mut applied = 0;
+    let mut missing = Vec::new();
+    let mut newest_live: Option<(i64, DocRecord)> = None;
+    use super::session_integrity::{
+        SessionRead, inspect_game_room_record, inspect_live_session_record,
+    };
+    for record in records {
+        if key.starts_with("sessions/live/") {
+            match inspect_live_session_record(
+                services.docs_sync.as_ref(),
+                services.blob_service.as_ref(),
+                replica,
+                topic,
+                &record,
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?
+            {
+                SessionRead::MissingManifest(hash) => {
+                    if !missing.contains(&hash) {
+                        missing.push(hash);
+                    }
+                }
+                SessionRead::Ready(verified) => {
+                    if newest_live
+                        .as_ref()
+                        .is_none_or(|(time, _)| *time < verified.state().updated_at)
+                    {
+                        newest_live = Some((verified.state().updated_at, record));
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match inspect_game_room_record(
+                services.docs_sync.as_ref(),
+                services.blob_service.as_ref(),
+                replica,
+                topic,
+                &record,
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?
+            {
+                SessionRead::MissingManifest(hash) => {
+                    if !missing.contains(&hash) {
+                        missing.push(hash);
+                    }
+                }
+                SessionRead::Ready(_) => {
+                    applied += hydrate_game_room_from_record(services, topic, replica, record)
+                        .await? as usize;
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some((_, record)) = newest_live {
+        applied += hydrate_live_session_from_record(
+            services,
+            topic,
+            replica,
+            record,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await? as usize;
+    }
+    services
+        .session_projections
+        .observe_key(topic, replica, key, missing, worker)
+        .await;
+    Ok(applied)
+}
+
+pub(crate) fn is_session_state_key(key: &str) -> bool {
+    ["sessions/live/", "sessions/game/"].iter().any(|prefix| {
+        key.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix("/state"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    })
+}
+
+/// session以外のenvelopeの既存catch-upは維持する。未着のenvelopeはContentReadyで再判定する。
+pub(crate) async fn is_session_notice(
+    services: &ServiceHandles,
+    replica: &ReplicaId,
+    key: &str,
+) -> bool {
+    if key.starts_with("sessions/") {
+        return true;
+    }
+    if !key.starts_with("envelopes/") {
+        return false;
+    }
+    let Ok(records) = services
+        .docs_sync
+        .query_replica_exact_bounded(
+            replica,
+            key,
+            MAX_ENVELOPE_RECORDS_PER_OBJECT,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await
+    else {
+        return true;
+    };
+    records.is_empty()
+        || records.iter().any(|record| {
+            serde_json::from_slice::<KukuriEnvelope>(&record.value).is_ok_and(|envelope| {
+                matches!(envelope.kind.as_str(), "live-session" | "game-session")
+            })
+        })
 }

@@ -15,6 +15,8 @@ use crate::{
 
 #[derive(Clone, Copy)]
 enum Operation {
+    ListSessionCandidates,
+    SetSessionDisplay,
     ListLive,
     CreateLive,
     EndLive,
@@ -36,6 +38,20 @@ impl CommandHandler for Handler {
     ) -> Result<CommandOutput, ProtocolError> {
         let runtime = runtime(&context)?;
         match self.0 {
+            Operation::ListSessionCandidates => encode(
+                runtime
+                    .list_session_candidates(decode::<ListLiveSessionsRequest>(payload)?)
+                    .await
+                    .map_err(command_error)?,
+            ),
+            Operation::SetSessionDisplay => encode(
+                runtime
+                    .set_session_display(decode::<kukuri_desktop_runtime::SessionDisplayRequest>(
+                        payload,
+                    )?)
+                    .await
+                    .map_err(command_error)?,
+            ),
             Operation::ListLive => encode(
                 runtime
                     .list_live_sessions(decode::<ListLiveSessionsRequest>(payload)?)
@@ -98,6 +114,19 @@ pub(super) fn registrations() -> Vec<CommandRegistration> {
         )
     };
     [
+        (
+            "list_session_candidates", Read, ListSessionCandidates,
+            schema::object(json!({"topic":{"type":"string"}, "scope":schema::timeline_scope()}), &["topic"]),
+            schema::array(schema::object(json!({"replica_id":{"type":"string"}, "session_id":{"type":"string"}, "kind":{"type":"string"}}), &["replica_id","session_id","kind"])),
+        ),
+        (
+            "set_session_display", Write, SetSessionDisplay,
+            schema::object(json!({"topic":{"type":"string"}, "scope":schema::timeline_scope(), "replica_id":{"type":"string"},
+                "session_id":{"type":"string"}, "kind":{"enum":["live","game"]}, "observer":{"type":"string"},
+                "visible":{"type":"boolean"}, "retry":{"type":"boolean"}}),
+                &["topic","scope","replica_id","session_id","kind","observer","visible"]),
+            json!({"type":"null"}),
+        ),
         (
             "list_game_rooms",
             Read,

@@ -28,6 +28,10 @@ pub enum BlobStatus {
 pub trait BlobService: Send + Sync {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+    /// ローカルのbytesだけを読む。未対応の実装は取得不可とし、remoteへfallbackしない。
+    async fn fetch_local_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     /// scan 用の一時取得（#609）: remote から取得した bytes を**ローカルストアへ残さない**。
     ///
     /// ローカルに既在の blob はそのまま読む（別目的で存在するものは消さない）。既定実装は
@@ -160,6 +164,9 @@ impl IrohBlobService {
 
 #[async_trait]
 impl BlobService for MemoryBlobService {
+    async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        Ok(self.blobs.read().await.get(hash.as_str()).cloned())
+    }
     async fn fetch_blob_ephemeral_bounded(
         &self,
         hash: &BlobHash,
@@ -222,6 +229,17 @@ impl BlobService for MemoryBlobService {
 
 #[async_trait]
 impl BlobService for IrohBlobService {
+    async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        let hash = iroh_blobs::Hash::from_str(hash.as_str())?;
+        Ok(self
+            .node
+            .blobs()
+            .blobs()
+            .get_bytes(hash)
+            .await
+            .ok()
+            .map(|bytes| bytes.to_vec()))
+    }
     async fn fetch_blob_ephemeral_bounded(
         &self,
         hash: &BlobHash,

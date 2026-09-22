@@ -252,6 +252,18 @@ impl DelayedBlobService {
 
 #[async_trait]
 impl BlobService for DelayedBlobService {
+    async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        if self
+            .remaining_misses
+            .lock()
+            .await
+            .get(hash.as_str())
+            .is_some_and(|n| *n > 0)
+        {
+            return Ok(None);
+        }
+        self.inner.fetch_local_blob(hash).await
+    }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(data, mime).await
     }
@@ -426,6 +438,7 @@ mod reply_target_background;
 mod scale_counts;
 mod scale_independence;
 mod session_catch_up;
+mod session_event_progress;
 mod shadowing_docs;
 pub(super) use shadowing_docs::ShadowingDocsSync;
 mod subscription_catch_up;

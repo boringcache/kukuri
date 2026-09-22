@@ -10,6 +10,7 @@ use kukuri_docs_sync::{ReplicaNotice, ReplicaNoticeStream};
 /// docs の通知を test から流し込む docs。entry の event は購読側へ届けない。prefix の読み出しは失敗させる。
 #[derive(Clone)]
 struct SilentNoScanDocsSync {
+    session_window: bool,
     inner: NoScanDocsSync,
     notices: tokio::sync::broadcast::Sender<ReplicaNotice>,
 }
@@ -17,6 +18,7 @@ struct SilentNoScanDocsSync {
 impl Default for SilentNoScanDocsSync {
     fn default() -> Self {
         Self {
+            session_window: true,
             inner: NoScanDocsSync::default(),
             notices: tokio::sync::broadcast::channel(16).0,
         }
@@ -49,6 +51,9 @@ impl DocsSync for SilentNoScanDocsSync {
         replica_id: &ReplicaId,
         query: kukuri_docs_sync::DocKeyQuery,
     ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        if !self.session_window && query.prefix.starts_with("sessions/") {
+            return Ok(kukuri_docs_sync::DocKeyPage::default());
+        }
         self.inner.query_replica_keys(replica_id, query).await
     }
 
@@ -116,6 +121,88 @@ fn game_room_input(title: &str) -> CreateGameRoomInput {
         description: String::new(),
         participants: vec!["Alice".into(), "Bob".into()],
     }
+}
+
+#[tokio::test]
+async fn content_ready_session_outside_the_window_notifies_the_visible_list() {
+    let docs = Arc::new(SilentNoScanDocsSync {
+        session_window: false,
+        ..Default::default()
+    });
+    let pair = pair(docs.clone());
+    let topic = "kukuri:topic:content-ready-session";
+    let replica = topic_replica_id(topic);
+    let id = pair
+        .author
+        .create_live_session(
+            topic,
+            CreateLiveSessionInput {
+                title: "late entry bytes".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let key = format!("sessions/live/{id}/state");
+    let record = docs
+        .query_replica(&replica, DocQuery::Exact(key.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+    docs.apply_doc_op(
+        &replica,
+        DocOp::DeletePrefix {
+            prefix: key.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    pair.viewer.ensure_topic_subscription(topic).await.unwrap();
+    let notice = kukuri_docs_sync::DocEvent {
+        replica_id: replica.clone(),
+        key: key.clone(),
+        content_hash: record.content_hash,
+        source_peer: None,
+        docs_author: None,
+    };
+    assert_eq!(
+        crate::service::hydrate_subscription_doc_event(
+            &pair.viewer.services,
+            topic,
+            &replica,
+            &notice
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let before = *pair.viewer.last_sync_ts.lock().await;
+    docs.apply_doc_op(
+        &replica,
+        DocOp::SetBytes {
+            key,
+            value: record.value,
+        },
+    )
+    .await
+    .unwrap();
+    docs.notices.send(ReplicaNotice::ContentReady).unwrap();
+    timeout(Duration::from_secs(5), async {
+        while *pair.viewer.last_sync_ts.lock().await == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ContentReady signals the changed projection without a window");
+    assert!(
+        pair.viewer_store
+            .get_live_session(topic, &id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    pair.viewer.shutdown().await;
+    pair.author.shutdown().await;
 }
 
 // S-9: game room と live session の一覧は、行が無くても replica を走査しない。session の固定件数だけを

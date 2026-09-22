@@ -133,7 +133,8 @@ mod errors;
 mod game_projection_support;
 mod gossip_subscription_support;
 mod hydration_limits;
-mod hydration_support;
+pub(crate) mod hydration_support;
+pub(crate) mod session_projection;
 use game_projection_support::GameRoomProjectionLocks;
 pub(crate) use hydration_limits::recovery_probe_peer_state;
 #[cfg(test)]
@@ -224,8 +225,7 @@ pub(crate) use object_persistence_support::{
     persist_private_channel_policy, persist_session_envelope, post_withdrawal_row,
     private_channel_rotation_is_pending, projection_blob_fetch_timeout, projection_row_from_post,
     reaction_cache_key, reaction_projection_row, reaction_state_view_from_rows,
-    recent_reaction_view_from_projection, search_key_or_asset_id,
-    session_projection_retry_attempts, session_projection_retry_delay, store_manifest_blob,
+    recent_reaction_view_from_projection, search_key_or_asset_id, store_manifest_blob,
     wait_for_private_channel_epoch_snapshot,
 };
 pub(crate) use post_integrity::{
@@ -260,7 +260,7 @@ pub(crate) use reaction_integrity::{ReactionKey, VerifiedReaction, load_verified
 pub(crate) use session_integrity::dome_instance_id;
 pub(crate) use session_integrity::{
     VerifiedGameRoom, VerifiedLiveSession, load_verified_game_room, load_verified_live_session,
-    owner_bound_id_suffix, verify_game_room_record, verify_live_session_record,
+    owner_bound_id_suffix,
 };
 pub(crate) use social_helpers::{
     current_mutual_direct_message_peers, rebuild_author_relationships,
@@ -387,6 +387,8 @@ pub type PrivateChannelCapabilityPersist =
 
 #[derive(Clone)]
 pub struct ServiceHandles {
+    pub(crate) session_projections: Arc<session_projection::SessionProjections>,
+    pub(crate) session_display_access: Arc<Mutex<()>>,
     pub(crate) store: Arc<dyn Store>,
     pub(crate) projection_store: Arc<dyn ProjectionStore>,
     pub(crate) transport: Arc<dyn Transport>,
@@ -395,6 +397,7 @@ pub struct ServiceHandles {
     pub(crate) blob_service: Arc<dyn BlobService>,
     pub(crate) keys: Arc<KukuriKeys>,
     pub(crate) game_room_projections: Arc<GameRoomProjectionLocks>,
+    pub(crate) live_session_projections: Arc<GameRoomProjectionLocks>,
     pub(crate) dome_mutations: Arc<Mutex<()>>,
     /// #1225: 欠損した本文 blob の試行台帳。
     pub(crate) missing_body_ledger: Arc<hydration_limits::MissingBodyLedger>,
@@ -418,6 +421,8 @@ impl ServiceHandles {
     ) -> Self {
         Self {
             store,
+            session_projections: Arc::default(),
+            session_display_access: Arc::default(),
             projection_store,
             transport,
             hint_transport,
@@ -425,6 +430,7 @@ impl ServiceHandles {
             blob_service,
             keys: Arc::new(keys),
             game_room_projections: Arc::default(),
+            live_session_projections: Arc::default(),
             dome_mutations: Arc::default(),
             missing_body_ledger: Arc::default(),
             withdrawal_checks: Arc::default(),
@@ -622,6 +628,7 @@ impl AppService {
     ) -> Result<Self> {
         budget.validate()?;
         let cache = MetaverseBlobCacheIndex::new(budget.client.cache_capacity_bytes)?;
+        let last_sync_ts = services.session_projections.last_change.clone();
         Ok(Self {
             services,
             subscription_registry: SubscriptionRegistry::default(),
@@ -631,7 +638,7 @@ impl AppService {
             dome_host_sessions: Arc::new(Mutex::new(HashMap::new())),
             metaverse_blob_cache: Arc::new(Mutex::new(cache)),
             metaverse_resource_budget: budget,
-            last_sync_ts: Arc::new(Mutex::new(None)),
+            last_sync_ts,
             public_topic_delivery: Arc::new(Mutex::new(HashMap::new())),
             empty_recovery_candidates: Arc::new(Mutex::new(HashSet::new())),
             gossip_disabled_topics: Arc::new(Mutex::new(HashSet::new())),
@@ -861,6 +868,7 @@ impl AppService {
     }
 
     pub async fn shutdown(&self) {
+        self.services.session_projections.clear().await;
         let topics_to_unsubscribe = self
             .subscription_registry
             .subscriptions

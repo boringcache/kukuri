@@ -1,3 +1,4 @@
+import { useSessionDisplay, type SessionDisplayContext } from './useSessionDisplay';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { FetchCommunityNodePolicyView, AcceptCommunityNodePolicyView } from '@/shell/actions/useCommunityNodePolicyDialog';
@@ -36,6 +37,7 @@ import {
 } from './MetaverseSceneModel';
 
 type MetaverseRoomPanelProps = {
+  sessionDisplay?: SessionDisplayContext;
   loadError?: string | null;
   catalogReady?: boolean;
   actions: MetaverseRoomActions;
@@ -57,6 +59,7 @@ type MetaverseRoomPanelProps = {
 const EMPTY_KNOWN_AUTHORS_BY_PUBKEY: Record<string, AuthorSocialView> = {};
 
 export function MetaverseRoomPanel({
+  sessionDisplay,
   loadError = null,
   catalogReady = true,
   actions,
@@ -152,6 +155,9 @@ export function MetaverseRoomPanel({
   }, [actions, session.selectedRoom]);
 
   const admittedFocus = session.admittedRoom ? JSON.stringify([scope, session.admittedRoom.room_id, session.admittedRoom.metaverse?.instance_generation]) : null;
+  useSessionDisplay<HTMLDivElement>({ context: session.admittedRoom ? sessionDisplay : undefined,
+    sessionId: session.admittedRoom?.room_id ?? '', kind: 'game', target: panelRef });
+
   useEffect(() => {
     if (!focusRoomId || admittedFocus !== focusRoomId) return;
     const frame = requestAnimationFrame(() => {
@@ -305,6 +311,8 @@ export function MetaverseRoomPanel({
       renderSections={hostingSections => <MetaverseRoomLayout admitted={Boolean(session.admittedRoom)} panelRef={panelRef} before={<>
       <PendingDomeDeletions key={scope} actions={actions} context={managementContext} locale={locale} />
       <MetaverseRoomDiscovery
+        requestedSessionId={initialSelectedRoomId}
+        sessionDisplay={sessionDisplay}
         rooms={rooms}
         catalogReady={catalogReady}
         onRetry={() => actions.refresh().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : t('management.pendingReadFailed')))}

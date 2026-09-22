@@ -14,6 +14,33 @@ use kukuri_core::SpatialContextV1;
 pub(crate) const LIVE_SESSION_ENVELOPE_KIND: &str = "live-session";
 pub(crate) const GAME_SESSION_ENVELOPE_KIND: &str = "game-session";
 
+/// 欠損は到着eventまたは表示要求で解決する。拒否をretryの契機にしない。
+pub(crate) enum SessionRead<T> {
+    Ready(T),
+    MissingDocs,
+    MissingManifest(kukuri_core::BlobHash),
+    Rejected,
+}
+
+impl<T> SessionRead<T> {
+    pub(crate) fn verified(self) -> Option<T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+async fn read_session_blob<T: DeserializeOwned>(
+    blobs: &dyn BlobService,
+    blob: &ManifestBlobRef,
+) -> Result<Option<T>> {
+    match blobs.fetch_local_blob(&blob.hash).await? {
+        Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
 /// 新しく作る session id の末尾に置く、owner の pubkey の先頭の桁数(64 bit)。
 const OWNER_BOUND_ID_SUFFIX_LEN: usize = 16;
 /// 読む側が受け付ける最小の桁数。修正前の id(`short_id_suffix` の 8 桁)を通すための下限。
@@ -106,7 +133,7 @@ async fn load_signed_manifest<T: DeserializeOwned>(
     envelope_id: &EnvelopeId,
     expected_kind: &str,
     policy: DocFetchPolicy,
-) -> Result<Option<(Pubkey, T)>> {
+) -> Result<SessionRead<(Pubkey, T)>> {
     let records = docs_sync
         .query_replica_exact_bounded(
             replica,
@@ -115,7 +142,7 @@ async fn load_signed_manifest<T: DeserializeOwned>(
             policy,
         )
         .await?;
-    Ok(records.iter().find_map(|record| {
+    let verified = records.iter().find_map(|record| {
         let envelope = serde_json::from_slice::<KukuriEnvelope>(&record.value).ok()?;
         (envelope.verify().is_ok()
             && envelope.id == *envelope_id
@@ -123,7 +150,12 @@ async fn load_signed_manifest<T: DeserializeOwned>(
             .then_some(())?;
         let manifest = serde_json::from_str::<T>(envelope.content.as_str()).ok()?;
         Some((envelope.pubkey, manifest))
-    }))
+    });
+    Ok(match verified {
+        Some(value) => SessionRead::Ready(value),
+        None if records.is_empty() => SessionRead::MissingDocs,
+        None => SessionRead::Rejected,
+    })
 }
 
 /// 署名者と、署名された manifest と、読んだ replica の scope に照らして確かめた live session。
@@ -206,9 +238,29 @@ pub(crate) async fn verify_live_session_record(
     record: &DocRecord,
     policy: DocFetchPolicy,
 ) -> Result<Option<VerifiedLiveSession>> {
+    Ok(inspect_live_session_record(
+        docs_sync,
+        blob_service,
+        replica,
+        subscription_topic_id,
+        record,
+        policy,
+    )
+    .await?
+    .verified())
+}
+
+pub(crate) async fn inspect_live_session_record(
+    docs_sync: &dyn DocsSync,
+    blob_service: &dyn BlobService,
+    replica: &ReplicaId,
+    subscription_topic_id: &str,
+    record: &DocRecord,
+    policy: DocFetchPolicy,
+) -> Result<SessionRead<VerifiedLiveSession>> {
     let rejected = |reason| {
         warn_rejected_session(replica, record.key.as_str(), reason);
-        Ok(None)
+        Ok(SessionRead::Rejected)
     };
     let Ok(state) = serde_json::from_slice::<LiveSessionStateDocV1>(&record.value) else {
         return rejected(SessionRejection::UnreadableState);
@@ -217,16 +269,18 @@ pub(crate) async fn verify_live_session_record(
     {
         return rejected(SessionRejection::KeyMismatch);
     }
-    let Some((signer, manifest)) = load_signed_manifest::<LiveSessionManifestBlobV1>(
+    let signed = load_signed_manifest::<LiveSessionManifestBlobV1>(
         docs_sync,
         replica,
         &state.last_envelope_id,
         LIVE_SESSION_ENVELOPE_KIND,
         policy,
     )
-    .await?
-    else {
-        return rejected(SessionRejection::SignedManifestUnavailable);
+    .await?;
+    let (signer, manifest) = match signed {
+        SessionRead::Ready(value) => value,
+        SessionRead::MissingDocs => return Ok(SessionRead::MissingDocs),
+        _ => return rejected(SessionRejection::SignedManifestUnavailable),
     };
     let current_manifest = state.current_manifest.clone();
     let verified =
@@ -235,10 +289,10 @@ pub(crate) async fn verify_live_session_record(
             Ok(verified) => verified,
             Err(reason) => return rejected(reason),
         };
-    match fetch_manifest_blob::<LiveSessionManifestBlobV1>(blob_service, &current_manifest).await {
-        Ok(Some(blob)) if blob == verified.manifest => Ok(Some(verified)),
+    match read_session_blob::<LiveSessionManifestBlobV1>(blob_service, &current_manifest).await {
+        Ok(Some(blob)) if blob == verified.manifest => Ok(SessionRead::Ready(verified)),
         Ok(Some(_)) | Err(_) => rejected(SessionRejection::ManifestMismatch),
-        Ok(None) => Ok(None),
+        Ok(None) => Ok(SessionRead::MissingManifest(current_manifest.hash)),
     }
 }
 
@@ -387,9 +441,29 @@ pub(crate) async fn verify_game_room_record(
     record: &DocRecord,
     policy: DocFetchPolicy,
 ) -> Result<Option<VerifiedGameRoom>> {
+    Ok(inspect_game_room_record(
+        docs_sync,
+        blob_service,
+        replica,
+        subscription_topic_id,
+        record,
+        policy,
+    )
+    .await?
+    .verified())
+}
+
+pub(crate) async fn inspect_game_room_record(
+    docs_sync: &dyn DocsSync,
+    blob_service: &dyn BlobService,
+    replica: &ReplicaId,
+    subscription_topic_id: &str,
+    record: &DocRecord,
+    policy: DocFetchPolicy,
+) -> Result<SessionRead<VerifiedGameRoom>> {
     let rejected = |reason| {
         warn_rejected_session(replica, record.key.as_str(), reason);
-        Ok(None)
+        Ok(SessionRead::Rejected)
     };
     let Ok(state) = serde_json::from_slice::<GameRoomStateDocV1>(&record.value) else {
         return rejected(SessionRejection::UnreadableState);
@@ -407,7 +481,7 @@ pub(crate) async fn verify_game_room_record(
     .await?;
     let current_manifest = state.current_manifest.clone();
     match signed {
-        Some((signer, manifest)) => {
+        SessionRead::Ready((signer, manifest)) => {
             let verified = match VerifiedGameRoom::verify(
                 state,
                 Some(&signer),
@@ -418,17 +492,15 @@ pub(crate) async fn verify_game_room_record(
                 Ok(verified) => verified,
                 Err(reason) => return rejected(reason),
             };
-            match fetch_manifest_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest)
-                .await
+            match read_session_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest).await
             {
-                Ok(Some(blob)) if blob == verified.manifest => Ok(Some(verified)),
+                Ok(Some(blob)) if blob == verified.manifest => Ok(SessionRead::Ready(verified)),
                 Ok(Some(_)) | Err(_) => rejected(SessionRejection::ManifestMismatch),
-                Ok(None) => Ok(None),
+                Ok(None) => Ok(SessionRead::MissingManifest(current_manifest.hash)),
             }
         }
-        None if state.room_id.starts_with("dome-") => {
-            match fetch_manifest_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest)
-                .await
+        SessionRead::MissingDocs if state.room_id.starts_with("dome-") => {
+            match read_session_blob::<GameRoomManifestBlobV1>(blob_service, &current_manifest).await
             {
                 Ok(Some(manifest)) => {
                     match VerifiedGameRoom::verify(
@@ -438,15 +510,16 @@ pub(crate) async fn verify_game_room_record(
                         replica,
                         subscription_topic_id,
                     ) {
-                        Ok(verified) => Ok(Some(verified)),
+                        Ok(verified) => Ok(SessionRead::Ready(verified)),
                         Err(reason) => rejected(reason),
                     }
                 }
-                Ok(None) => Ok(None),
+                Ok(None) => Ok(SessionRead::MissingManifest(current_manifest.hash)),
                 Err(_) => rejected(SessionRejection::ManifestMismatch),
             }
         }
-        None => rejected(SessionRejection::SignedManifestUnavailable),
+        SessionRead::MissingDocs => Ok(SessionRead::MissingDocs),
+        _ => rejected(SessionRejection::SignedManifestUnavailable),
     }
 }
 

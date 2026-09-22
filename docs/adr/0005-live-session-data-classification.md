@@ -31,6 +31,7 @@ Accepted
 - viewer presence は `LivePresence` heartbeat と local SQLite projection で扱い、restart 後に自動再 join はしない。
 
 ## Consequences
+- #1262: state/envelopeの到着による個別反映、表示中だけのmanifest取得、未取得候補と検証済みsessionの区別はADR 0052「Session の個別反映と表示要求」に従う。timerによる反映retryはしない。
 - late joiner と restart 後の復元は `docs state + manifest blob` だけで成立しなければならない。
 - 終了済み session は durable state で `Ended` として復元され、新規 join を拒否しなければならない。
 - viewer count は shared durable state ではなく local projection の TTL 管理で表現される。

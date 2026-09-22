@@ -35,20 +35,20 @@ pub(crate) async fn hydrate_game_room_from_record(
     mut record: DocRecord,
 ) -> Result<bool> {
     // A moving docs pointer may invalidate more than one fetch. Bound re-resolution;
-    // false keeps the existing caller's retry/recovery path, rather than claiming success.
-    for _ in 0..session_projection_retry_attempts() {
+    // Reaching the bound leaves the current cache intact; later docs events resolve newer pointers.
+    for _ in 0..MAX_ENVELOPE_RECORDS_PER_OBJECT {
         // 行は、署名された manifest(metaverse room は Dome の id)と、読んだ replica の topic / channel に照らして
         // 確かめた room から作る(#1252)。検証に通らない record は warn を出して `false` を返し、エラーにしない。
-        let Some(verified) = verify_game_room_record(
+        let result = super::session_integrity::inspect_game_room_record(
             services.docs_sync.as_ref(),
             services.blob_service.as_ref(),
             replica,
             topic_id,
             &record,
-            DocFetchPolicy::LocalThenRemote,
+            DocFetchPolicy::LocalOnly,
         )
-        .await?
-        else {
+        .await?;
+        let Some(verified) = result.verified() else {
             return Ok(false);
         };
         services

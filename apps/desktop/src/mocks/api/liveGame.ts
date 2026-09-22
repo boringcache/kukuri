@@ -23,6 +23,8 @@ import { type MockRuntime } from '../mockRuntime';
 
 type LiveGameMock = Pick<
   DesktopApi,
+  | 'listSessionCandidates'
+  | 'setSessionDisplay'
   | 'listLiveSessions'
   | 'createLiveSession'
   | 'endLiveSession'
@@ -170,6 +172,8 @@ export function createLiveGameMock(runtime: MockRuntime): LiveGameMock {
   };
 
   return {
+    async listSessionCandidates() { return []; },
+    async setSessionDisplay() {},
     async listLiveSessions(topic, scope: TimelineScope = { kind: 'public' }) {
       const muted = mutedAuthorPubkeys();
       return filterChannelScopedItems(
