@@ -35,6 +35,7 @@ Accepted
 - 同じ canonical state から同じ ScoreGame projection を再取得した場合は、`derived_at` だけを更新する書込みも行わない。Metaverse の専用 lifecycle／authority はこの ScoreGame の制御で変更しない。
 
 ## Consequences
+- #1262: state/envelopeの到着による個別反映と表示中だけのmanifest取得はADR 0052「Session の個別反映と表示要求」に従う。ScoreGameの直列化と現在pointer比較は維持し、取得待ちのtimer retryはしない。
 - late joiner と restart 後の復元は `docs state + manifest blob` だけで成立しなければならない。
 - score/status は docs pointer が指す最新 manifest blob だけで再構築できなければならない。
 - 過去に署名された revision を置き直しても、score/status と操作の土台は過去へ戻らない。

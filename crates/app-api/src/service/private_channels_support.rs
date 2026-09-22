@@ -450,11 +450,22 @@ impl AppService {
         topic_id: &str,
         channel_id: &str,
     ) -> Result<Option<JoinedPrivateChannelState>> {
+        let _display_access = self.services.session_display_access.lock().await;
         let removed = self
             .joined_private_channels
             .lock()
             .await
             .remove(joined_private_channel_key(topic_id, channel_id).as_str());
+        if let Some(state) = &removed {
+            let replicas = private_channel_epoch_capabilities(state)
+                .iter()
+                .map(|epoch| private_channel_replica_for_epoch(channel_id, epoch.epoch_id.as_str()))
+                .collect::<Vec<_>>();
+            self.services
+                .session_projections
+                .remove_replicas(&replicas)
+                .await;
+        }
         if removed.is_some() {
             self.persist_private_channel_capabilities_if_configured()
                 .await?;
@@ -712,6 +723,15 @@ impl AppService {
                                 continue;
                             }
                             Ok(kukuri_docs_sync::ReplicaNotice::ContentReady) => {
+                                for (pending_topic, key, expected_hash) in services.session_projections.take_ready_entries(&replica_for_task).await {
+                                    let event = DocEvent { replica_id: replica_for_task.clone(), key,
+                                        content_hash: expected_hash.unwrap_or_default(), source_peer: None, docs_author: None };
+                                    match hydrate_subscription_doc_event(&services, &pending_topic, &replica_for_task, &event).await {
+                                        Ok(count) if count > 0 => { *last_sync.lock().await = Some(Utc::now().timestamp_millis()); }
+                                        Ok(_) => {}
+                                        Err(error) => { warn!(%error, "failed to reflect an available session entry"); }
+                                    }
+                                }
                                 catch_up.request_now();
                                 continue;
                             }
@@ -782,9 +802,11 @@ impl AppService {
                                     0
                                 }
                             };
+                            let session_notice = hydrated == 0 && super::hydration_support::is_session_notice(&services, &replica_for_task, &event.key).await;
                             // 相手から届いた、個別反映の対象でない key や、本体がまだ届いていない entry。走査はせず、
                             // 追いつきを依頼する(自分が書いた entry と、反映済みの object を指す索引は依頼しない)。
                             if hydrated == 0
+                                && !session_notice
                                 && had_source_peer
                                 && missed_entry_needs_catch_up(projection_store.as_ref(), &event.key).await
                             {
@@ -806,7 +828,7 @@ impl AppService {
                                         now.saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
                                 }
                                 *last_sync.lock().await = Some(now);
-                            } else {
+                            } else if !session_notice {
                                 restart_replica_sync_with_backoff(
                                     docs_sync.as_ref(),
                                     topic.as_str(),
@@ -915,6 +937,11 @@ impl AppService {
                                             0
                                         }
                                     };
+                                    if matches!(&event.hint, GossipHint::SessionChanged { object_kind, .. }
+                                        if matches!(object_kind.as_str(), "live-session" | "game-session")) {
+                                        services.session_projections.schedule(&services).await;
+                                        if hydrated == 0 { continue; }
+                                    }
                                     let now = Utc::now().timestamp_millis();
                                     // #1239: 個別反映が 0 件でも走査しない。replica の内容を指す hint だけ、
                                     // 追いつきを依頼する(docs の同期より先に hint が届いた場合など)。

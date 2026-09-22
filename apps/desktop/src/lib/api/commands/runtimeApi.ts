@@ -1,4 +1,6 @@
 import type {
+  SessionCandidateView,
+  SessionDisplayRequest,
   AuthorSocialView,
   BlobMediaPayload,
   BookmarkedCustomReactionView,
@@ -401,6 +403,10 @@ export const runtimeApi: DesktopApi = {
       request: { pubkey } satisfies DirectMessageRequest,
     });
   }),
+  listSessionCandidates: command('listSessionCandidates', async (topic, scope) =>
+    invokeDesktop<SessionCandidateView[]>('list_session_candidates', { request: { topic, scope } satisfies ListLiveSessionsRequest })),
+  setSessionDisplay: command('setSessionDisplay', async (request) =>
+    invokeDesktop<void>('set_session_display', { request: request satisfies SessionDisplayRequest })),
   listLiveSessions: command('listLiveSessions', async (topic, scope = { kind: 'public' }) => {
     return invokeDesktop<LiveSessionView[]>('list_live_sessions', {
       request: {

@@ -424,7 +424,7 @@ async fn public_topic_recovery_keeps_prompting_a_resync_without_scanning_the_rep
 }
 
 #[tokio::test]
-async fn topic_session_hints_retry_until_manifest_blob_is_available() {
+async fn topic_session_hints_wait_for_display_and_explicit_manifest_requests() {
     let docs_sync = Arc::new(kukuri_docs_sync::MemoryDocsSync::default());
     let blob_service = Arc::new(DelayedBlobService::default());
     let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
@@ -491,7 +491,24 @@ async fn topic_session_hints_retry_until_manifest_blob_is_available() {
     .await
     .expect("hydrate live hint");
 
-    assert_eq!(hydrated, 1);
+    assert_eq!(hydrated, 0, "hints do not fetch missing manifests");
+    let remote_app = AppService::from_handles(remote_services);
+    for retry in [false, true, true] {
+        remote_app
+            .set_session_display(crate::SessionDisplayRequest {
+                topic: topic.as_str().into(),
+                scope: TimelineScope::Public,
+                replica_id: replica.as_str().into(),
+                session_id: session_id.clone(),
+                kind: "live".into(),
+                observer: "test-live-card".into(),
+                visible: true,
+                retry,
+            })
+            .await
+            .expect("displayed session request");
+        remote_app.services.session_projections.wait_idle().await;
+    }
     assert!(
         LiveGameProjectionStore::list_channel_live_sessions(
             remote_store.as_ref(),
@@ -503,6 +520,6 @@ async fn topic_session_hints_retry_until_manifest_blob_is_available() {
         .expect("list remote live sessions")
         .iter()
         .any(|session| session.session_id == session_id),
-        "expected live session projection after retry"
+        "expected live session projection after explicit displayed acquisition"
     );
 }

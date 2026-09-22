@@ -24,6 +24,8 @@ mod dome_management;
 mod dome_move;
 mod game;
 mod live;
+mod session_display;
+pub use session_display::{SessionCandidateView, SessionDisplayRequest};
 mod media;
 mod notifications;
 mod private_channel_indexing;

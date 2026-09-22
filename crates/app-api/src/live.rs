@@ -165,6 +165,11 @@ impl AppService {
     }
 
     pub async fn end_live_session(&self, topic_id: &str, session_id: &str) -> Result<()> {
+        let _projection = self
+            .services
+            .live_session_projections
+            .lock(session_id)
+            .await;
         self.ensure_topic_subscription(topic_id).await?;
         let (source_replica_id, state, mut manifest) = self
             .fetch_live_session_state_and_manifest(topic_id, session_id)

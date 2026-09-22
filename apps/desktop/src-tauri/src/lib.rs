@@ -429,6 +429,8 @@ pub fn run() {
             commands::community_node::get_sync_status,
             commands::community_node::get_discovery_config,
             commands::live_game::list_live_sessions,
+            commands::live_game::list_session_candidates,
+            commands::live_game::set_session_display,
             commands::live_game::create_live_session,
             commands::live_game::end_live_session,
             commands::live_game::join_live_session,

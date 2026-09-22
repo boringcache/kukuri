@@ -1,5 +1,22 @@
 use super::super::*;
 
+/// 実peerのsessionを表示するtest consumer。manifest取得は一覧のpollではなくこの表示要求が所有する。
+#[cfg(feature = "iroh-integration-tests")]
+pub(crate) async fn display_remote_session(app: &AppService, topic: &str, id: &str, kind: &str) {
+    app.set_session_display(crate::SessionDisplayRequest {
+        topic: topic.into(),
+        scope: TimelineScope::Public,
+        replica_id: String::new(),
+        session_id: id.into(),
+        kind: kind.into(),
+        observer: format!("test-{id}"),
+        visible: true,
+        retry: false,
+    })
+    .await
+    .expect("display the remote session");
+}
+
 pub(crate) fn app_service_from_dependencies(
     store: Arc<dyn Store>,
     projection_store: Arc<dyn ProjectionStore>,

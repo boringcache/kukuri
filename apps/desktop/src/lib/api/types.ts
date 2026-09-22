@@ -3,6 +3,8 @@
 // DesktopApi interface と、生成型に front 専用フィールドを交差させる PostView を扱う。
 export * from './types.generated';
 import type {
+  SessionCandidateView,
+  SessionDisplayRequest,
   AuthorSocialView,
   BlobMediaPayload,
   ContentDisplaySettings,
@@ -352,6 +354,8 @@ export interface DesktopApi {
   deleteDirectMessageMessage(pubkey: string, messageId: string): Promise<void>;
   clearDirectMessage(pubkey: string): Promise<void>;
   getDirectMessageStatus(pubkey: string): Promise<DirectMessageStatusView>;
+  listSessionCandidates(topic: string, scope: TimelineScope): Promise<SessionCandidateView[]>;
+  setSessionDisplay(request: SessionDisplayRequest): Promise<void>;
   listLiveSessions(topic: string, scope?: TimelineScope): Promise<LiveSessionView[]>;
   createLiveSession(
     topic: string,

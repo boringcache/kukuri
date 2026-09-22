@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useMemo } from 'react';
+import { type FormEvent, type ReactNode, useMemo, useState } from 'react';
 import { Link2 } from 'lucide-react';
 
 import { BookmarksEmptyState, BookmarksListFrame } from '@/components/core/BookmarksEmptyState';
@@ -10,6 +10,7 @@ import { MetaverseRoomPanel } from '@/components/extended/MetaverseRoomPanel';
 import type { CommunityNodePanelView } from '@/components/settings/types';
 import { AuthorTrustGateNotice } from '@/components/core/AuthorTrustGateNotice';
 import { useAuthorTrustGateReveal } from '@/components/core/useAuthorTrustGateReveal';
+import { SessionVisibility, PendingSessionCards } from '@/components/extended/SessionVisibility';
 import { GameRoomPanel } from '@/components/extended/GameRoomPanel';
 import type { MetaverseRoomActions } from '@/components/extended/metaverse/MetaverseRoomActions';
 import { ProfileConnectionsPanel } from '@/components/extended/ProfileConnectionsPanel';
@@ -376,6 +377,7 @@ export function DesktopShellPrimarySurface({
     [activeTimelineKey, surfaceJoinedChannels, timelinesByKey, viewModels]
   );
   const surfaceScopeKey = timelineStorageKeyForChannel(surfaceTopic, surfaceChannelId);
+  const [pendingLiveCount, setPendingLiveCount] = useState(0);
   const surfaceLiveSessions = liveSessionsByScopeKey[surfaceScopeKey] ?? [];
   const surfaceGameRooms = useMemo(
     () => gameRoomsByScopeKey[surfaceScopeKey] ?? [],
@@ -654,7 +656,7 @@ export function DesktopShellPrimarySurface({
               ) : null}
             </section>
             <div className='shell-column-content'>
-              {surfaceLiveSessionListItems.length === 0 &&
+              {surfaceLiveSessionListItems.length === 0 && pendingLiveCount === 0 &&
               surfaceLivePanelState.status === 'ready' ? (
                 <p className='empty-state'>{t('live:empty')}</p>
               ) : null}
@@ -674,7 +676,7 @@ export function DesktopShellPrimarySurface({
                     );
                   }
                   return (
-                  <li key={session.session_id}>
+                  <SessionVisibility key={session.session_id} sessionId={session.session_id} kind="live" context={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}>
                     <article
                       className={`post-card${
                         selectedLiveSessionId === session.session_id ? ' post-card-targeted' : ''
@@ -757,16 +759,20 @@ export function DesktopShellPrimarySurface({
                         </IconButton>
                       </div>
                     </article>
-                  </li>
+                  </SessionVisibility>
                   );
                 })}
               </ul>
+              <PendingSessionCards context={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
+                kind="live" targetId={column.entityId} onCountChange={setPendingLiveCount} refreshToken={surfaceLiveSessions} knownIds={surfaceLiveSessions.map((item) => item.session_id)} />
             </div>
           </div>
         ) : null}
 
         {activeSurfaceSection === 'game' && column.kind === 'game' ? (
           <GameRoomPanel
+            requestedSessionId={column.entityId}
+            sessionDisplay={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
             status={surfaceGamePanelState.status}
             error={gameError ?? surfaceGamePanelState.error}
             audienceLabel={surfaceAudienceLabel}
@@ -800,6 +806,7 @@ export function DesktopShellPrimarySurface({
           />
         ) : activeSurfaceSection === 'game' ? (
           <MetaverseRoomPanel
+            sessionDisplay={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
             loadError={surfaceGamePanelState.error}
             catalogReady={surfaceGamePanelState.status === 'ready'}
             actions={metaverseActions}

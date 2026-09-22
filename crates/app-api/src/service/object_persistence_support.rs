@@ -509,22 +509,6 @@ pub(crate) fn projection_blob_status_timeout() -> tokio::time::Duration {
     }
 }
 
-pub(crate) fn session_projection_retry_attempts() -> usize {
-    if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
-        20
-    } else {
-        10
-    }
-}
-
-pub(crate) fn session_projection_retry_delay() -> tokio::time::Duration {
-    if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
-        tokio::time::Duration::from_millis(500)
-    } else {
-        tokio::time::Duration::from_millis(250)
-    }
-}
-
 pub(crate) async fn fetch_projection_blob_text(
     blob_service: &dyn BlobService,
     hash: &kukuri_core::BlobHash,

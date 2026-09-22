@@ -124,6 +124,27 @@ async fn live_lifecycle_executes_once_and_preserves_shared_view_fields() {
     let created = call(&dispatcher, &host, "create_live_session", payload.clone()).await;
     assert!(created.ok, "{:?}", created.error);
     let session_id = created.data.unwrap();
+    let candidates = call(
+        &dispatcher,
+        &host,
+        "list_session_candidates",
+        json!({"topic": topic}),
+    )
+    .await;
+    assert!(candidates.ok, "{:?}", candidates.error);
+    for visible in [true, false] {
+        let displayed = call(
+            &dispatcher,
+            &host,
+            "set_session_display",
+            json!({
+                "topic":topic, "scope":{"kind":"public"}, "replica_id":"", "session_id":session_id,
+                "kind":"live", "observer":"cli-contract", "visible":visible,
+            }),
+        )
+        .await;
+        assert!(displayed.ok, "{:?}", displayed.error);
+    }
     for command in [
         "join_live_session",
         "leave_live_session",
@@ -260,6 +281,17 @@ async fn game_update_by_non_owner_is_rejected_without_changing_replicated_state(
     assert!(created.ok, "{:?}", created.error);
     let room_id = created.data.unwrap();
     let before = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let displayed = call(
+            &dispatcher,
+            &host_b,
+            "set_session_display",
+            json!({
+                "topic":topic, "scope":{"kind":"public"}, "replica_id":"", "session_id":room_id,
+                "kind":"game", "observer":"cli-owner-contract", "visible":true,
+            }),
+        )
+        .await;
+        assert!(displayed.ok, "{:?}", displayed.error);
         loop {
             let listed = call(
                 &dispatcher,

@@ -487,14 +487,14 @@ export function DesktopShellPage({
   useFocusScroll({
     focusKey: liveFocusKey,
     readinessKey: liveSessionListItems.length,
-    selector: liveFocusKey ? `[data-live-session-id="${liveFocusKey}"]` : null,
+    selector: liveFocusKey ? `[data-live-session-id=${JSON.stringify(liveFocusKey)}]` : null,
   });
   const gameFocusKey =
     shellChromeState.activePrimarySection === 'game' ? selectedGameRoomId : null;
   useFocusScroll({
     focusKey: gameFocusKey,
     readinessKey: activeGameRooms.length,
-    selector: gameFocusKey ? `[data-game-room-id="${gameFocusKey}"]` : null,
+    selector: gameFocusKey ? `[data-game-room-id=${JSON.stringify(gameFocusKey)}]` : null,
   });
   useAppUpdateScheduler(checkForUpdate);
   const renderMessagesSurface = (

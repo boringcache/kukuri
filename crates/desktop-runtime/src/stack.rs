@@ -178,6 +178,8 @@ reloadable_service! {
     impl BlobService {
         async fn put_blob(data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
         async fn fetch_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn fetch_local_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn prepare_display_fetch(hash: &BlobHash) -> Result<kukuri_blob_service::DisplayBlobFetch>;
         // #1152: trait の既定実装は永続化する `fetch_blob` へ委譲するため、必ず実体へ転送する
         // (成人向け表示 ON の取得は ephemeral で永続化しない。ADR 0046 §6.2)。
         async fn fetch_blob_ephemeral(hash: &BlobHash) -> Result<Option<Vec<u8>>>;

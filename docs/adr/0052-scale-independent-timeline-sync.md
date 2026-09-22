@@ -165,12 +165,33 @@ Accepted
     scope と一致し、その topic / channel から作る Spatial Context と state.owner_pubkey から導出した Dome ID が state.room_id と一致することを要求する。
     その場合に限り未署名 hash の local / remote 取得を許可し、取得後も上の metaverse room の規則で確かめる。これは hash や owner の認証ではなく、未署名 hash
     による取得が残る互換例外である。local のみにすると別端末で旧 Dome を初めて読めないため、この例外を維持する。署名つき manifest の hash 不一致や検証拒否から
-    互換分岐へ fallback しない。verifier の 1 record あたりの blob 取得は最大 1 回、1 key の候補は最大 8 件、既存 retry の回数と各取得の timeout（2〜5 秒）を維持する。
+    互換分岐へ fallback しない。verifier の 1 record あたりの local blob 読み出しは最大 1 回、1 key の候補は最大 8 件。remote 取得の表示条件・試行上限・取消は次節に従う。
   - 利用者の操作（終了・参加・更新・Dome の移動と削除）が読む state と manifest も、同じ検証を通す。
   - 互換: #1260 時点で live session と ScoreGame の本番 record は無い。revision を持たない旧形式の移行・後方互換は行わず、表示・操作の対象にしない。
     未検証の state や旧形式へ owner が署名を付け直す経路は作らない。Metaverse room は revision の対象外で、既存の互換経路と lifecycle を維持する。
 - reaction・live session・game room でも、検証に通らない record と読めない record は、その object だけを飛ばす（warn）。全件走査・event・hint・利用者の操作を失敗させない。
 - reaction の行と、live session・game room の行は、`projection_version` 2 から検証済みの record だけで作る。それより前の行は migration で消し、手元の docs から反映し直す。
+
+### 2.1 Session の個別反映と表示要求（#1262）
+
+- live session / game room の state と `envelopes/<id>` は、到着したentryを契機に対象keyだけを`LocalOnly`で読む。
+  envelopeの署名・kind・idを確かめ、contentが指すsessionのstateを個別反映する。署名・owner・scope・manifest一致の既存検証は維持する。
+- 確定的な拒否、docs entry未取得、manifest欠損、検証済みを区別し、sleepを挟む読み直しはしない。
+  sessionの反映が0件という理由で窓の追いつきやreplica再同期を依頼しない。
+- entry通知がbytesの到着に先行した場合は、通知のcontent hashが読み出したrecordに含まれるかで区別する。
+  待ち先は全体64件までのkey/hashの集合に置き、`ContentReady`で対象を再確認する。同じkeyの不正recordが既存でも、
+  通知された正常recordの未取得を確定的拒否と混同しない。窓の外でもこの個別反映を使う。
+- session manifestのremote取得は表示範囲内の一覧カードと開いている詳細だけが要求できる。購読、topic選択、一覧APIの呼出しだけでは要求しない。
+  blobの局所読みは`BlobService::fetch_local_blob`を使い、未対応の実装は取得不可としてremoteにfallbackしない。
+- 未取得候補を検証済みsession projectionへ昇格させない。上限つきの候補表示は通常の参加・更新操作を持たず、表示要求による取得が完了して検証に通れば通常のsessionへ置き換わる。
+- 作業集合は64 session、1 keyの候補は既存のexact read上限以内、待機taskは1 keyに1つで全体64、実取得は全体2。
+  同一replica/session key/manifestの組につき最大3試行。同じkeyの全recordをまとめて候補集合を更新し、重複event・再描画・取得待ち中の取消で予算を初期化/消費しない。
+  表示専用取得は共通walk枠を取得してから試行を数え、呼出元が所有するfutureで通信する。別taskのsingle-flightへ委譲せず、取消で実際のstreamを閉じる。取得予算は共通枠の待機を含め30秒。取得bytesの保存と反映は表示・退出との排他内で行う。
+  試行は実取得開始時に数える。失敗したhashのtimer再試行はなく、再表示または明示的な再試行要求が必要。同じ予算内で扱う。
+  hash別予算履歴はsessionごと64件までで、現行候補以外の古い履歴を削除する。非表示の作業集合は容量到達時に削除し、退出・shutdown時は関連taskと待ち先を削除する。
+- 取得は購読loopの外で進める。完了時は現在のstateから再検証する。ScoreGameのroom単位のlock・pointer比較を維持し、
+  liveも終了操作とprojection commitを同じsession単位のlockで直列化して現在pointerを確認する。古い取得結果で新しいprojectionへ巻き戻さない。
+- 候補の増減と取得完了、`ContentReady`による反映は既存の同期状態変更通知へ反映し、画面は通知の変化で表示中のsession一覧を読み直す。同じ候補集合の反復では通知を進めない。明示的に開いた詳細の未取得候補は表示位置へ移し、窓の外でもその対象を要求できる。
 
 ### 3. docs の読み出しの規則
 

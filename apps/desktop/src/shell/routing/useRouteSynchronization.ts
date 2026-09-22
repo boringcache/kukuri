@@ -303,9 +303,7 @@ export function useRouteSynchronization({
         !joinedChannelsForTopic.some((channel) => channel.channel_id === nextSelectedChannelId)
     );
     const routeScopeKey = timelineStorageKeyForChannel(nextTopic, nextSelectedChannelId);
-    const liveSessionsForTopic = liveSessionsByScopeKey[routeScopeKey] ?? [];
     const gameRoomsForTopic = gameRoomsByScopeKey[routeScopeKey] ?? [];
-    const livePanelState = livePanelStateByScopeKey[routeScopeKey];
     const gamePanelState = gamePanelStateByScopeKey[routeScopeKey];
 
     if (
@@ -728,15 +726,6 @@ export function useRouteSynchronization({
         if (selectedLiveSessionId) {
           setSelectedLiveSessionId(null);
         }
-      } else if (
-        livePanelState?.status === 'ready' &&
-        !liveSessionsForTopic.some((session) => session.session_id === requestedSessionId)
-      ) {
-        shouldNormalize = true;
-        normalizedSelectedLiveSessionId = null;
-        if (selectedLiveSessionId) {
-          setSelectedLiveSessionId(null);
-        }
       } else {
         normalizedSelectedLiveSessionId = requestedSessionId;
         if (selectedLiveSessionId !== requestedSessionId) {
@@ -780,15 +769,6 @@ export function useRouteSynchronization({
         setSelectedLiveSessionId(null);
       }
       if (!requestedRoomId) {
-        normalizedSelectedGameRoomId = null;
-        if (selectedGameRoomId) {
-          setSelectedGameRoomId(null);
-        }
-      } else if (
-        gamePanelState?.status === 'ready' &&
-        !gameRoomsForTopic.some((room) => room.room_id === requestedRoomId)
-      ) {
-        shouldNormalize = true;
         normalizedSelectedGameRoomId = null;
         if (selectedGameRoomId) {
           setSelectedGameRoomId(null);

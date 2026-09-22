@@ -41,6 +41,21 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
 
     assert_eq!(
         receiver
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("local read"),
+        None
+    );
+    assert_eq!(
+        sender
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("local bytes"),
+        Some(b"remote-only-attachment".to_vec())
+    );
+
+    assert_eq!(
+        receiver
             .local_blob_status(&stored.hash)
             .await
             .expect("receiver local status"),
@@ -49,6 +64,21 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
     assert!(
         receiver_node.blobs().blobs().get_bytes(hash).await.is_err(),
         "local status check must not persist the remote blob"
+    );
+    let display = receiver
+        .prepare_display_fetch(&stored.hash)
+        .await
+        .expect("display admission");
+    assert_eq!(
+        display.await.expect("display bytes"),
+        Some(b"remote-only-attachment".to_vec())
+    );
+    assert_eq!(
+        receiver
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("display does not cache"),
+        None
     );
 
     assert_eq!(
@@ -82,4 +112,69 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
             .expect("receiver local status after fetch"),
         BlobStatus::Available
     );
+}
+
+#[tokio::test]
+async fn cancelling_display_fetch_closes_the_actual_blob_stream_without_caching() {
+    use iroh::endpoint::presets;
+    let server = iroh::Endpoint::builder(presets::Minimal)
+        .alpns(vec![iroh_blobs::ALPN.to_vec()])
+        .bind()
+        .await
+        .expect("server endpoint");
+    let root = tempdir().expect("client root");
+    let config = TransportNetworkConfig::loopback();
+    let node = IrohDocsNode::persistent_with_config(root.path(), config.clone())
+        .await
+        .expect("client node");
+    let client = std::sync::Arc::new(IrohBlobService::new(node));
+    client
+        .import_peer_ticket(&loopback_ticket(&server, &config))
+        .await
+        .expect("peer");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let endpoint = server.clone();
+    let provider = tokio::spawn(async move {
+        let connection = endpoint
+            .accept()
+            .await
+            .expect("incoming")
+            .await
+            .expect("connection");
+        let (send, mut recv) = connection.accept_bi().await.expect("blob stream");
+        let mut request = [0_u8; 128];
+        assert!(recv.read(&mut request).await.expect("request").is_some());
+        let _ = started_tx.send(());
+        // No blob header is sent. Cancellation must stop this real QUIC receive stream.
+        // STOP_SENDINGと接続全体の終了は、どちらも転送を続けられない取消結果。
+        let _ = send.stopped().await;
+        let _ = stopped_tx.send(());
+    });
+    let hash = kukuri_core::BlobHash::new(blake3::hash(b"delayed manifest").to_hex().to_string());
+    let reader = client.clone();
+    let requested = hash.clone();
+    let fetch = tokio::spawn(async move {
+        reader
+            .prepare_display_fetch(&requested)
+            .await
+            .expect("display admission")
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), started_rx)
+        .await
+        .expect("fetch started")
+        .expect("start signal");
+    fetch.abort();
+    let _ = fetch.await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), stopped_rx)
+        .await
+        .expect("stream cancelled")
+        .expect("stop signal");
+    assert_eq!(
+        client.fetch_local_blob(&hash).await.expect("local cache"),
+        None
+    );
+    provider.await.expect("provider");
+    server.close().await;
 }

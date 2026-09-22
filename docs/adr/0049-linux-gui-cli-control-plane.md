@@ -121,6 +121,7 @@ DebにCLIは同梱しない。Deb payloadはfirst-party ELF、desktop／iconとn
 - app／Community Node同意、age gate、restore gateを共通hostで共有し、成立前はruntime、scheduler、remote取得、background通知を開始しない。
 - protocolの正本は常駐プロセスのcommand登録簿／dispatcherとし、schema／command metadataを同じ定義から生成する。
 - account、同意、private audience、credentialなど既存の製品側guardは、GUIと同じ意味で常駐プロセス側にも適用する。
+- #1262: sessionの未取得候補は`list_session_candidates`で取得する。consumerが閲覧する対象は`set_session_display`でscope・session ID・observer IDと`visible: true`を明示し、閲覧終了時は同じobserverを`visible: false`で解除する。`replica_id`が空なら許可されたscope内で対象keyを探す。`list_live_sessions` / `list_game_rooms`の呼出しだけでは未表示manifestを取得しない。欠損は部分的な一覧として扱い、再取得は表示要求の有限予算内で明示する。daemon終了時にはすべての表示要求と取得taskを破棄する。
 - Tauri updater署名は必須とする。2026-09-05の#889計画承認により、AppImage埋込みGPG署名は追加しない。Linux AppImageもTauri updaterの公開鍵による検証を行い、署名なし・不正署名の更新はインストールしない。
 - Ubuntu 22.04をLinux GUI build基盤とし、Ubuntu 22.04／Debian 12のX11／XWaylandを実環境smoke test対象にする。
 

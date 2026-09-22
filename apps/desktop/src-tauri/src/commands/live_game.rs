@@ -13,6 +13,16 @@ use kukuri_desktop_runtime::{
 use crate::state::{CommandError, DesktopState, map_error};
 
 #[tauri::command]
+pub async fn list_session_candidates(state: tauri::State<'_, DesktopState>, request: ListLiveSessionsRequest) -> Result<Vec<kukuri_app_api::SessionCandidateView>, CommandError> {
+    state.runtime().list_session_candidates(request).await.map_err(map_error)
+}
+
+#[tauri::command]
+pub async fn set_session_display(state: tauri::State<'_, DesktopState>, request: kukuri_app_api::SessionDisplayRequest) -> Result<(), CommandError> {
+    state.runtime().set_session_display(request).await.map_err(map_error)
+}
+
+#[tauri::command]
 pub async fn list_live_sessions(
     state: tauri::State<'_, DesktopState>,
     request: ListLiveSessionsRequest,

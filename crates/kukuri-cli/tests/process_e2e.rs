@@ -7,6 +7,16 @@ mod process_client;
 use process_client::ProcessClient;
 use serde_json::json;
 
+// #1262: CLIのconsumerも、表示する対象を明示し、daemon停止で購読を解除する。
+fn display_session(client: &ProcessClient, topic: &str, id: &serde_json::Value, kind: &str) {
+    client.call(
+        "set_session_display",
+        json!({"topic":topic, "scope":{"kind":"public"},
+        "replica_id":"", "session_id":id, "kind":kind,
+        "observer":format!("e2e-{}", id.as_str().expect("session id")), "visible":true}),
+    );
+}
+
 fn refresh_dm_pair(
     a: &ProcessClient,
     b: &ProcessClient,
@@ -398,6 +408,7 @@ fn three_real_daemons_exchange_content_and_preserve_private_boundaries() {
         "create_live_session",
         json!({"topic": topic, "title": "配信", "description": "E2E"}),
     );
+    display_session(&b, topic, &live, "live");
     b.wait_for("list_live_sessions", json!({"topic": topic}), |data| {
         data.as_array()
             .is_some_and(|items| items.iter().any(|item| item["session_id"] == live))
@@ -418,6 +429,7 @@ fn three_real_daemons_exchange_content_and_preserve_private_boundaries() {
         "create_game_room",
         json!({"topic": topic, "title": "Game", "description": "E2E", "participants": ["A", "B"]}),
     );
+    display_session(&b, topic, &game, "game");
     let rooms = b.wait_for("list_game_rooms", json!({"topic": topic}), |data| {
         data.as_array()
             .is_some_and(|items| items.iter().any(|item| item["room_id"] == game))
@@ -447,6 +459,7 @@ fn three_real_daemons_exchange_content_and_preserve_private_boundaries() {
         "create_metaverse_room",
         json!({"topic": topic, "title": "Dome", "description": "E2E"}),
     );
+    display_session(&b, topic, &dome, "game");
     b.wait_for("list_game_rooms", json!({"topic": topic}), |data| {
         data.as_array()
             .is_some_and(|items| items.iter().any(|item| item["room_id"] == dome))
@@ -456,6 +469,7 @@ fn three_real_daemons_exchange_content_and_preserve_private_boundaries() {
         "create_metaverse_room",
         json!({"topic": topic, "title": "受信側Dome", "description": "接続検証"}),
     );
+    display_session(&a, topic, &receiver_dome, "game");
     a.wait_for("list_game_rooms", json!({"topic": topic}), |data| {
         data.as_array()
             .is_some_and(|items| items.iter().any(|item| item["room_id"] == receiver_dome))

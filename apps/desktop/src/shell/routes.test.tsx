@@ -304,7 +304,7 @@ test('author context restores from the hash route when a valid author pubkey is 
   expect(within(getDetailPane('Author')).getByText('author detail from route restore')).toBeInTheDocument();
 });
 
-test('live session route restores and normalizes invalid session targets without leaving live', async () => {
+test('live session route restores and retains unavailable targets for displayed acquisition', async () => {
   const firstRender = renderAtHash(
     '#/live?topic=kukuri%3Atopic%3Ageneral&sessionId=session-demo',
     createDesktopMockApi({
@@ -357,12 +357,13 @@ test('live session route restores and normalizes invalid session targets without
   );
 
   await waitFor(() => {
-    expect(window.location.hash).toBe('#/live?topic=kukuri%3Atopic%3Ageneral');
+    expect(window.location.hash).toBe('#/live?topic=kukuri%3Atopic%3Ageneral&sessionId=missing-session');
   });
+  expect(within(getActiveColumn('Live')).getByText('Session information is not available yet.')).toBeInTheDocument();
   expect(within(getActiveColumn('Live')).getAllByRole('heading', { name: 'Live Sessions' })[0]).toBeInTheDocument();
 });
 
-test('game route restores score rooms in Game Columns and normalizes invalid targets', async () => {
+test('game route restores score rooms and retains unavailable targets for displayed acquisition', async () => {
   const firstRender = renderAtHash(
     '#/game?topic=kukuri%3Atopic%3Ageneral&roomId=room-demo',
     createDesktopMockApi({
@@ -416,8 +417,9 @@ test('game route restores score rooms in Game Columns and normalizes invalid tar
   );
 
   await waitFor(() => {
-    expect(window.location.hash).toBe('#/game?topic=kukuri%3Atopic%3Ageneral');
+    expect(window.location.hash).toBe('#/game?topic=kukuri%3Atopic%3Ageneral&roomId=missing-room');
   });
+  expect(within(getActiveColumn('Metaverse')).getByText('Session information is not available yet.')).toBeInTheDocument();
   expect(within(getActiveColumn('Metaverse')).getByRole('heading', { name: 'Metaverse Rooms' })).toBeInTheDocument();
 });
 
