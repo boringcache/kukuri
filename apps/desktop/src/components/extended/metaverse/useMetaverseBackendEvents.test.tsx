@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { GameRoomView, MetaverseRoomEventView } from '@/lib/api';
+import type { AvatarTransform } from '../MetaverseSceneModel';
 import { createDefaultMetaverseRoomState } from './DomeSceneModel';
 import type { MetaverseRoomActions } from './MetaverseRoomActions';
 import type { DomeNeighborTransitionView } from './DomeTransitionModel';
@@ -22,6 +23,18 @@ const room: GameRoomView = {
   updated_at: 1,
   channel_id: null,
   audience_label: 'Public',
+};
+
+const visibleRemoteTransforms: Record<string, AvatarTransform> = {
+  'remote-peer': {
+    roomId: room.room_id,
+    peerId: 'remote-peer',
+    seq: 1,
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    animation: 'idle',
+    sentAt: 1,
+  },
 };
 
 function presenceJoin(seq: number, hash = 'avatar-a'): MetaverseRoomEventView {
@@ -84,19 +97,19 @@ function actionsWith(
 
 function renderBackendEvents(
   actions: MetaverseRoomActions,
-  initialProps = { avatarFetchActive: true, visibleAvatarPeerIds: ['remote-peer'] as string[] }
+  initialProps = { avatarFetchActive: true, remoteTransforms: visibleRemoteTransforms }
 ) {
   const transitionNeighbors: DomeNeighborTransitionView[] = [];
   const playSpatialAudioFrame = vi.fn();
   const setRemoteTransforms = vi.fn();
   return renderHook(
-    ({ avatarFetchActive, visibleAvatarPeerIds }) => useMetaverseBackendEvents({
+    ({ avatarFetchActive, remoteTransforms }) => useMetaverseBackendEvents({
       actions,
       selectedRoom: room,
       transitionNeighbors,
       localPeerId: 'local-peer',
       avatarFetchActive,
-      visibleAvatarPeerIds,
+      remoteTransforms,
       playSpatialAudioFrame,
       setRemoteTransforms,
     }),
@@ -170,13 +183,13 @@ describe('useMetaverseBackendEvents', () => {
     });
     expect(getBlobPreviewUrl).toHaveBeenCalledTimes(1);
 
-    view.rerender({ avatarFetchActive: false, visibleAvatarPeerIds: ['remote-peer'] });
+    view.rerender({ avatarFetchActive: false, remoteTransforms: visibleRemoteTransforms });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6_000);
     });
     expect(getBlobPreviewUrl).toHaveBeenCalledTimes(1);
 
-    view.rerender({ avatarFetchActive: true, visibleAvatarPeerIds: ['remote-peer'] });
+    view.rerender({ avatarFetchActive: true, remoteTransforms: visibleRemoteTransforms });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
@@ -202,7 +215,7 @@ describe('useMetaverseBackendEvents', () => {
     const getBlobPreviewUrl = vi.fn().mockResolvedValue('blob:avatar-a');
     const view = renderBackendEvents(
       actionsWith(listRoomEvents, getBlobPreviewUrl),
-      { avatarFetchActive: true, visibleAvatarPeerIds: [] }
+      { avatarFetchActive: true, remoteTransforms: {} }
     );
 
     await act(async () => {
@@ -210,7 +223,7 @@ describe('useMetaverseBackendEvents', () => {
     });
     expect(getBlobPreviewUrl).not.toHaveBeenCalled();
 
-    view.rerender({ avatarFetchActive: true, visibleAvatarPeerIds: ['remote-peer'] });
+    view.rerender({ avatarFetchActive: true, remoteTransforms: visibleRemoteTransforms });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });

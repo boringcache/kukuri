@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
 import type { GameRoomView, MetaverseRoomEventView } from '@/lib/api';
 import type {
@@ -11,6 +11,10 @@ import { mergeRoomChatMessages } from '../MetaverseSceneModel';
 import type { DomeNeighborTransitionView } from './DomeTransitionModel';
 import type { MetaverseRoomActions } from './MetaverseRoomActions';
 import { chatMessageFromApi, latestChatBubbleFromMessage } from './MetaverseRoomSessionSupport';
+import {
+  readClientResourceBudget,
+  selectVisibleAvatarPeerIds,
+} from './MetaverseResourceBudgetModel';
 
 type UseMetaverseBackendEventsArgs = {
   actions: MetaverseRoomActions;
@@ -18,7 +22,7 @@ type UseMetaverseBackendEventsArgs = {
   transitionNeighbors: DomeNeighborTransitionView[];
   localPeerId: string;
   avatarFetchActive: boolean;
-  visibleAvatarPeerIds: readonly string[];
+  remoteTransforms: Record<string, AvatarTransform>;
   playSpatialAudioFrame: (view: MetaverseRoomEventView) => void;
   setRemoteTransforms: Dispatch<SetStateAction<Record<string, AvatarTransform>>>;
 };
@@ -36,13 +40,30 @@ const AVATAR_FETCH_LEDGER_CAPACITY = 2_000;
 const BACKEND_POLL_INTERVAL_MS = 180;
 const BACKEND_POLL_MAX_INTERVAL_MS = 5_000;
 
+export function mergePeerPresence(
+  current: Record<string, PeerPresence>,
+  presence: PeerPresence
+): Record<string, PeerPresence> {
+  const previous = current[presence.peerId];
+  const sameAvatar = previous?.avatarAssetRef?.blob_hash
+    === presence.avatarAssetRef?.blob_hash;
+  return {
+    ...current,
+    [presence.peerId]: {
+      ...previous,
+      ...presence,
+      avatarAssetUrl: sameAvatar ? previous?.avatarAssetUrl : undefined,
+    },
+  };
+}
+
 export function useMetaverseBackendEvents({
   actions,
   selectedRoom,
   transitionNeighbors,
   localPeerId,
   avatarFetchActive,
-  visibleAvatarPeerIds,
+  remoteTransforms,
   playSpatialAudioFrame,
   setRemoteTransforms,
 }: UseMetaverseBackendEventsArgs) {
@@ -54,6 +75,17 @@ export function useMetaverseBackendEvents({
   const [, setAvatarFetchRevision] = useState(0);
   const cursorsRef = useRef(new Map<string, string>());
   const avatarFetchesRef = useRef(new Map<string, AvatarFetchEntry>());
+  const clientResourceBudget = useMemo(
+    () => readClientResourceBudget(typeof window === 'undefined' ? null : window.localStorage),
+    []
+  );
+  const visibleAvatarPeerIds = useMemo(
+    () => selectVisibleAvatarPeerIds(
+      Object.keys(remoteTransforms),
+      clientResourceBudget.max_rendered_avatars
+    ),
+    [clientResourceBudget.max_rendered_avatars, remoteTransforms]
+  );
 
   const resetBackendEventCursor = useCallback(() => cursorsRef.current.clear(), []);
   const pollRoomIdsKey = JSON.stringify([
@@ -80,19 +112,7 @@ export function useMetaverseBackendEvents({
           joinedAt: event.presence.joined_at,
           lastSeenAt: event.presence.last_seen_at,
         };
-        setPeerPresence((current) => {
-          const previous = current[presence.peerId];
-          const sameAvatar = previous?.avatarAssetRef?.blob_hash
-            === presence.avatarAssetRef?.blob_hash;
-          return {
-            ...current,
-            [presence.peerId]: {
-              ...previous,
-              ...presence,
-              avatarAssetUrl: sameAvatar ? previous?.avatarAssetUrl : undefined,
-            },
-          };
-        });
+        setPeerPresence((current) => mergePeerPresence(current, presence));
       } else if (event.type === 'presence_leave' && event.peer_id !== localPeerId) {
         setPeerPresence((current) => {
           const next = { ...current };

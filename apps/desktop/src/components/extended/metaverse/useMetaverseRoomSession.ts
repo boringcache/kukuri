@@ -42,7 +42,7 @@ import {
   topicDiagnosticFor,
 } from './MetaverseRoomSessionSupport';
 import { useSpatialAudio } from './useSpatialAudio';
-import { useMetaverseBackendEvents } from './useMetaverseBackendEvents';
+import { mergePeerPresence, useMetaverseBackendEvents } from './useMetaverseBackendEvents';
 import {
   readLastVisitedDome,
   resolveDomeEntryOrder,
@@ -51,10 +51,6 @@ import {
 } from './DomeEntryModel';
 import { loadAvatarCollider } from './AvatarColliderModel';
 import { useDomeTransitionAttempt } from './useDomeTransitionAttempt';
-import {
-  readClientResourceBudget,
-  selectVisibleAvatarPeerIds,
-} from './MetaverseResourceBudgetModel';
 
 type UseMetaverseRoomSessionArgs = {
   actions: MetaverseRoomActions;
@@ -65,8 +61,7 @@ type UseMetaverseRoomSessionArgs = {
   locale: SupportedLocale;
   localDisplayName: string | null;
   localAvatarAssetRef: MetaverseAssetRef | null;
-  localAvatarAssetUrl: string | null;
-  avatarFetchActive?: boolean;
+  localAvatarAssetUrl: string | null; avatarFetchActive?: boolean;
   mutedAuthorPubkeys?: ReadonlySet<string>;
   initialSelectedRoomId?: string | null;
   activeChannelId?: string | null;
@@ -103,8 +98,7 @@ export function useMetaverseRoomSession({
   locale,
   localDisplayName,
   localAvatarAssetRef,
-  localAvatarAssetUrl,
-  avatarFetchActive = true,
+  localAvatarAssetUrl, avatarFetchActive = true,
   mutedAuthorPubkeys = EMPTY_MUTED_AUTHOR_PUBKEYS,
   initialSelectedRoomId = null,
   activeChannelId = null,
@@ -120,17 +114,6 @@ export function useMetaverseRoomSession({
   const [admissionStatus, setAdmissionStatus] = useState<'resolving' | 'admitting' | 'joined' | 'selection'>('resolving');
   const [joinedRoomIds, setJoinedRoomIds] = useState<Set<string>>(() => new Set());
   const [remoteTransforms, setRemoteTransforms] = useState<Record<string, AvatarTransform>>({});
-  const clientResourceBudget = useMemo(
-    () => readClientResourceBudget(typeof window === 'undefined' ? null : window.localStorage),
-    []
-  );
-  const visibleAvatarPeerIds = useMemo(
-    () => selectVisibleAvatarPeerIds(
-      Object.keys(remoteTransforms),
-      clientResourceBudget.max_rendered_avatars
-    ),
-    [clientResourceBudget.max_rendered_avatars, remoteTransforms]
-  );
   const [messageDraft, setMessageDraft] = useState('');
   const [sharedObject, setSharedObject] = useState<SharedRoomObjectV1>(DEFAULT_SHARED_OBJECT);
   const [sessionProps, setSessionProps] = useState<SessionPropView[]>([]);
@@ -240,9 +223,7 @@ export function useMetaverseRoomSession({
     actions,
     selectedRoom: admittedRoom,
     transitionNeighbors,
-    localPeerId,
-    avatarFetchActive,
-    visibleAvatarPeerIds,
+    localPeerId, avatarFetchActive, remoteTransforms,
     playSpatialAudioFrame,
     setRemoteTransforms,
   });
@@ -400,18 +381,7 @@ export function useMetaverseRoomSession({
       }
       setLastRoomActivityAt(Date.now());
       if (data.type === 'presence.join' && data.presence.peerId !== localPeerId) {
-        setPeerPresence((current) => {
-          const previous = current[data.presence.peerId];
-          const sameAvatar = previous?.avatarAssetRef?.blob_hash
-            === data.presence.avatarAssetRef?.blob_hash;
-          return {
-            ...current,
-            [data.presence.peerId]: {
-              ...data.presence,
-              avatarAssetUrl: sameAvatar ? previous?.avatarAssetUrl : undefined,
-            },
-          };
-        });
+        setPeerPresence((current) => mergePeerPresence(current, data.presence));
       }
       if (data.type === 'presence.leave' && data.peerId !== localPeerId) {
         setPeerPresence((current) => {
