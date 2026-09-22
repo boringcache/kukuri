@@ -137,3 +137,7 @@ main fa9496a5（署名revision #1260、manifest hash検証 #1261を含む）を�
 - oversized-files、ipc-types --check、git diff --check成功。
 
 この追記は検証記録のみで監査対象の実装surfaceを変更しない。CIとmerge後tree比較を残す。
+
+### Linux CLI件数assertionの追従
+
+64c1c961のCIはLinux専用daemon testの固定件数148で失敗（実際150）。今回追加したsession表示2commandを期待値へ反映し忘れていた。OS共通registry testへ同じ148のassertionを追加し、Windowsでも150/148の失敗を再現した。両方を150へ更新後、CLI lib全31件、fmt、diff checkが成功。production code/IPC schema/動作の変更はない。Linux daemon/process testはCIで最終確認する。
