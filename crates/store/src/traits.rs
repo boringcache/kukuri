@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -92,21 +92,17 @@ pub trait ObjectProjectionStore: Send + Sync {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>>;
-    async fn list_topic_timeline_filtered(
+    /// 1 つの channel のタイムラインの 1 ページ(#1280。複数の channel をまたぐページは無い)。
+    ///
+    /// 実装は channel ごとの索引の範囲を読む。topic の全 channel の行を読んで絞る既定の実装は置かない
+    /// (他の channel の行の数に比例して読み飛ばすため)。
+    async fn list_topic_timeline_in_channel(
         &self,
         topic_id: &str,
-        allowed_channels: &BTreeSet<String>,
+        channel_id: &str,
         cursor: Option<TimelineCursor>,
         limit: usize,
-    ) -> Result<Page<ObjectProjectionRow>> {
-        scan_projection_pages_filtered(
-            cursor,
-            limit,
-            |cursor, page_size| self.list_topic_timeline(topic_id, cursor, page_size),
-            |row| allowed_channels.contains(row.channel_id.as_str()),
-        )
-        .await
-    }
+    ) -> Result<Page<ObjectProjectionRow>>;
     async fn list_thread(
         &self,
         topic_id: &str,
