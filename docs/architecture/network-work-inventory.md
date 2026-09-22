@@ -161,3 +161,7 @@ updater、ファイルdialog、identity export、外部URL起動はそれだけ�
 P2終了時に各groupのmember・caller・停止・連鎖と上流APIの実現可能性を確認し、未分類を0へ更新する。
 固定AC/INVARとNW transitionへの対応を独立監査する。P3/P4では差分を入れたgroupだけを更新し、
 同一headの成功監査と無関係な全suiteを繰り返さない。詳細な作業状態は#1221本文へ記録する。
+
+## N11のACK保存sink（共通route前の保護）
+
+`spawn_direct_message_subscription`の受信 → topic照合 → `handle_direct_message_hint` → ACK署名/sender/recipient/導出dm_id一致 → `set_direct_message_acked_at/remove_direct_message_outbox`。このhelperのproduction callerは上記subscriptionだけ。新routeへの再利用時もこの会話境界を迂回しない。ACK-1/2のtestは他会話のoutbox・本文・送信状態が不変で、正しい相手のACKだけ削除することを確認する。修正前は会話ID照合がなく、正しい署名を持つ別相手のACKでoutboxが削除される失敗を再現した。

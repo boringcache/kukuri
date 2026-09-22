@@ -141,3 +141,16 @@ active peerの無条件切断を認めなかった。iroh 1.0.3、gossip 0.101.0
 - `cargo tree --locked -i iroh --depth 1`をroot/Tauri両workspaceで確認。lock差分は5packageのsource/checksumのみ。
 
 全体はPR/CIで確認する。固定headの独立監査とmerge照合を終えるまでは、この段階を完了としない。
+
+## 共通受信経路の前提修正: DM ACKの会話境界
+
+N11の保存sinkを逆引きしたところ、`handle_direct_message_hint`はACKの署名・sender・recipientを確認する一方、`dm_id`をその二者から導出した会話IDと照合せず、任意の会話の送信状態更新とoutbox削除へ進んでいた。新しいaccount受信routeへ再利用する前に、D10/NW-8の保護outbox維持に必要なExisting-gapとして修正する。新しい通知種別・配送保証は追加しない。
+
+- ACK-1: ローカル宛に正しく署名されたACKでも、相手が異なる会話のmessageを指定した場合、outbox・本文・acked_atを変更しない。
+- ACK-2: 対応する会話の正しい相手からのACKは、従来通り送信済みを記録しoutboxだけを削除する。
+
+`tests/direct_messages/ack_scope.rs::signed_ack_for_another_conversation_cannot_remove_protected_outbox`は修正前にFAILし、相手C宛outboxが相手Bの署名ACKでNoneになることを確認した。修正は署名sender/recipient照合と同じ早期return条件に、現在のlocal/peerから導出するdm_id一致を追加する。既存wire・暗号frame・message ID・DB形式は変更しない。
+
+対象は上記helper、test、既存DMの再試行/再起動/配信の関連tests。独立監査とPR/CIで確認する。outbox全件読取りや相手別の常時購読は別の既存P3作業として残し、この修正を容量改善と扱わない。
+
+ACK修正後の`cargo test -p kukuri-app-api --lib direct_messages`は13件成功。別会話の拒否と正しいACKに加え、初回配送、再起動後outbox、tombstone、mutual解除/復帰、既存購読状態のcontractsを含む。`cargo clippy -p kukuri-app-api --all-targets -- -D warnings`、rustfmtとdiff checkも成功。全体suiteはPR/CIへ委譲する。

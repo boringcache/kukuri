@@ -41,6 +41,11 @@ impl AppService {
                 ack.verify()?;
                 if ack.sender.as_str() != peer_pubkey
                     || ack.recipient.as_str() != local_author_pubkey
+                    || ack.dm_id
+                        != direct_message_id_for_participants(
+                            &Pubkey::from(local_author_pubkey),
+                            &Pubkey::from(peer_pubkey),
+                        )
                 {
                     return Ok(false);
                 }
