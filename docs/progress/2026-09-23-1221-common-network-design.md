@@ -172,3 +172,22 @@ D9の実装前提として、公開`proto::topic::State`へ入出力を渡し、
 追加はtestと既存lock内の3packageのdev依存参照だけ。productionにはnative Gossipを維持する。topic数・timer・I/O workerの予算、逆引き、同時dial、全transport callerへの組込みは未完了。timerを動かさない短いwire往復を、長時間の資源上限の証明にしない。
 
 公開APIの選択は、docsが`SyncHandle`+`net`、gossipが`proto::topic::State`+所有I/O。irohの`EndpointHooks::before_connect/after_handshake`と`RouterBuilder::incoming_filter`も公開され、送信前拒否・handshake後照合・受信前選別へ利用できる。hook単独には失敗/取消した接続試行を精算するAPIがないため、接続futureの所有を省略しない。SDK全体のforkやwireの独自変更を前提にせず、この構成でadapterを作る。
+
+## P3の最初の本番接続: 表示用取得の受付・期限・終了
+
+`prepare_display_fetch`を共通受付状態機械へ接続する。対象は表示専用の一時blob取得であり、取得後のscope再確認と保存は従来通りapp-apiが行う。既存の通常取得のwalk枠は残し、今回の移行で同時取得数を増やさない。通常取得・docs・gossip全体の共通owner統合は後続。
+
+- DISPLAY-1（NW-2/3）: node単位で表示要求と実行枠を制限し、待機から結果まで同じ30秒のdeadlineを使う。満杯は待機taskをspawnせず型付きエラーで返す。
+- DISPLAY-2（NW-4/7）: 待機取消は後からI/Oを開始せず、表示future取消は実streamを止める。停止中の受付は復活せず、停止完了まで枠を保持する。
+- DISPLAY-3（NW-7）: node終了時に受付を閉じ、待機/準備済み/実行中の表示取得へ取消を伝える。世代終了後のbytesは返さない。無関係なnodeの受付を巻き込まない。
+- DISPLAY-4（既存表示contract）: `prepare_display_fetch`が成功する時点で従来のwalk枠も取得済みにし、app-apiの取得回数予算を待機だけで消費しない。通常walkとの既存同時上限を維持する。
+
+対象pathはiroh-nodeの受付adapter/node lifecycle/remote_fetchと、既存blob-service表示取消contract。新しいguardの独立監査と、全体・slow結合testはPR/CIで行う。局所では期限前の失敗再現、新adapterのqueue/取消/終了tests、既存表示取得testsを選ぶ。
+
+実装はnodeごとの`DisplayWorkAdmission`で、同時64個の表示leaseと8個の準備/実行枠を制御する。各leaseのmetadataはhash32byte。既存の通常walk Semaphoreも準備完了前に取得し、段階移行で通常＋表示の従来上限を増やさない。登録・取消・完了は同期的な短いlock内で台帳を更新し、I/O待機中は保持しない。表示futureを作っただけでpollしない場合も、期限/終了は実行前に確認する。
+
+修正前の`display_admission_wait_is_included_in_total_budget`は内部の待機が終わらず外側31秒timeoutでFAIL。修正後のiroh-node `display_` 6件と、複数serviceの別retry台帳が同じnode表示枠を共有するtest1件が成功した。blob-serviceの実QUICによるcaller取消とnode終了の2件も成功。初回compileの一時hash文字列の借用を修正済み。変更2crateのall-targets clippy成功。node終了の入口でも直ちに受付を閉じる追加後、終了の実QUIC testを再確認する。
+
+全体とapp-api slow/実scenarioはPR作成後にCIを使う。受付9件/gossip実証2件の既存結果は#1309（merge `81dcff79`、独立監査PASS、15/15 CI、10path一致）として再利用する。
+
+node終了入口の取消を追加後の`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes`は1件成功（0.11秒）。再現/取消/別node/複数serviceの証跡は上記の結果を採用し、無関係なsuiteを再実行しない。

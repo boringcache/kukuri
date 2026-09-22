@@ -6,12 +6,14 @@
 //! かつては docs-sync が置き場所だったが、「docs-sync が基盤の持ち主」という歪みを
 //! 解消するため独立させた(挙動不変の移動)。
 
+mod display_work;
 mod node;
 pub mod remote_fetch;
 
 #[cfg(test)]
 mod tests;
 
+pub use display_work::DisplayAdmissionError;
 pub use node::IrohDocsNode;
 
 impl IrohDocsNode {

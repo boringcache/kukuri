@@ -145,6 +145,7 @@ pub struct IrohDocsNode {
     router: Arc<Router>,
     docs: DocsApi,
     blobs: BlobStore,
+    pub(crate) display_work: Arc<crate::display_work::DisplayWorkAdmission>,
     shutdown_started: AtomicBool,
     shutdown_result: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
 }
@@ -356,6 +357,7 @@ impl IrohDocsNode {
             router: Arc::new(router),
             docs: docs.api().clone(),
             blobs,
+            display_work: Arc::new(crate::display_work::DisplayWorkAdmission::default()),
             shutdown_started: AtomicBool::new(false),
             shutdown_result: tokio::sync::watch::channel(None).0,
         });
@@ -453,6 +455,7 @@ impl IrohDocsNode {
     }
 
     pub async fn shutdown(self: Arc<Self>) -> Result<()> {
+        self.display_work.close();
         let mut result = self.shutdown_result.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let node = self.clone();
@@ -477,6 +480,7 @@ impl IrohDocsNode {
     }
 
     async fn shutdown_owned(&self) -> Result<()> {
+        self.display_work.close();
         // Flush before the router invokes BlobsProtocol::shutdown. A later
         // shutdown RPC may legitimately find that actor already closed.
         let blob_flush = self.blobs.sync_db().await;
@@ -501,6 +505,7 @@ impl IrohDocsNode {
 
 impl Drop for IrohDocsNode {
     fn drop(&mut self) {
+        self.display_work.close();
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }

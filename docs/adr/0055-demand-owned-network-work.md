@@ -337,3 +337,14 @@ D9のI/O所有は`iroh_gossip::proto::topic::State`と公開`topic::Message`を�
 上位`proto::State`のtopic付きMessageをそのままwireへ書かない。
 実証ではnative peerと双方向配送し、未完結headerの読込みもfuture取消でQUIC closeできた。
 複数topic/peer・timer・台帳・worker予算のproduction統合は未完了で、この実証だけでD9全体を完了にしない。
+
+## 表示用取得の最初の本番adapter
+
+`IrohDocsNode`は`DisplayWorkAdmission`を所有し、remote表示取得を`NetworkWorkOwner`で受付する。
+この段階は64個の独立した表示lease、8個の準備/実行枠をnode全体で共有し、異なるserviceのretry台帳でも枠を増やさない。
+既存の通常walk Semaphoreを併用し、移行途中に通常取得との従来上限を増やさない。通常fetch/docs/gossipの統合は未完了。
+`prepare_display_fetch`の開始から待機・取得・結果の判定まで同じ30秒deadlineを使う。
+成功時には旧walk枠も取得済みで、app-apiの表示取得回数を待機だけで消費しない。
+受付満杯/期限切れ/終了は`DisplayAdmissionError`で区別し、準備後の取消はbytesを返さない。
+node終了は受付を先に閉じ、callerが破棄したqueued leaseを後から起動しない。
+取得bytesは従来通り一時取得で、保存時のapp-api scope/token判定を省略しない。

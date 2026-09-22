@@ -177,3 +177,13 @@ P2終了時に各groupのmember・caller・停止・連鎖と上流APIの実現�
 N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 contractでnative peerとの双方向wireと未完結header中の取消を確認した。`proto::topic::State`/`topic::Message`を使い、membership本体は再実装しない。`proto::State`の外側Messageはtopicも含む内部配送型で、実wireはheader後にtopic Messageだけを書く点を区別する。所有connectionのDropでcloseし、nativeの内部RecvLoopへ取消を委ねない。
 
 このfixtureは1topic/1peerの短い往復でtimerを発火しない。production入口は増えず、timer容量・複数topicの共有接続・再試行・受信/送信workerの上限は残る。`EndpointHooks`は送信前拒否とhandshake後観測、`RouterBuilder::incoming_filter`は受信spawn前選別に使用可能だが、接続試行futureの失敗/cancel精算はownerが持つ。
+
+## 表示用取得の本番接続（P3）
+
+| ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N44 | app-api `SessionProjectionRegistry::schedule` → BlobService trait / stack proxy → `IrohBlobService::prepare_display_fetch` → `remote_fetch::prepare_display_fetch` → `DisplayWorkAdmission::acquire` | LocalOnlyの既存fast pathは別。remoteだけnode共通64lease/8枠、deadlineは受付から30秒、待機spawnなし、hash32byte。既存walk枠も準備成功前に取得 | DISPLAY-1/4、`display_admission_wait_is_included_in_total_budget`（修正前FAIL）、`display_admission_is_shared_across_services_using_one_node` |
+| N45 | 準備済み表示future → `lease.cancelled`と実fetchのselect → 検証済み一時bytes返却 | deadline/closeを優先、finishで世代/期限判定。caller dropでleaseと取得future/旧permitを解放。app-api保存前のscope/token guardを維持 | DISPLAY-2/3、既存caller取消と新node終了の実QUIC tests、adapter queue/close tests |
+| N46 | node `shutdown/shutdown_owned/Drop` → `DisplayWorkAdmission::close` → active scope失効と通知 | 受付を先に閉じ、queued/準備済み/実行中を取消。停止応答までは枠を保持し別nodeは独立。nodeの既存Router/endpoint停止は維持 | DISPLAY-3、`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes` / `display_node_close_does_not_stop_another_nodes_work` |
+
+N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstackのproxyを含む。remote helperへのproduction callerはIrohBlobServiceだけ。新台帳に秘密値/本文を保持せず、bytesの保存sinkは従来の`cache_and_project_displayed_manifest`でscope/tokenを再確認する。通常fetch・docs・gossipはこのadapterへ未移行なので、全networkの合計8枠達成とは扱わない。

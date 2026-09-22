@@ -147,6 +147,15 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
 
 #[tokio::test]
 async fn cancelling_display_fetch_closes_the_actual_blob_stream_without_caching() {
+    display_fetch_stops_without_caching(false).await;
+}
+
+#[tokio::test]
+async fn node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes() {
+    display_fetch_stops_without_caching(true).await;
+}
+
+async fn display_fetch_stops_without_caching(shutdown_node: bool) {
     use iroh::endpoint::presets;
     let server = iroh::Endpoint::builder(presets::Minimal)
         .alpns(vec![iroh_blobs::ALPN.to_vec()])
@@ -158,7 +167,7 @@ async fn cancelling_display_fetch_closes_the_actual_blob_stream_without_caching(
     let node = IrohDocsNode::persistent_with_config(root.path(), config.clone())
         .await
         .expect("client node");
-    let client = std::sync::Arc::new(IrohBlobService::new(node));
+    let client = std::sync::Arc::new(IrohBlobService::new(node.clone()));
     client
         .import_peer_ticket(&loopback_ticket(&server, &config))
         .await
@@ -196,8 +205,18 @@ async fn cancelling_display_fetch_closes_the_actual_blob_stream_without_caching(
         .await
         .expect("fetch started")
         .expect("start signal");
-    fetch.abort();
-    let _ = fetch.await;
+    if shutdown_node {
+        node.shutdown().await.expect("shutdown node");
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), fetch)
+            .await
+            .expect("display fetch cancelled by node shutdown")
+            .expect("fetch task")
+            .expect("cancelled fetch result");
+        assert_eq!(bytes, None);
+    } else {
+        fetch.abort();
+        let _ = fetch.await;
+    }
     tokio::time::timeout(std::time::Duration::from_secs(5), stopped_rx)
         .await
         .expect("stream cancelled")
