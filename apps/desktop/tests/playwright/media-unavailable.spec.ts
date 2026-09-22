@@ -102,10 +102,12 @@ test('normal mode replaces unavailable media with the fetch failure and a retry 
   await expect(page.getByTestId('text-skeleton-browser-unavailable')).toHaveCount(0);
   await expect(page.getByTestId('media-skeleton-browser-unavailable')).toHaveCount(0);
   await expect(page.getByText('Content unavailable.')).toHaveCount(0);
+  await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable')).toBeVisible();
 
   await exhaustAutomaticMediaFetch(page);
-  await expect(page.getByText('Failed to load.')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry loading' })).toBeVisible();
+  await expect(page.getByTestId('media-fetch-failure-browser-unavailable')).toBeVisible();
+  await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable-retry')).toBeVisible();
+  await expect(page.getByTestId('media-fetch-failure-browser-unavailable-retry')).toBeVisible();
   await expect(page.getByTestId('media-skeleton-browser-unavailable')).toHaveCount(0);
 });
 
@@ -119,9 +121,9 @@ test('developer mode reports a rejected fetch and an existing refresh can recove
   await page.clock.install();
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
 
-  await expect(page.getByText('Content unavailable.')).toBeVisible();
+  await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable')).toBeVisible();
   await exhaustAutomaticMediaFetch(page);
-  await expect(page.getByText('Failed to load.')).toBeVisible();
+  await expect(page.getByTestId('media-fetch-failure-browser-unavailable')).toBeVisible();
   await expect(page.getByText('fixture blob unavailable')).toHaveCount(0);
 
   await page.evaluate(() => {

@@ -85,6 +85,37 @@ impl Drop for MissingBodyAttempt {
 }
 
 impl MissingBodyLedger {
+    /// 利用者の明示再試行。自動試行の cooldown / 上限とは別に、この hash を 1 回だけ
+    /// `try_begin` できる状態へ置く。取得中の要求は合流させ、台帳の上限も維持する。
+    pub(crate) fn request_manual_retry(&self, hash: &BlobHash) -> bool {
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if entries
+            .get(hash.as_str())
+            .is_some_and(|entry| entry.in_flight)
+        {
+            return false;
+        }
+        if !entries.contains_key(hash.as_str()) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
+            let evictable = entries
+                .iter()
+                .find(|(_, entry)| !entry.in_flight)
+                .map(|(key, _)| key.clone());
+            let Some(key) = evictable else {
+                return false;
+            };
+            entries.remove(&key);
+        }
+        entries.insert(
+            hash.as_str().to_string(),
+            MissingBodyEntry {
+                attempts: MISSING_BODY_MAX_ATTEMPTS.saturating_sub(1),
+                next_attempt_at_ms: 0,
+                in_flight: false,
+            },
+        );
+        true
+    }
+
     /// この hash を今 remote へ取りに行ってよいか。`Some` を返したときは試行を 1 回消費し、取得中にする。
     pub(crate) fn try_begin(&self, hash: &BlobHash, now_ms: i64) -> Option<MissingBodyAttempt> {
         let mut entries = self.entries.lock().expect("missing body ledger lock");

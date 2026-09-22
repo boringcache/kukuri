@@ -258,6 +258,123 @@ struct GatedBlobService {
     fetches: std::sync::atomic::AtomicUsize,
 }
 
+// #1284 AC-2 / AC-5: 利用者の明示再試行は自動 retry の cooldown 中でも対象本文を
+// 1 回だけ取り直し、更新したカード view を返す。
+#[tokio::test]
+async fn manual_post_body_retry_bypasses_the_automatic_cooldown_once() {
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let docs_sync = Arc::new(CountingDocsSync::default());
+    let blobs = Arc::new(GatedBlobService::default());
+    let keys = generate_keys();
+    let topic = TopicId::new("kukuri:topic:manual-body-retry");
+    let stored = blobs
+        .put_blob(b"manual retry body".to_vec(), "text/plain")
+        .await
+        .expect("store body");
+    let envelope = persist_test_post(
+        docs_sync.as_ref(),
+        None,
+        &keys,
+        &topic,
+        PayloadRef::BlobText {
+            hash: stored.hash.clone(),
+            mime: "text/plain".into(),
+            bytes: stored.bytes,
+        },
+        Vec::new(),
+        None,
+    )
+    .await;
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs_sync,
+        blobs.clone(),
+        keys,
+    );
+
+    let missing = app
+        .list_timeline(topic.as_str(), None, 20)
+        .await
+        .expect("timeline with the missing body");
+    assert_eq!(missing.items[0].content, "[blob pending]");
+    assert_eq!(app.services.missing_body_ledger.attempts(&stored.hash), 1);
+
+    let fetches_before_unrelated = blobs.fetches.load(std::sync::atomic::Ordering::SeqCst);
+    app.retry_post_elements(envelope.id.as_str(), Some(envelope.id.as_str()), false)
+        .await
+        .expect("automatic visible retry")
+        .expect("post view");
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_unrelated,
+        "automatic viewport recovery must keep the finite ledger cooldown"
+    );
+    let unrelated = app
+        .retry_post_elements(envelope.id.as_str(), Some("unrelated-object"), true)
+        .await
+        .expect("unrelated retry is rejected");
+    assert!(unrelated.is_none());
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_unrelated,
+        "an unrelated body must not start blob I/O"
+    );
+
+    let mut private_leftover = store
+        .get_object_projection(&envelope.id)
+        .await
+        .expect("projection")
+        .expect("projected post");
+    private_leftover.channel_id = "private-not-joined".into();
+    store
+        .put_object_projection(private_leftover.clone())
+        .await
+        .expect("store private leftover");
+    assert!(
+        app.retry_post_elements(envelope.id.as_str(), Some(envelope.id.as_str()), true)
+            .await
+            .is_err(),
+        "a leftover private projection requires current membership"
+    );
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_unrelated,
+        "membership rejection must happen before blob I/O"
+    );
+    private_leftover.channel_id = PUBLIC_CHANNEL_ID.into();
+    private_leftover.content_labels = vec!["adult".into()];
+    store
+        .put_object_projection(private_leftover)
+        .await
+        .expect("restore public projection");
+    let gated = app
+        .retry_post_elements(envelope.id.as_str(), Some(envelope.id.as_str()), true)
+        .await
+        .expect("adult-gated retry")
+        .expect("post view");
+    assert_eq!(gated.content, "[blob pending]");
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_unrelated,
+        "adult gate must reject manual body retry before blob I/O"
+    );
+
+    app.set_adult_content_display_enabled(true);
+    blobs.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    let recovered = app
+        .retry_post_elements(envelope.id.as_str(), Some(envelope.id.as_str()), true)
+        .await
+        .expect("manual retry")
+        .expect("post view");
+    assert_eq!(recovered.content, "manual retry body");
+    assert_eq!(recovered.content_status, BlobViewStatus::Available);
+    assert_eq!(app.services.missing_body_ledger.attempts(&stored.hash), 0);
+}
+
 #[async_trait]
 impl BlobService for GatedBlobService {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {

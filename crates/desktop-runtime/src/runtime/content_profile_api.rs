@@ -267,6 +267,19 @@ impl DesktopRuntime {
             .await
     }
 
+    pub async fn retry_post_elements(
+        &self,
+        request: RetryPostElementsRequest,
+    ) -> Result<Option<PostView>> {
+        self.app_service
+            .retry_post_elements(
+                request.object_id.as_str(),
+                request.body_object_id.as_deref(),
+                request.manual,
+            )
+            .await
+    }
+
     pub async fn get_my_profile(&self) -> Result<Profile> {
         self.app_service.get_my_profile().await
     }

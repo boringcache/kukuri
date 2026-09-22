@@ -3,7 +3,7 @@ use kukuri_core::{BlobHash, ChannelAudienceKind, CreatePrivateChannelInput, Kuku
 use std::collections::HashMap;
 
 #[derive(Clone, Default)]
-struct CountingDocsSync {
+pub(super) struct CountingDocsSync {
     inner: kukuri_docs_sync::MemoryDocsSync,
     queries: Arc<TokioMutex<Vec<(String, DocQuery)>>>,
     restarts: Arc<TokioMutex<Vec<String>>>,
@@ -28,11 +28,11 @@ impl CountingDocsSync {
         }
     }
 
-    async fn clear_queries(&self) {
+    pub(super) async fn clear_queries(&self) {
         self.queries.lock().await.clear();
     }
 
-    async fn queries(&self) -> Vec<(String, DocQuery)> {
+    pub(super) async fn queries(&self) -> Vec<(String, DocQuery)> {
         self.queries.lock().await.clone()
     }
 
@@ -50,12 +50,12 @@ impl CountingDocsSync {
         self.restarts.lock().await.len()
     }
 
-    fn records_returned(&self) -> usize {
+    pub(super) fn records_returned(&self) -> usize {
         self.records_returned
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn reset_records_returned(&self) {
+    pub(super) fn reset_records_returned(&self) {
         self.records_returned
             .store(0, std::sync::atomic::Ordering::SeqCst);
     }
@@ -400,6 +400,7 @@ fn app_with_hanging_remote_docs(
 
 mod author_docs_author;
 mod author_key_reflection;
+mod bucket_integrity;
 mod diagnostics;
 mod docs_author_reads;
 mod gossip_toggle;
@@ -426,6 +427,7 @@ mod scale_counts;
 mod scale_independence;
 mod session_catch_up;
 mod shadowing_docs;
+pub(super) use shadowing_docs::ShadowingDocsSync;
 mod subscription_catch_up;
 mod subscription_restarts;
 #[cfg(feature = "iroh-integration-tests")]

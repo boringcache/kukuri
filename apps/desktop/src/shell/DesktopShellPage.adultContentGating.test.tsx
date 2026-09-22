@@ -40,6 +40,8 @@ test('adult-labeled media is not requested and shows a placeholder while display
   });
   const getBlobMediaPayload = vi.fn(api.getBlobMediaPayload);
   api.getBlobMediaPayload = getBlobMediaPayload;
+  const retryPostElements = vi.fn(api.retryPostElements);
+  api.retryPostElements = retryPostElements;
 
   render(<App api={api} />);
 
@@ -48,6 +50,9 @@ test('adult-labeled media is not requested and shows a placeholder while display
   // テキスト: 本文の代わりに代替表示。
   expect(within(getActiveColumn('Timeline')).getByTestId('post-adult-gated-adult-image-post')).toBeInTheDocument();
   expect(screen.queryByText('labeled adult caption')).not.toBeInTheDocument();
+  expect(
+    within(getActiveColumn('Timeline')).queryByRole('button', { name: 'Reload post' })
+  ).not.toBeInTheDocument();
 
   // 取得制御: 対象 hash への取得リクエストが 1 度も発生しない。
   await waitFor(() => {
@@ -55,6 +60,7 @@ test('adult-labeled media is not requested and shows a placeholder while display
       getBlobMediaPayload.mock.calls.filter(([hash]) => hash === ADULT_HASH)
     ).toHaveLength(0);
   });
+  expect(retryPostElements).not.toHaveBeenCalled();
 });
 
 test('adult-labeled text is hidden independently of media fetch control', async () => {
@@ -133,6 +139,7 @@ test('adult-labeled reply preview gates the enclosing card and media fetch', asy
         picture_asset: null,
       },
       content: 'adult reply preview body',
+      content_status: 'Available',
       attachments: [],
       content_labels: ['adult'],
       root_id: 'adult-reply-parent',

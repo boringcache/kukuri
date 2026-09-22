@@ -200,8 +200,8 @@ test('post card omits unavailable body and media from normal UI', () => {
 
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
   expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
-  // #1207: 取得不可のメディアは通常 mode でも失敗表示に置き換える(再取得の提供元が無ければ button は出さない)。
-  expect(screen.getByText('Failed to load.')).toHaveAttribute('role', 'status');
+  // #1284: 取得不可の本文とメディアは通常 mode でも、それぞれ失敗表示に置き換える。
+  expect(screen.getAllByText('Failed to load.')).toHaveLength(2);
   expect(screen.queryByRole('button', { name: 'Retry loading' })).not.toBeInTheDocument();
   expect(screen.queryByText('image/png')).not.toBeInTheDocument();
   expect(screen.queryByText('2.0 KB')).not.toBeInTheDocument();
@@ -230,8 +230,8 @@ test('post card exposes concise unavailable diagnostics in developer mode', () =
     />
   );
 
-  expect(screen.getByText('Content unavailable.')).toHaveAttribute('role', 'status');
-  expect(screen.getByText('Failed to load.')).toHaveAttribute('role', 'status');
+  expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
+  expect(screen.getAllByText('Failed to load.')).toHaveLength(2);
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
 });
 
@@ -356,6 +356,7 @@ function createReplyView(overrides?: Partial<PostCardView>): PostCardView {
           picture_asset: null,
         },
         content: 'parent body',
+        content_status: 'Available',
         attachments: [],
         root_id: 'parent-1',
         reply_to: null,

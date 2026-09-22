@@ -48,7 +48,7 @@ Issue #1239 の inventory。docs の replica を prefix で全件読みしてい
 | P-10 | `profile_docs_support.rs` `load_custom_reaction_assets_from_author_replica` | `reactions/assets/` | author のカスタムリアクションの総数 | 対象。T6-1（解消済み。key の上限つきの一覧（asset 512 件ぶん）と、`state` の key ごとの読み出し） |
 | P-11 | `profile_docs_support.rs` `snapshot_object_notification_baseline`・`snapshot_follow_notification_baseline` | `objects/`、`graph/follows/` | S-2 と同じ | 対象。T4・T6（解消済み。投稿の側は T4b-2。follow の側は、通知の対象になる自分を指す follow の key 1 件の key と hash だけを読む） |
 | P-12 | `object_persistence_support.rs` `fetch_private_channel_participants_from_replica` | `channels/participants/` | private channel の参加者数 | Non-goal（本 Issue の固定 AC に含まれない。招待制で件数は小さいが、上限が無い点を #1224 の台帳の上限で扱う） |
-| P-13 | `dome_connections.rs`（4 か所）、`dome_hosting.rs`（3 か所）、`dome_delete.rs`（1 か所） | `metaverse/dome-instances/`・提案・選択・接続・削除・layout commit | topic の Dome と提案の総数 | Non-goal（本 Issue の固定 AC に含まれない。Dome の一覧と接続の読み出しは別 Issue で、同じ原則で見直す） |
+| P-13 | `dome_connections.rs`（4 か所）、`dome_hosting.rs`（2 か所）、`dome_delete.rs`（1 か所） | `metaverse/dome-instances/`・提案・選択・接続・hosting record・削除・layout commit | topic の Dome、提案、hosting record、削除、layout commit の総数 | 一部解消（#1263: `hosting_instance` の Instance 探索は owner slot と署名 envelope の key を各8件まで読む方式へ変更し、一覧の行ごとの二重解決も除去した。接続 topology の Instance 一覧、提案・選択・接続、hosting record、削除、layout commit は対象外として残る） |
 | P-14 | `crates/cn-indexer/src/ingest.rs` `ingest_scope`（3 か所。変更通知で対象を特定できないときの fallback と初回） | `objects/`・`withdrawals/` など | scope の投稿総数 | Non-goal（CN 側。`ingest_changed_keys` が通常経路。T2 の索引化は効く。全件走査の廃止は CN 側の Issue で扱う） |
 | P-15 | `desktop-runtime/src/runtime/sync_live_api.rs` `has_topic_timeline_doc_index_entry`（test と harness 用） | `indexes/timeline/` | topic の投稿総数 | 対象。T2 で key 指定の読み出し 2 回へ置き換えた |
 

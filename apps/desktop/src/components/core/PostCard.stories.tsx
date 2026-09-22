@@ -5,6 +5,7 @@ import type { LinkPreviewFetcher, SubmitCommunityNodeReportResult } from '@/lib/
 
 import { MediaRetryContext } from './mediaRetryContext';
 import { PostCard } from './PostCard';
+import { PostReloadContext } from './postReloadContext';
 import { type PostCardView } from './types';
 
 const basePost = {
@@ -87,19 +88,21 @@ const meta = {
     layout: 'centered',
   },
   render: (args) => (
-    <div className='w-[min(42rem,calc(100vw-2rem))]'>
-      <PostCard
-        view={args.view}
-        onOpenAuthor={() => undefined}
-        onOpenThread={() => undefined}
-        onReply={() => undefined}
-        onSubmitReport={
-          args.reportable
-            ? () => new Promise<SubmitCommunityNodeReportResult>(() => undefined)
-            : undefined
-        }
-      />
-    </div>
+    <PostReloadContext.Provider value={async (post) => post}>
+      <div className='w-[min(42rem,calc(100vw-2rem))]'>
+        <PostCard
+          view={args.view}
+          onOpenAuthor={() => undefined}
+          onOpenThread={() => undefined}
+          onReply={() => undefined}
+          onSubmitReport={
+            args.reportable
+              ? () => new Promise<SubmitCommunityNodeReportResult>(() => undefined)
+              : undefined
+          }
+        />
+      </div>
+    </PostReloadContext.Provider>
   ),
 } satisfies Meta<{ view: PostCardView; reportable?: boolean }>;
 
@@ -599,6 +602,7 @@ export const Reply: Story = {
             picture_asset: null,
           },
           content: '直前の返信対象の簡略表示です。長い本文でも、返信自身の本文と混同せずに会話を追えるようにします。'.repeat(3),
+          content_status: 'Available',
           attachments: [],
           root_id: 'ancestor-root',
           reply_to: 'ancestor-root',

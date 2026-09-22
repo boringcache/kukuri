@@ -22,6 +22,7 @@ export function installReplyLayoutFixture() {
             object_id: 'reply-layout-parent', topic: args[0],
             author: { pubkey: 'b'.repeat(64), name: 'GrokTester', display_name: 'GrokTester', picture_asset: null },
             content: '動画添付 UX テスト — 直前の返信対象。長い本文でも2行までの簡略表示で会話の関係を確認できます。'.repeat(3),
+            content_status: 'Available',
             attachments: [], root_id: 'reply-layout-root', reply_to: 'reply-layout-root',
           },
         }] };

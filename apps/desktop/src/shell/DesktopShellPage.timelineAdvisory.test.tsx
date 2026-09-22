@@ -86,6 +86,7 @@ test('advisory-labeled timeline posts stay gated and never request their media',
 
   const column = getActiveColumn('Timeline');
   const placeholder = await within(column).findByTestId('media-adult-gated-timeline-image-post');
+  expect(within(column).queryByRole('button', { name: 'Reload post' })).not.toBeInTheDocument();
   expect(within(column).queryByTestId('post-advisory-gated-timeline-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('timeline image caption')).not.toBeInTheDocument();
   expect(blobRequests({ getBlobMediaPayload })).toHaveLength(0);
@@ -169,6 +170,7 @@ test('an advisory on a reply preview parent gates the enclosing card', async () 
       topic: 'kukuri:topic:general',
       author: { pubkey: 'b'.repeat(64), name: 'parent', display_name: null, picture_asset: null },
       content: 'advisory reply preview body',
+      content_status: 'Available',
       attachments: [],
       content_labels: [],
       root_id: 'advisory-reply-parent',

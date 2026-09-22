@@ -2,6 +2,7 @@ import { type FormEvent, type ReactNode, useMemo } from 'react';
 import { Link2 } from 'lucide-react';
 
 import { BookmarksEmptyState, BookmarksListFrame } from '@/components/core/BookmarksEmptyState';
+import { BookmarkPage } from '@/components/core/BookmarkPage';
 import { TimelineFeed } from '@/components/core/TimelineFeed';
 import { CommunityIndexWorkspace } from '@/components/core/CommunityIndexWorkspace';
 import type { CommunityIndexingTarget } from '@/components/core/CommunityIndexingRequestDialog';
@@ -519,46 +520,58 @@ export function DesktopShellPrimarySurface({
                   onRetry={() => retryBookmarks?.()}
                 >
                   {(bookmarksDisplayedStatus) => (
-                    <TimelineFeed
-                      posts={viewModels.bookmarkedTimelinePostViews}
-                      emptyCopy={t('shell:workspace.noBookmarks')}
-                      emptyState={
-                        bookmarksDisplayedStatus === 'ready' ? (
-                          <BookmarksEmptyState
-                            onShowTimeline={
-                              selectTimelineView ? () => selectTimelineView(column, 'feed') : undefined
-                            }
-                          />
-                        ) : null
-                      }
-                      onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
-                      onOpenThread={openThreadInSurfaceScope}
-                      onOpenThreadInTopic={openThreadInTopicFromSurface}
-                      onReply={beginColumnReply}
-                      onRepost={(post) => void handleSimpleRepost(post)}
-                      onQuoteRepost={beginColumnQuoteRepost}
-                      onRetryLocalPost={handleRetryLocalPost}
-                      onRestoreLocalPost={handleRestoreLocalPost}
-                      localAuthorPubkey={syncStatus.local_author_pubkey}
-                      mediaObjectUrls={mediaObjectUrls}
-                      ownedReactionAssets={ownedReactionAssets}
-                      bookmarkedReactionAssets={bookmarkedReactionAssets}
-                      recentReactions={recentReactions}
-                      onToggleReaction={(post, reactionKey) => void handleToggleReaction(post, reactionKey)}
-                      onBookmarkCustomReaction={(asset) => void handleBookmarkCustomReaction(asset)}
-                      onReactionPickerOpen={() => void loadReactionCatalogData()}
-                      showBookmarkAction={true}
-                      bookmarkedPostIds={bookmarkedPostIds}
-                      onToggleBookmark={(post) => void handleToggleBookmarkedPost(post)}
-                      onWithdraw={(post) => void handleWithdrawPost(post)}
-                      onActivateReference={(reference) => void handleActivateReference(reference)}
-                      onCopyPostLink={handleCopyInternalLink}
-                      onSubmitReport={submitReport}
-                      onCopyReportContact={copyReportContact}
-                      onFetchReportManifest={fetchReportManifest}
-                      onFetchNodePolicies={fetchNodePolicies}
-                      onMuteReportAuthor={muteReportAuthor}
-                    />
+                    <BookmarkPage key={column.id} items={viewModels.bookmarkedTimelinePostViews}>
+                      {(bookmarkPage) => (
+                        <TimelineFeed
+                          posts={bookmarkPage}
+                          emptyCopy={t('shell:workspace.noBookmarks')}
+                          emptyState={
+                            bookmarksDisplayedStatus === 'ready' ? (
+                              <BookmarksEmptyState
+                                onShowTimeline={
+                                  selectTimelineView
+                                    ? () => selectTimelineView(column, 'feed')
+                                    : undefined
+                                }
+                              />
+                            ) : null
+                          }
+                          onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
+                          onOpenThread={openThreadInSurfaceScope}
+                          onOpenThreadInTopic={openThreadInTopicFromSurface}
+                          onReply={beginColumnReply}
+                          onRepost={(post) => void handleSimpleRepost(post)}
+                          onQuoteRepost={beginColumnQuoteRepost}
+                          onRetryLocalPost={handleRetryLocalPost}
+                          onRestoreLocalPost={handleRestoreLocalPost}
+                          localAuthorPubkey={syncStatus.local_author_pubkey}
+                          mediaObjectUrls={mediaObjectUrls}
+                          ownedReactionAssets={ownedReactionAssets}
+                          bookmarkedReactionAssets={bookmarkedReactionAssets}
+                          recentReactions={recentReactions}
+                          onToggleReaction={(post, reactionKey) =>
+                            void handleToggleReaction(post, reactionKey)
+                          }
+                          onBookmarkCustomReaction={(asset) =>
+                            void handleBookmarkCustomReaction(asset)
+                          }
+                          onReactionPickerOpen={() => void loadReactionCatalogData()}
+                          showBookmarkAction={true}
+                          bookmarkedPostIds={bookmarkedPostIds}
+                          onToggleBookmark={(post) => void handleToggleBookmarkedPost(post)}
+                          onWithdraw={(post) => void handleWithdrawPost(post)}
+                          onActivateReference={(reference) =>
+                            void handleActivateReference(reference)
+                          }
+                          onCopyPostLink={handleCopyInternalLink}
+                          onSubmitReport={submitReport}
+                          onCopyReportContact={copyReportContact}
+                          onFetchReportManifest={fetchReportManifest}
+                          onFetchNodePolicies={fetchNodePolicies}
+                          onMuteReportAuthor={muteReportAuthor}
+                        />
+                      )}
+                    </BookmarkPage>
                   )}
                 </BookmarksListFrame>
               )}

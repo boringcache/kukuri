@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bookmark, Flag, Link2, Reply, Repeat2, Trash2 } from 'lucide-react';
+import { Bookmark, Flag, Link2, RefreshCw, Reply, Repeat2, Trash2 } from 'lucide-react';
 
 import { formatPostDateTime } from '@/i18n/format';
 import type {
@@ -43,7 +43,10 @@ import { AuthorIdentityButton } from './AuthorIdentityButton';
 import { MediaViewerDialog } from './MediaViewerDialog';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { PostMedia } from './PostMedia';
+import { MediaFetchFailure } from './MediaFetchFailure';
+import { usePostReload } from './usePostReload';
 import { PostReactionChip } from './PostReactionChip';
+import { PostReplyContext } from './PostReplyContext';
 import { ReactionPickerPopover } from './ReactionPickerPopover';
 import {
   ReportRoutingDialog,
@@ -156,7 +159,20 @@ export function PostCard({
   linkPreviewFetcher,
 }: PostCardProps) {
   const { t } = useTranslation(['common', 'profile']);
-  const { post, context } = view;
+  const {
+    cardRef,
+    post,
+    reloadAvailable,
+    reloadFailed,
+    reloadPending,
+    runReload,
+  } = usePostReload({
+    sourcePost: view.post,
+    adultContentGated: view.adultContentGated ?? false,
+    mediaState: view.media.state,
+    recoverMissingReply: !view.suppressReplyPreview,
+  });
+  const { context } = view;
   const actionPost = view.actionPost ?? post;
   // #1061: 信頼値による折りたたみ（「表示する」はこの投稿だけに効く）。
   const trustGateCollapse = usePostTrustGateCollapse(view.trustGate, onOpenAuthor);
@@ -181,7 +197,7 @@ export function PostCard({
   );
   const [reactionMenuAsset, setReactionMenuAsset] = useState<CustomReactionAssetView | null>(null);
   const [postMenuPosition, setPostMenuPosition] = useState<ContextActionMenuPosition | null>(null);
-  const isUnavailableText = post.content_status === 'Missing' && post.content === '[blob pending]';
+  const isUnavailableText = post.content_status === 'Missing';
   const localState = post.local_state ?? null;
   const isWithdrawn = post.withdrawal != null;
   const interactionDisabled = localState !== null || isWithdrawn;
@@ -438,67 +454,21 @@ export function PostCard({
     );
   };
 
-  const replyContext = (
-    <>
-      {!view.adultContentGated && showReplyContext && view.replyParentAuthor && replyPreview ? (
-        <div className='post-reply-context'>
-          <button
-            type='button'
-            className='post-reply-context-avatar'
-            aria-label={view.replyParentAuthor.label}
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenAuthor(view.replyParentAuthor!.pubkey);
-            }}
-          >
-            <AuthorAvatar
-              label={view.replyParentAuthor.label}
-              picture={view.replyParentAuthor.picture ?? null}
-              size='sm'
-            />
-          </button>
-          <div className='post-reply-context-main'>
-            <button
-              type='button'
-              className='post-reply-context-author author-link'
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenAuthor(view.replyParentAuthor!.pubkey);
-              }}
-            >
-              {t('feed.replyingTo', { author: view.replyParentAuthor.label })}
-            </button>
-            {replyPreview.content.trim().length > 0 ? (
-              <div
-                className='post-reply-context-body post-copy-wrap'
-                role={!readOnly && canOpenThread ? 'button' : undefined}
-                tabIndex={!readOnly && canOpenThread ? 0 : undefined}
-                onClick={!readOnly && canOpenThread ? openPrimaryTarget : undefined}
-                onKeyDown={(event) => {
-                  if (readOnly || !canOpenThread || event.target !== event.currentTarget) return;
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    openPrimaryTarget();
-                  }
-                }}
-              >
-                <SmartReferenceText
-                  text={replyPreview.content}
-                  className='post-copy-wrap'
-                  onActivateReference={onActivateReference}
-                  mentionAuthors={view.mentionAuthors}
-                  onOpenMention={onOpenAuthor}
-                  externalLinks
-                />
-              </div>
-            ) : replyPreview.attachments.length > 0 ? (
-              <span className='post-reply-context-body'>{t('feed.moreMedia', { count: replyPreview.attachments.length })}</span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
+  const replyContext =
+    !view.adultContentGated && showReplyContext && view.replyParentAuthor && replyPreview ? (
+      <PostReplyContext
+        canOpenThread={canOpenThread}
+        mentionAuthors={view.mentionAuthors}
+        onActivateReference={onActivateReference}
+        onOpenAuthor={onOpenAuthor}
+        onOpenThread={openPrimaryTarget}
+        onRetryBody={reloadAvailable ? () => void runReload(replyPreview.object_id) : undefined}
+        parentAuthor={view.replyParentAuthor}
+        readOnly={readOnly}
+        reloadPending={reloadPending}
+        replyPreview={replyPreview}
+      />
+    ) : null;
 
   const contentBlock = (
     <>
@@ -520,11 +490,12 @@ export function PostCard({
             onOpenDetails={gatedAdvisory && !hasGatedMediaFrame ? advisoryDetails.openDetails : undefined}
           />
         ) : isUnavailableText ? (
-          view.showUnavailableDiagnostics ? (
-            <p className='topic-diagnostic topic-diagnostic-secondary' role='status'>
-              {t('feed.contentUnavailable')}
-            </p>
-          ) : null
+          <MediaFetchFailure
+            hashes={[]}
+            retrying={reloadPending}
+            onRetry={reloadAvailable ? () => void runReload(post.object_id) : undefined}
+            testId={`post-body-fetch-failure-${post.object_id}`}
+          />
         ) : hasPrimaryContent ? (
           <strong className='post-title post-copy-wrap'>
             <SmartReferenceText
@@ -586,6 +557,7 @@ export function PostCard({
 
   const card = (
     <article
+      ref={cardRef}
       className={
         context === 'thread'
           ? `post-card post-card-thread post-layout-safe${isFocused ? ' post-card-targeted' : ''}`
@@ -911,6 +883,30 @@ export function PostCard({
             ) : null}
           </>
         )}
+        {reloadAvailable ? (
+          <IconButton
+            variant='secondary'
+            className='post-action-button'
+            type='button'
+            aria-disabled={reloadPending}
+            aria-busy={reloadPending}
+            label={t('actions.reloadPost')}
+            onClick={() => {
+              if (!reloadPending) void runReload();
+            }}
+            data-testid={`post-reload-${post.object_id}`}
+          >
+            <RefreshCw
+              className={reloadPending ? 'size-4 media-fetch-retry-spin' : 'size-4'}
+              aria-hidden='true'
+            />
+          </IconButton>
+        ) : null}
+        {reloadFailed ? (
+          <span className='sr-only' role='status'>
+            {t('media.fetchFailed')}
+          </span>
+        ) : null}
       </div>
 
       <MediaViewerDialog

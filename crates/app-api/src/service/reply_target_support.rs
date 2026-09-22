@@ -3,6 +3,14 @@
 
 use super::*;
 
+#[derive(Clone, Debug)]
+struct ReplyTargetSource {
+    target: EnvelopeId,
+    source_replica_id: ReplicaId,
+    topic_id: String,
+    channel_id: String,
+}
+
 impl AppService {
     /// 取得側(#1239 AC-6、#1277): ページの行の返信先が projection に無ければ、view の生成の前に反映する。
     ///
@@ -13,38 +21,114 @@ impl AppService {
     /// 本文は手元の blob だけを読む(取得の経路で remote を待たない)。本文が手元に無い返信先は、ここでは反映せず、
     /// remote から本文を取る背景の反映へ出す。
     pub(crate) async fn reflect_reply_targets_for_rows(&self, rows: &[ObjectProjectionRow]) {
-        for row in rows {
-            let Some(target) = row.reply_to_object_id.as_ref() else {
+        let sources = rows
+            .iter()
+            .filter_map(|row| {
+                row.reply_to_object_id
+                    .as_ref()
+                    .map(|target| ReplyTargetSource {
+                        target: target.clone(),
+                        source_replica_id: row.source_replica_id.clone(),
+                        topic_id: row.topic_id.clone(),
+                        channel_id: row.channel_id.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        self.reflect_reply_targets_for_sources(&sources).await;
+    }
+
+    pub(crate) async fn reflect_reply_targets_for_profile_items(
+        &self,
+        items: &[ProfileTimelineItem],
+    ) {
+        let sources = items
+            .iter()
+            .filter_map(|item| match item {
+                ProfileTimelineItem::Post(post) => {
+                    post.reply_to_object_id
+                        .as_ref()
+                        .map(|target| ReplyTargetSource {
+                            target: target.clone(),
+                            source_replica_id: topic_replica_id(post.published_topic_id.as_str()),
+                            topic_id: post.published_topic_id.as_str().to_string(),
+                            channel_id: PUBLIC_CHANNEL_ID.to_string(),
+                        })
+                }
+                ProfileTimelineItem::Repost(_) => None,
+            })
+            .collect::<Vec<_>>();
+        self.reflect_reply_targets_for_sources(&sources).await;
+    }
+
+    /// Timeline以外のbounded view（Profile）も、表示する行から作った参照だけを
+    /// 同じ有限retryへ渡す。private channelは現在の参加状態をI/O前に確認する。
+    async fn reflect_reply_targets_for_sources(&self, sources: &[ReplyTargetSource]) {
+        let mut missing_body_targets = Vec::new();
+        let mut seen_targets = HashSet::new();
+        for source in sources {
+            if source.channel_id != PUBLIC_CHANNEL_ID
+                && self
+                    .ensure_private_channel_access(
+                        source.topic_id.as_str(),
+                        &ChannelId::new(source.channel_id.clone()),
+                    )
+                    .await
+                    .is_err()
+            {
                 continue;
-            };
-            let ledger_key = format!("{}\n{}", row.source_replica_id.as_str(), target.as_str());
-            let exists = self
+            }
+            let target = &source.target;
+            match self
+                .services
+                .projection_store
+                .get_post_withdrawal(target)
+                .await
+            {
+                Ok(None) => {}
+                Ok(Some(_)) | Err(_) => continue,
+            }
+            let ledger_key = format!("{}\n{}", source.source_replica_id.as_str(), target.as_str());
+            let Ok(existing) = self
                 .services
                 .projection_store
                 .get_object_projection(target)
                 .await
-                .map_or(true, |row| row.is_some());
-            if exists
-                || !self
-                    .services
-                    .reply_target_checks
-                    .try_begin(ledger_key.as_str(), Utc::now().timestamp_millis())
+            else {
+                continue;
+            };
+            if let Some(target_row) = existing {
+                if target_row.content.is_some()
+                    || target_row.topic_id != source.topic_id
+                    || target_row.channel_id != source.channel_id
+                    || (kukuri_core::has_adult_content_label(&target_row.content_labels)
+                        && !self.adult_content_display_enabled())
+                    || !seen_targets.insert(target_row.object_id.clone())
+                {
+                    continue;
+                }
+                missing_body_targets.push(target_row);
+                continue;
+            }
+            if !self
+                .services
+                .reply_target_checks
+                .try_begin(ledger_key.as_str(), Utc::now().timestamp_millis())
             {
                 continue;
             }
             match reflect_reply_target_with(
                 &self.services,
                 target,
-                &row.source_replica_id,
-                row.topic_id.as_str(),
+                &source.source_replica_id,
+                source.topic_id.as_str(),
                 ReplyTargetBody::LocalOnly,
             )
             .await
             {
                 Ok(ReplyTargetReflection::BodyNotLocal) => spawn_reply_target_reflection(
                     &self.services,
-                    &row.source_replica_id,
-                    row.topic_id.as_str(),
+                    &source.source_replica_id,
+                    source.topic_id.as_str(),
                     target,
                 ),
                 Ok(_) => {}
@@ -54,6 +138,9 @@ impl AppService {
                     "failed to reflect a reply target of a listed row"
                 ),
             }
+        }
+        if !missing_body_targets.is_empty() {
+            self.recover_missing_bodies(&mut missing_body_targets).await;
         }
     }
 
@@ -99,6 +186,103 @@ impl AppService {
             return;
         }
         spawn_reply_target_reflection(&self.services, replica_id, topic_id, object_id);
+    }
+
+    /// #1284: 投稿カードの明示再読み込み。対象投稿自身か直前の返信先にある欠損本文だけを
+    /// 1 回再試行し、更新後のカード view を返す。projection / replica の走査は行わない。
+    pub async fn retry_post_elements(
+        &self,
+        object_id: &str,
+        body_object_id: Option<&str>,
+        manual: bool,
+    ) -> Result<Option<PostView>> {
+        let object_id = EnvelopeId::from(object_id);
+        let Some(container) = self
+            .services
+            .projection_store
+            .get_object_projection(&object_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if container.channel_id != PUBLIC_CHANNEL_ID {
+            self.ensure_private_channel_access(
+                container.topic_id.as_str(),
+                &ChannelId::new(container.channel_id.clone()),
+            )
+            .await?;
+        }
+        let allowed_body_ids = match body_object_id {
+            Some(requested) => {
+                let requested = EnvelopeId::from(requested);
+                if requested != container.object_id
+                    && container.reply_to_object_id.as_ref() != Some(&requested)
+                {
+                    return Ok(None);
+                }
+                vec![requested]
+            }
+            None => {
+                let mut ids = vec![container.object_id.clone()];
+                if let Some(reply_to) = container.reply_to_object_id.clone() {
+                    ids.push(reply_to);
+                }
+                ids
+            }
+        };
+        let mut rows = Vec::with_capacity(allowed_body_ids.len());
+        for body_id in allowed_body_ids {
+            if self
+                .services
+                .projection_store
+                .get_post_withdrawal(&body_id)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+            let Some(row) = self
+                .services
+                .projection_store
+                .get_object_projection(&body_id)
+                .await?
+            else {
+                continue;
+            };
+            if row.topic_id != container.topic_id || row.channel_id != container.channel_id {
+                continue;
+            }
+            let PayloadRef::BlobText { hash, .. } = &row.payload_ref else {
+                continue;
+            };
+            if kukuri_core::has_adult_content_label(&row.content_labels)
+                && !self.adult_content_display_enabled()
+            {
+                continue;
+            }
+            if row.content.is_none()
+                && (!manual || self.services.missing_body_ledger.request_manual_retry(hash))
+            {
+                rows.push(row);
+            }
+        }
+        self.recover_missing_bodies(&mut rows).await;
+
+        let Some(container) = self
+            .services
+            .projection_store
+            .get_object_projection(&object_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut view = self
+            .page_to_view(Page {
+                items: vec![container],
+                next_cursor: None,
+            })
+            .await?;
+        Ok(view.items.pop())
     }
 }
 
