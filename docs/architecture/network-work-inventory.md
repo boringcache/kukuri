@@ -196,7 +196,7 @@ N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstack
 
 | ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N47 | BlobService/DocsSyncのremote helper（通常/一時/上限付き一時）→ `run_single_flight` → retry guard → `NetworkWorkRuntime::submit_fetch` | service/retry台帳の同一性＋flight key、persistence/byte limit一致、最初のdeadline、64scope/64waiters。LocalOnly fast pathは入らない | FETCH-1/2、既存singleflight/result/取消/保存方針tests、waiter上限/cooldown-join test |
+| N47 | BlobService/DocsSyncのremote helper（通常/一時/上限付き一時）→ `run_single_flight` → retry guard → `NetworkWorkRuntime::submit_fetch` | 非再利用のservice世代＋flight key、persistence/byte limit一致、最初のdeadline、64scope/64waiters。LocalOnly fast pathは入らない | FETCH-1/2、既存singleflight/result/取消/保存方針tests、waiter上限/cooldown-join test |
 | N48 | 単一driverの期限/ready/task完了 → 実行枠取得済みfutureだけspawn → 成否callback → flight退役/結果通知 | 表示と通常の合計8。待機時spawn0、期限/cancel/panic/closeの精算、callbackとfuture Dropはlock外、結果反映は現在世代だけ | FETCH-1〜3、`ordinary_fetch_waits_for_the_same_capacity_as_display_work`、node close/panic/reentrant Drop tests |
 | N49 | `RemoteFetchRetryState::finish/is_cooling_down` → retry_after/期限索引 | 3秒cache、1,024件、key256byte、容量時は近い期限から回収。全件retainなし。未送信outboxは対象外 | FETCH-4、`remote_fetch_failure_history_has_a_fixed_capacity`（修正前10,240件FAIL）、既存cooldown tests |
 

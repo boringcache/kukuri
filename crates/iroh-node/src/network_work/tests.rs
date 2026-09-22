@@ -281,3 +281,54 @@ async fn node_close_stops_running_fetches_and_discards_queued_work() {
     assert_eq!(completed.load(Ordering::SeqCst), 1);
     assert_eq!(owner.fetch_count(), 0);
 }
+
+#[tokio::test]
+async fn retired_service_identity_cannot_be_reused_before_old_flight_is_removed() {
+    let owner = Arc::new(NetworkWorkRuntime::default());
+    let old_service = Arc::new(kukuri_transport::RemoteFetchRetryState::default());
+    let old_id = old_service.instance_id();
+    let (dropped, old_dropped) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    let callback: fetch::FetchFinished = Box::new(move |_| {
+        Box::pin(async move {
+            // Only this callback owns the original retry ledger. Hold the flight at
+            // the retirement boundary after releasing that last service reference.
+            drop(old_service);
+            dropped.send(()).unwrap();
+            resumed.await.unwrap();
+        })
+    });
+    let mut original = request(1, false);
+    original.identity.service = old_id;
+    let first = owner
+        .submit_fetch(original, Box::pin(async { Ok(Some(vec![1])) }), callback)
+        .unwrap();
+    old_dropped.await.unwrap();
+    assert_eq!(
+        owner.fetch_count(),
+        1,
+        "old identity remains registered during completion"
+    );
+    let new_service = kukuri_transport::RemoteFetchRetryState::default();
+    assert_ne!(new_service.instance_id(), old_id);
+    let mut replacement = request(1, false);
+    replacement.identity.service = new_service.instance_id();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let second = owner
+        .submit_fetch(
+            replacement,
+            Box::pin(async { Ok(Some(vec![2])) }),
+            finished(&completed),
+        )
+        .unwrap();
+    assert_eq!(
+        owner.fetch_count(),
+        2,
+        "replacement must create its own flight"
+    );
+    resume.send(()).unwrap();
+    assert_eq!(first.result().await.unwrap().as_deref(), Some(&vec![1]));
+    assert_eq!(second.result().await.unwrap().as_deref(), Some(&vec![2]));
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+    owner.close();
+}

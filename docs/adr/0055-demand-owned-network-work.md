@@ -342,6 +342,7 @@ D9のI/O所有は`iroh_gossip::proto::topic::State`と公開`topic::Message`を�
 
 `IrohDocsNode`は`NetworkWorkRuntime`を所有し、明示的なremote表示/通常取得を同じ`NetworkWorkOwner`で受付する。
 このadapterの初期値は64scope・8準備/実行枠・1flight64waiters。表示はconsumerごと、通常取得はservice/retry台帳とflight keyごとにscopeを持つ。
+serviceはretry台帳の作成時に割り当てる非再利用のプロセス内IDで識別し、Arcのメモリアドレスを識別子にしない。
 通常取得の合流は従来の境界を維持し、LocalOnly/表示/一時/保存/異なるbyte limitを新しく合流させない。scope認証の代替ではない。
 待機中は有限queueへfutureを保持し、実行枠を得たものだけを1つのdriverが起動する。通常取得と表示の合計が8を超えない。
 既存walk Semaphoreは表示の準備で併用するが、通常取得taskの待機には使わない。

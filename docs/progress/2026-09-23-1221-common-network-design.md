@@ -225,3 +225,9 @@ runtimeの表示＋通常の容量共有、waiter上限と合流期限、panic�
 増えたremote_fetchのtest moduleは同名の別ファイルへ移し、test名とscopeを保持した。1,000行のratchetをbaseline増加で回避せず、関連testの分離だけを行う。通常取得のlane/意味上のprivate世代やSDK内部の取得全体の統合は残作業であり、今回の受付・成否cacheの有限化に含めない。
 
 最終の局所検証: remote_fetch12件、共通runtime8件、blob-serviceの実取得/一時取得/取消等7件、transport retry4件が成功。追加のUTF-8診断ラベル上限1件と、cooldown key byte上限を含む容量test1件も成功。変更3crateのall-targets clippy、rustfmt、diff、サイズ検査成功。全体とapp-api slow/実scenarioはPR/CIへ委譲する。
+
+### 固定head監査で見つかったservice世代の修正（B6）
+
+head `0d4506ad`の独立監査はN47/FETCH-2でFAIL。service IDにretry Arcのアドレスを使うと、完了callbackが最後のArcをdropしてからidentityを退役するまで、旧identityが残ったままそのアドレスを再利用できる。callback/queueがArcを保持するという最初の説明は、この最後の窓を覆っていなかった。
+
+修正前の所有権順序を監査で確認し、allocatorの再利用時機を成功条件にする不安定なtestは置かず、旧serviceをdropしてidentity退役前で止めるcontractを追加した。retry台帳の構築時に単調な非再利用IDを割当て、取得時はそのIDを使う。`retired_service_identity_cannot_be_reused_before_old_flight_is_removed`は旧serviceをcallbackで解放し、同じkeyの新serviceが別flightになって別の結果を得ることを確認して1件成功。cooldown記録→identity退役の順序は維持する。修正deltaの独立監査を別途行う。

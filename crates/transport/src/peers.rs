@@ -27,6 +27,7 @@ use crate::tickets::relay_assisted_endpoint_addr;
 pub const REMOTE_FETCH_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
 pub const REMOTE_FETCH_MAX_COOLDOWNS: usize = 1_024;
 const REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES: usize = 256;
+static REMOTE_FETCH_STATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// 1 つの retry state が同時に実行する remote 走査の上限(#1207)。超過分は順番を待つ。
 pub const REMOTE_FETCH_MAX_CONCURRENT_WALKS: usize = 8;
 const PEER_FETCH_BACKOFF_BASE: Duration = Duration::from_secs(2);
@@ -197,6 +198,7 @@ pub enum RemoteFetchBegin {
 /// iroh-nodeのNetworkWorkRuntimeがnode単位で所有する（#1221）。
 /// `begin`の旧予約APIとwalk permitは互換用に残すが、通常取得taskは起動しない。
 pub struct RemoteFetchRetryState {
+    instance_id: u64,
     retry_after: BTreeMap<String, Instant>,
     retry_deadlines: BTreeSet<(Instant, String)>,
     in_flight: BTreeMap<String, RemoteFetchResultReceiver>,
@@ -206,6 +208,9 @@ pub struct RemoteFetchRetryState {
 impl Default for RemoteFetchRetryState {
     fn default() -> Self {
         Self {
+            instance_id: REMOTE_FETCH_STATE_SEQUENCE
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("remote fetch service identity exhausted"),
             retry_after: BTreeMap::new(),
             retry_deadlines: BTreeSet::new(),
             in_flight: BTreeMap::new(),
@@ -215,6 +220,11 @@ impl Default for RemoteFetchRetryState {
 }
 
 impl RemoteFetchRetryState {
+    /// Process-local service generation, never reused after this ledger drops.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     pub fn is_cooling_down(&self, key: &str, now: Instant) -> bool {
         self.retry_after
             .get(key)

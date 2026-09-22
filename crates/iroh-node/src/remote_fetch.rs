@@ -339,13 +339,13 @@ async fn run_single_flight<F>(
 where
     F: Future<Output = Result<Option<Vec<u8>>>> + Send + 'static,
 {
-    let identity = FetchIdentity {
-        service: Arc::as_ptr(retries) as usize,
-        key: flight_key.to_owned(),
-    };
     // Hold the retry guard through synchronous admission. Completion records
     // cooldown before retiring the identity, so it cannot race a new attempt.
     let retry_state = retries.lock().await;
+    let identity = FetchIdentity {
+        service: retry_state.instance_id(),
+        key: flight_key.to_owned(),
+    };
     let cooling_down = retry_state.is_cooling_down(retry_key, Instant::now());
     let persistence = if mode == FetchMode::Store {
         WorkPersistence::Store

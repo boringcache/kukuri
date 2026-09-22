@@ -12,12 +12,12 @@ pub(crate) type FetchFuture = Pin<Box<dyn Future<Output = anyhow::Result<Option<
 pub(crate) type FetchFinished =
     Box<dyn FnOnce(bool) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
-/// Preserve the existing service-specific coalescing boundary. The queued
-/// future/callback keep that retry ledger alive, so its address cannot be reused
-/// while an identity is registered. This is not a network identity or scope proof.
+/// Preserve the existing service-specific coalescing boundary using the retry
+/// ledger's non-reusable process-local generation. This is not a network identity
+/// or scope proof, and does not depend on callback/Arc allocation lifetimes.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct FetchIdentity {
-    pub service: usize,
+    pub service: u64,
     pub key: String,
 }
 
