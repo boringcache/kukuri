@@ -28,6 +28,7 @@ const LIVE_TOPIC: &str = "kukuri:topic:live-rt";
 fn live_session_max() -> LiveSessionProjectionRow {
     LiveSessionProjectionRow {
         session_id: "session-max".into(),
+        revision: 5,
         topic_id: LIVE_TOPIC.into(),
         channel_id: "ch:live".into(),
         host_pubkey: "a".repeat(64),
@@ -50,6 +51,7 @@ fn live_session_max() -> LiveSessionProjectionRow {
 fn live_session_min() -> LiveSessionProjectionRow {
     LiveSessionProjectionRow {
         session_id: "session-min".into(),
+        revision: 1,
         topic_id: LIVE_TOPIC.into(),
         channel_id: "public".into(),
         host_pubkey: "b".repeat(64),
@@ -72,6 +74,7 @@ fn live_session_min() -> LiveSessionProjectionRow {
 fn live_session_ended() -> LiveSessionProjectionRow {
     LiveSessionProjectionRow {
         session_id: "session-ended".into(),
+        revision: 2,
         topic_id: LIVE_TOPIC.into(),
         channel_id: "ch:live".into(),
         host_pubkey: "c".repeat(64),
@@ -268,6 +271,7 @@ fn metaverse_state() -> MetaverseRoomStateV1 {
 fn game_room_max() -> GameRoomProjectionRow {
     GameRoomProjectionRow {
         room_id: "room-max".into(),
+        score_revision: None,
         topic_id: GAME_TOPIC.into(),
         channel_id: "ch:game".into(),
         host_pubkey: "b".repeat(64),
@@ -303,6 +307,7 @@ fn game_room_max() -> GameRoomProjectionRow {
 fn game_room_min() -> GameRoomProjectionRow {
     GameRoomProjectionRow {
         room_id: "room-min".into(),
+        score_revision: Some(1),
         topic_id: GAME_TOPIC.into(),
         channel_id: "public".into(),
         host_pubkey: "c".repeat(64),

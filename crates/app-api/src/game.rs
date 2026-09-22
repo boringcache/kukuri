@@ -186,6 +186,7 @@ impl AppService {
         );
         let manifest = GameRoomManifestBlobV1 {
             room_id: room_id.clone(),
+            score_revision: Some(1),
             topic_id: TopicId::new(topic_id),
             channel_id: channel_id.clone(),
             owner_pubkey: Pubkey::from(self.current_author_pubkey()),
@@ -339,6 +340,7 @@ impl AppService {
         validate_metaverse_room_state(&metaverse)?;
         let manifest = GameRoomManifestBlobV1 {
             room_id: room_id.clone(),
+            score_revision: None,
             topic_id: TopicId::new(topic_id),
             channel_id: channel_id.clone(),
             owner_pubkey,
@@ -409,6 +411,13 @@ impl AppService {
                 score: score.score,
             })
             .collect();
+        manifest.score_revision = Some(
+            manifest
+                .score_revision
+                .context("ScoreGame revision is missing")?
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("ScoreGame revision overflow"))?,
+        );
         manifest.updated_at = Utc::now().timestamp_millis();
         let state = self
             .persist_game_room_manifest(

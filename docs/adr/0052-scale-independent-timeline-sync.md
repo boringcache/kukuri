@@ -151,15 +151,17 @@ Accepted
     一致し、state の id・topic・channel・owner・status と manifest blob の内容が署名された manifest と一致し、topic / channel が読んだ replica の受け入れる範囲と
     一致しなければならない。docs は同じ key を別の鍵でも書けるので、id と owner を結び付けて、別の鍵で署名した state による上書きを防ぐ。
     新しく作る id の末尾は 16 桁（64 bit）とする。それより前の id は 8 桁（32 bit）で、結び付けの強さはその桁数ぶんに留まる。
+    manifest は owner の署名対象となる単調増加 revision を必須とする。初版を 1 とし、更新ごとに checked increment する。同じ key の候補は署名済み revision が
+    最大のものを選び、署名の無い `state.updated_at`、envelope の秒単位時刻、hash、record の列挙順を新旧判定に使わない。projection は採用済み revision を保持し、
+    それ以下の revision の upsert を原子的に無視する。操作も projection より古い docs state を土台にしない。
   - metaverse room: 訪問者も chat で room の manifest を書く設計なので、owner の署名は要求しない。topic / channel と Spatial Context が読んだ replica と一致し、
     id が Spatial Context と owner から決まる値（`dome-<hash>` の 24 桁）と一致することを確かめる。owner であることは、これまでどおり一覧の時点で
     署名つきの Dome Instance で確かめる（ADR 0036）。title などの表示内容は、その topic に書ける者が変えられる（Dome の authority の対象外）。
   - 署名された manifest を確かめる前に、未検証の state が指す manifest blob を取りに行かない。例外は、署名つきの envelope を持たない `dome-` の id の state
     （修正前の client が書いた Dome）で、manifest blob から上の metaverse room の規則で確かめる。
   - 利用者の操作（終了・参加・更新・Dome の移動と削除）が読む state と manifest も、同じ検証を通す。
-  - 互換: 修正前の client が書いた live session と ScoreGame は署名つきの envelope を持たないので、修正後の client には表示されず、操作（終了・参加・更新）も
-    できない（owner 自身の client でも同じ）。未検証の state へ owner が署名を付け直す経路は作らない（第三者が置いた内容へ署名させる入口になるため）。
-    修正前の client には、その session がそれまでの状態のまま見え続ける。state doc の形は変えていないので、修正前の client は修正後の record を読める。
+  - 互換: #1260 時点で live session と ScoreGame の本番 record は無い。revision を持たない旧形式の移行・後方互換は行わず、表示・操作の対象にしない。
+    未検証の state や旧形式へ owner が署名を付け直す経路は作らない。Metaverse room は revision の対象外で、既存の互換経路と lifecycle を維持する。
 - reaction・live session・game room でも、検証に通らない record と読めない record は、その object だけを飛ばす（warn）。全件走査・event・hint・利用者の操作を失敗させない。
 - reaction の行と、live session・game room の行は、`projection_version` 2 から検証済みの record だけで作る。それより前の行は migration で消し、手元の docs から反映し直す。
 

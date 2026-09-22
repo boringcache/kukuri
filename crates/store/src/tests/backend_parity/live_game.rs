@@ -194,6 +194,7 @@ async fn game_room_scenario<S: Store + ProjectionStore>(store: &S) -> GameRoomSc
     beta.scores = parity_game_scores();
     let mut meta = parity_game_room("room-meta", topic, GameRoomStatus::Ended, 90);
     meta.room_kind = GameRoomKind::MetaverseRoom;
+    meta.score_revision = None;
     meta.metaverse = Some(parity_metaverse_state());
     for row in [
         parity_game_room("room-alpha", topic, GameRoomStatus::Waiting, 100),
@@ -206,12 +207,11 @@ async fn game_room_scenario<S: Store + ProjectionStore>(store: &S) -> GameRoomSc
             .expect("LiveGameProjectionStore::upsert_game_room_cache");
     }
     // 同一 room_id の再 upsert(status 更新経路)
-    LiveGameProjectionStore::upsert_game_room_cache(
-        store,
-        parity_game_room("room-alpha", topic, GameRoomStatus::Paused, 100),
-    )
-    .await
-    .expect("upsert game room update");
+    let mut updated_alpha = parity_game_room("room-alpha", topic, GameRoomStatus::Paused, 100);
+    updated_alpha.score_revision = Some(2);
+    LiveGameProjectionStore::upsert_game_room_cache(store, updated_alpha)
+        .await
+        .expect("upsert game room update");
 
     GameRoomScenarioResult {
         topic_rooms: LiveGameProjectionStore::list_channel_game_rooms(store, topic, "ch-game", 100)
@@ -417,11 +417,13 @@ async fn bounded_list_scenario<S: Store + ProjectionStore>(store: &S) -> Bounded
         20_000,
     );
     moved_live.updated_at = 20_000;
+    moved_live.revision = 2;
     LiveGameProjectionStore::upsert_live_session_cache(store, moved_live)
         .await
         .expect("move live row");
     let mut moved_game = parity_game_room("game-119", topic, GameRoomStatus::Running, 20_000);
     moved_game.channel_id = "private:moved".into();
+    moved_game.score_revision = Some(2);
     LiveGameProjectionStore::upsert_game_room_cache(store, moved_game)
         .await
         .expect("move game row");
@@ -599,4 +601,92 @@ async fn dome_hosting_projection_matches_between_backends() {
     assert_eq!(projection.lease_epoch, Some(2));
     assert_eq!(projection.session_id.as_deref(), Some("cn-session-2"));
     assert_eq!(projection.derived_at, 20);
+}
+
+async fn session_revision_guard_scenario<S: Store + ProjectionStore>(
+    store: &S,
+) -> (
+    LiveSessionProjectionRow,
+    GameRoomProjectionRow,
+    GameRoomProjectionRow,
+) {
+    let topic = "kukuri:topic:revision-guard";
+
+    let mut latest_live = parity_live_session(
+        "live-revision",
+        topic,
+        "public",
+        LiveSessionStatus::Ended,
+        100,
+    );
+    latest_live.revision = 2;
+    latest_live.title = "latest live".into();
+    LiveGameProjectionStore::upsert_live_session_cache(store, latest_live)
+        .await
+        .expect("upsert latest live");
+    let mut stale_live = parity_live_session(
+        "live-revision",
+        topic,
+        "public",
+        LiveSessionStatus::Live,
+        100,
+    );
+    stale_live.title = "stale live".into();
+    LiveGameProjectionStore::upsert_live_session_cache(store, stale_live)
+        .await
+        .expect("ignore stale live");
+
+    let mut latest_game = parity_game_room("game-revision", topic, GameRoomStatus::Running, 100);
+    latest_game.score_revision = Some(2);
+    latest_game.scores = parity_game_scores();
+    LiveGameProjectionStore::upsert_game_room_cache(store, latest_game)
+        .await
+        .expect("upsert latest game");
+    let stale_game = parity_game_room("game-revision", topic, GameRoomStatus::Waiting, 100);
+    LiveGameProjectionStore::upsert_game_room_cache(store, stale_game)
+        .await
+        .expect("ignore stale game");
+
+    let mut dome = parity_game_room("dome-revision", topic, GameRoomStatus::Waiting, 100);
+    dome.score_revision = None;
+    dome.room_kind = GameRoomKind::MetaverseRoom;
+    dome.metaverse = Some(parity_metaverse_state());
+    LiveGameProjectionStore::upsert_game_room_cache(store, dome.clone())
+        .await
+        .expect("upsert Dome");
+    dome.status = GameRoomStatus::Ended;
+    LiveGameProjectionStore::upsert_game_room_cache(store, dome)
+        .await
+        .expect("update Dome without ScoreGame revision");
+
+    (
+        LiveGameProjectionStore::get_live_session(store, topic, "live-revision")
+            .await
+            .expect("get live")
+            .expect("live row"),
+        LiveGameProjectionStore::get_game_room(store, topic, "game-revision")
+            .await
+            .expect("get game")
+            .expect("game row"),
+        LiveGameProjectionStore::get_game_room(store, topic, "dome-revision")
+            .await
+            .expect("get Dome")
+            .expect("Dome row"),
+    )
+}
+
+#[tokio::test]
+async fn session_revision_guards_match_between_backends() {
+    let sqlite = SqliteStore::connect_memory().await.expect("sqlite store");
+    let memory = MemoryStore::default();
+    let from_sqlite = session_revision_guard_scenario(&sqlite).await;
+    let from_memory = session_revision_guard_scenario(&memory).await;
+    assert_eq!(from_sqlite, from_memory);
+    assert_eq!(from_sqlite.0.revision, 2);
+    assert_eq!(from_sqlite.0.status, LiveSessionStatus::Ended);
+    assert_eq!(from_sqlite.0.title, "latest live");
+    assert_eq!(from_sqlite.1.score_revision, Some(2));
+    assert_eq!(from_sqlite.1.status, GameRoomStatus::Running);
+    assert_eq!(from_sqlite.2.score_revision, None);
+    assert_eq!(from_sqlite.2.status, GameRoomStatus::Ended);
 }

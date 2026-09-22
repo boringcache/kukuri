@@ -17,10 +17,7 @@ fn thumbs_up() -> ReactionKeyV1 {
     }
 }
 
-fn fresh_viewer(
-    docs_sync: Arc<MemoryDocsSync>,
-    blob_service: Arc<MemoryBlobService>,
-) -> AppService {
+fn fresh_viewer(docs_sync: Arc<dyn DocsSync>, blob_service: Arc<MemoryBlobService>) -> AppService {
     let store = Arc::new(MemoryStore::default());
     app_service_from_dependencies(
         store.clone(),
@@ -277,6 +274,154 @@ async fn honest_live_session_is_listed_and_ended_for_another_viewer() {
     );
 }
 
+// AC-1: owner が以前に署名した state を置き直しても、反映済みの終了状態を戻せない。
+#[tokio::test]
+async fn replayed_older_live_session_does_not_revive_an_ended_session() {
+    let (owner, _, docs_sync, blob_service) = local_app_with_memory_services();
+    let topic = TopicId::new("kukuri:topic:integrity-contract-live-replay");
+    let replica = topic_replica_id(topic.as_str());
+    let session_id = owner
+        .create_live_session(
+            topic.as_str(),
+            CreateLiveSessionInput {
+                title: "replay target".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        .expect("create live session");
+    let state_key = stable_key("sessions/live", &format!("{session_id}/state"));
+    let older_state = record_value(docs_sync.as_ref(), &replica, state_key.as_str()).await;
+    owner
+        .end_live_session(topic.as_str(), session_id.as_str())
+        .await
+        .expect("end live session");
+
+    let event_viewer = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let hint_viewer = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let catch_up_viewer = fresh_viewer(docs_sync.clone(), blob_service);
+    for viewer in [&event_viewer, &hint_viewer, &catch_up_viewer] {
+        assert_eq!(
+            viewer
+                .list_live_sessions(topic.as_str())
+                .await
+                .expect("list ended session")[0]
+                .status,
+            LiveSessionStatus::Ended
+        );
+    }
+    docs_sync
+        .apply_doc_op(
+            &replica,
+            DocOp::SetBytes {
+                key: state_key.clone(),
+                value: older_state,
+            },
+        )
+        .await
+        .expect("replay older state");
+    assert_eq!(
+        hydrate_subscription_event(
+            &event_viewer.services,
+            topic.as_str(),
+            &replica,
+            state_key.as_str(),
+        )
+        .await
+        .expect("hydrate replay"),
+        1
+    );
+    hydrate_subscription_hint(
+        &hint_viewer.services,
+        topic.as_str(),
+        &replica,
+        &GossipHint::SessionChanged {
+            topic_id: topic.clone(),
+            session_id: session_id.clone(),
+            object_kind: "live-session".into(),
+        },
+    )
+    .await
+    .expect("hydrate replay hint");
+    catch_up_sessions(
+        &catch_up_viewer.services,
+        topic.as_str(),
+        &replica,
+        DocFetchPolicy::LocalOnly,
+    )
+    .await
+    .expect("catch up replay");
+    for viewer in [&event_viewer, &hint_viewer, &catch_up_viewer] {
+        assert_eq!(
+            viewer
+                .list_live_sessions(topic.as_str())
+                .await
+                .expect("list after replay")[0]
+                .status,
+            LiveSessionStatus::Ended
+        );
+    }
+    assert!(
+        event_viewer
+            .fetch_live_session_state_and_manifest(topic.as_str(), session_id.as_str())
+            .await
+            .expect("fetch replayed live session")
+            .is_none(),
+        "an operation must not use docs state older than the persisted projection"
+    );
+}
+
+// AC-2 / AC-3: fresh viewer と操作は unsigned updated_at ではなく署名済み revision で候補を選ぶ。
+#[tokio::test]
+async fn live_session_selection_uses_signed_revision() {
+    let docs_sync = Arc::new(ShadowingDocsSync::default());
+    let blob_service = Arc::new(MemoryBlobService::default());
+    let owner = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let topic = TopicId::new("kukuri:topic:integrity-contract-live-revision");
+    let replica = topic_replica_id(topic.as_str());
+    let session_id = owner
+        .create_live_session(
+            topic.as_str(),
+            CreateLiveSessionInput {
+                title: "revision target".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        .expect("create live session");
+    let state_key = stable_key("sessions/live", &format!("{session_id}/state"));
+    let mut older_state: LiveSessionStateDocV1 = serde_json::from_slice(
+        &record_value(docs_sync.as_ref(), &replica, state_key.as_str()).await,
+    )
+    .expect("old state");
+    older_state.updated_at = i64::MAX;
+    owner
+        .end_live_session(topic.as_str(), session_id.as_str())
+        .await
+        .expect("end live session");
+    docs_sync
+        .shadow(
+            state_key.as_str(),
+            serde_json::to_value(older_state).expect("old state json"),
+        )
+        .await;
+
+    let viewer = fresh_viewer(docs_sync, blob_service);
+    let listed = viewer
+        .list_live_sessions(topic.as_str())
+        .await
+        .expect("list live sessions")
+        .remove(0);
+    assert_eq!(listed.status, LiveSessionStatus::Ended);
+    let (_, _, manifest) = viewer
+        .fetch_live_session_state_and_manifest(topic.as_str(), session_id.as_str())
+        .await
+        .expect("fetch live session")
+        .expect("live session");
+    assert_eq!(manifest.revision, 2);
+    assert_eq!(manifest.status, LiveSessionStatus::Ended);
+}
+
 /// `signer` が署名した manifest の envelope・blob・state を、`persist_live_session_manifest` と同じ形で置く。
 async fn write_signed_live_session(
     docs_sync: &dyn DocsSync,
@@ -351,6 +496,7 @@ async fn live_session_is_not_taken_over_by_a_state_signed_with_another_key() {
             &attacker_keys,
             &LiveSessionManifestBlobV1 {
                 session_id: session_id.clone(),
+                revision: 1,
                 topic_id: topic.clone(),
                 channel_id: None,
                 owner_pubkey: Pubkey::from(claimed_owner.as_str()),
@@ -465,6 +611,316 @@ async fn honest_score_game_is_listed_and_updated_for_another_viewer() {
     assert_eq!(room.status, GameRoomStatus::Running);
 }
 
+// AC-1: owner が以前に署名した state を置き直しても、反映済みの score/status を戻せない。
+#[tokio::test]
+async fn replayed_older_score_game_does_not_restore_an_old_score() {
+    let (owner, _, docs_sync, blob_service) = local_app_with_memory_services();
+    let topic = TopicId::new("kukuri:topic:integrity-contract-game-replay");
+    let replica = topic_replica_id(topic.as_str());
+    let room_id = owner
+        .create_game_room(
+            topic.as_str(),
+            CreateGameRoomInput {
+                title: "replay target".into(),
+                description: String::new(),
+                participants: vec!["a".into(), "b".into()],
+            },
+        )
+        .await
+        .expect("create game room");
+    let state_key = stable_key("sessions/game", &format!("{room_id}/state"));
+    let older_state = record_value(docs_sync.as_ref(), &replica, state_key.as_str()).await;
+    owner
+        .update_game_room(
+            topic.as_str(),
+            room_id.as_str(),
+            UpdateGameRoomInput {
+                status: GameRoomStatus::Running,
+                phase_label: Some("round 1".into()),
+                scores: vec![
+                    GameScoreView {
+                        participant_id: "participant-1".into(),
+                        label: "a".into(),
+                        score: 7,
+                    },
+                    GameScoreView {
+                        participant_id: "participant-2".into(),
+                        label: "b".into(),
+                        score: 0,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("update game room");
+
+    let event_viewer = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let hint_viewer = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let catch_up_viewer = fresh_viewer(docs_sync.clone(), blob_service);
+    for viewer in [&event_viewer, &hint_viewer, &catch_up_viewer] {
+        assert_eq!(
+            viewer
+                .list_game_rooms(topic.as_str())
+                .await
+                .expect("list updated room")[0]
+                .scores[0]
+                .score,
+            7
+        );
+    }
+    docs_sync
+        .apply_doc_op(
+            &replica,
+            DocOp::SetBytes {
+                key: state_key.clone(),
+                value: older_state,
+            },
+        )
+        .await
+        .expect("replay older state");
+    assert_eq!(
+        hydrate_subscription_event(
+            &event_viewer.services,
+            topic.as_str(),
+            &replica,
+            state_key.as_str(),
+        )
+        .await
+        .expect("hydrate replay"),
+        1
+    );
+    hydrate_subscription_hint(
+        &hint_viewer.services,
+        topic.as_str(),
+        &replica,
+        &GossipHint::SessionChanged {
+            topic_id: topic.clone(),
+            session_id: room_id.clone(),
+            object_kind: "game-session".into(),
+        },
+    )
+    .await
+    .expect("hydrate replay hint");
+    catch_up_sessions(
+        &catch_up_viewer.services,
+        topic.as_str(),
+        &replica,
+        DocFetchPolicy::LocalOnly,
+    )
+    .await
+    .expect("catch up replay");
+    for viewer in [&event_viewer, &hint_viewer, &catch_up_viewer] {
+        let room = viewer
+            .list_game_rooms(topic.as_str())
+            .await
+            .expect("list after replay")
+            .remove(0);
+        assert_eq!(room.status, GameRoomStatus::Running);
+        assert_eq!(room.scores[0].score, 7);
+    }
+    assert!(
+        event_viewer
+            .fetch_game_room_state_and_manifest(topic.as_str(), room_id.as_str())
+            .await
+            .expect("fetch replayed game room")
+            .is_none(),
+        "an operation must not use docs state older than the persisted projection"
+    );
+}
+
+// AC-2 / AC-3: fresh viewer と操作は unsigned updated_at ではなく署名済み revision で候補を選ぶ。
+#[tokio::test]
+async fn score_game_selection_uses_signed_revision() {
+    let docs_sync = Arc::new(ShadowingDocsSync::default());
+    let blob_service = Arc::new(MemoryBlobService::default());
+    let owner = fresh_viewer(docs_sync.clone(), blob_service.clone());
+    let topic = TopicId::new("kukuri:topic:integrity-contract-game-revision");
+    let replica = topic_replica_id(topic.as_str());
+    let room_id = owner
+        .create_game_room(
+            topic.as_str(),
+            CreateGameRoomInput {
+                title: "revision target".into(),
+                description: String::new(),
+                participants: vec!["a".into(), "b".into()],
+            },
+        )
+        .await
+        .expect("create game room");
+    let state_key = stable_key("sessions/game", &format!("{room_id}/state"));
+    let mut older_state: GameRoomStateDocV1 = serde_json::from_slice(
+        &record_value(docs_sync.as_ref(), &replica, state_key.as_str()).await,
+    )
+    .expect("old state");
+    older_state.updated_at = i64::MAX;
+    owner
+        .update_game_room(
+            topic.as_str(),
+            room_id.as_str(),
+            UpdateGameRoomInput {
+                status: GameRoomStatus::Running,
+                phase_label: Some("round 1".into()),
+                scores: vec![
+                    GameScoreView {
+                        participant_id: "participant-1".into(),
+                        label: "a".into(),
+                        score: 7,
+                    },
+                    GameScoreView {
+                        participant_id: "participant-2".into(),
+                        label: "b".into(),
+                        score: 0,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("update game room");
+    docs_sync
+        .shadow(
+            state_key.as_str(),
+            serde_json::to_value(older_state).expect("old state json"),
+        )
+        .await;
+
+    let viewer = fresh_viewer(docs_sync, blob_service);
+    let listed = viewer
+        .list_game_rooms(topic.as_str())
+        .await
+        .expect("list game rooms")
+        .remove(0);
+    assert_eq!(listed.status, GameRoomStatus::Running);
+    assert_eq!(listed.scores[0].score, 7);
+    let (_, _, manifest) = viewer
+        .fetch_game_room_state_and_manifest(topic.as_str(), room_id.as_str())
+        .await
+        .expect("fetch game room")
+        .expect("game room");
+    assert_eq!(manifest.score_revision, Some(2));
+    assert_eq!(manifest.scores[0].score, 7);
+}
+
+// 旧形式の本番 record は無い。revision を持たない live / ScoreGame manifest は受け入れない。
+#[tokio::test]
+async fn session_manifests_without_revision_are_rejected() {
+    let (owner, _, docs_sync, blob_service) = local_app_with_memory_services();
+    let topic = TopicId::new("kukuri:topic:integrity-contract-required-revision");
+    let replica = topic_replica_id(topic.as_str());
+
+    let session_id = owner
+        .create_live_session(
+            topic.as_str(),
+            CreateLiveSessionInput {
+                title: "old live format".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        .expect("create live session");
+    let live_key = stable_key("sessions/live", &format!("{session_id}/state"));
+    let mut live_state: LiveSessionStateDocV1 = serde_json::from_slice(
+        &record_value(docs_sync.as_ref(), &replica, live_key.as_str()).await,
+    )
+    .expect("live state");
+    let (_, _, live_manifest) = owner
+        .fetch_live_session_state_and_manifest(topic.as_str(), session_id.as_str())
+        .await
+        .expect("fetch live")
+        .expect("live");
+    let mut old_live = serde_json::to_value(live_manifest).expect("live json");
+    old_live
+        .as_object_mut()
+        .expect("live object")
+        .remove("revision");
+    let live_envelope = build_live_session_envelope(
+        owner.services.keys.as_ref(),
+        &topic,
+        session_id.as_str(),
+        &old_live,
+    )
+    .expect("sign old live format");
+    let live_blob = store_manifest_blob(blob_service.as_ref(), &old_live, LIVE_MANIFEST_MIME)
+        .await
+        .expect("store old live format");
+    persist_session_envelope(docs_sync.as_ref(), &replica, &live_envelope)
+        .await
+        .expect("write old live envelope");
+    live_state.last_envelope_id = live_envelope.id;
+    live_state.current_manifest = ManifestBlobRef {
+        hash: live_blob.hash,
+        mime: live_blob.mime,
+        bytes: live_blob.bytes,
+    };
+    persist_live_session_state(docs_sync.as_ref(), &replica, &live_state)
+        .await
+        .expect("write old live state");
+
+    let room_id = owner
+        .create_game_room(
+            topic.as_str(),
+            CreateGameRoomInput {
+                title: "old game format".into(),
+                description: String::new(),
+                participants: vec!["a".into(), "b".into()],
+            },
+        )
+        .await
+        .expect("create game room");
+    let game_key = stable_key("sessions/game", &format!("{room_id}/state"));
+    let mut game_state: GameRoomStateDocV1 = serde_json::from_slice(
+        &record_value(docs_sync.as_ref(), &replica, game_key.as_str()).await,
+    )
+    .expect("game state");
+    let (_, _, game_manifest) = owner
+        .fetch_game_room_state_and_manifest(topic.as_str(), room_id.as_str())
+        .await
+        .expect("fetch game")
+        .expect("game");
+    let mut old_game = serde_json::to_value(game_manifest).expect("game json");
+    old_game
+        .as_object_mut()
+        .expect("game object")
+        .remove("score_revision");
+    let game_envelope = build_game_session_envelope(
+        owner.services.keys.as_ref(),
+        &topic,
+        room_id.as_str(),
+        &old_game,
+    )
+    .expect("sign old game format");
+    let game_blob = store_manifest_blob(blob_service.as_ref(), &old_game, GAME_MANIFEST_MIME)
+        .await
+        .expect("store old game format");
+    persist_session_envelope(docs_sync.as_ref(), &replica, &game_envelope)
+        .await
+        .expect("write old game envelope");
+    game_state.last_envelope_id = game_envelope.id;
+    game_state.current_manifest = ManifestBlobRef {
+        hash: game_blob.hash,
+        mime: game_blob.mime,
+        bytes: game_blob.bytes,
+    };
+    persist_game_room_state(docs_sync.as_ref(), &replica, &game_state)
+        .await
+        .expect("write old game state");
+
+    let viewer = fresh_viewer(docs_sync, blob_service);
+    assert!(
+        viewer
+            .list_live_sessions(topic.as_str())
+            .await
+            .expect("list live sessions")
+            .is_empty()
+    );
+    assert!(
+        viewer
+            .list_game_rooms(topic.as_str())
+            .await
+            .expect("list game rooms")
+            .is_empty()
+    );
+}
+
 // metaverse room は owner の署名を要求しない(訪問者も chat で manifest を書く)。その代わり、id が Spatial Context と owner から
 // 決まる値でなければ反映せず、合っていても、署名つきの Dome Instance が無ければ一覧に出ない。
 #[tokio::test]
@@ -510,6 +966,7 @@ async fn forged_metaverse_room_is_not_listed_as_the_victims_dome() {
         metaverse.spatial_context = context.clone();
         let manifest = GameRoomManifestBlobV1 {
             room_id: room_id.clone(),
+            score_revision: None,
             topic_id: topic.clone(),
             channel_id: None,
             owner_pubkey: victim.clone(),

@@ -6,6 +6,9 @@ impl LiveGameProjectionStore for MemoryStore {
         let mut index = self.live_session_index.write().await;
         let mut rows = self.live_session_rows.write().await;
         if let Some(previous) = rows.get(row.session_id.as_str()) {
+            if previous.revision >= row.revision {
+                return Ok(());
+            }
             remove_projection_index_entry(
                 &mut index,
                 previous.topic_id.as_str(),
@@ -101,6 +104,12 @@ impl LiveGameProjectionStore for MemoryStore {
         let mut index = self.game_room_index.write().await;
         let mut rows = self.game_room_rows.write().await;
         if let Some(previous) = rows.get(row.room_id.as_str()) {
+            if matches!(
+                (previous.score_revision, row.score_revision),
+                (Some(previous), Some(next)) if previous >= next
+            ) {
+                return Ok(());
+            }
             remove_projection_index_entry(
                 &mut index,
                 previous.topic_id.as_str(),

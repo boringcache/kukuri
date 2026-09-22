@@ -29,10 +29,13 @@ Accepted
 - 「owner のみ」は読む側でも確かめる。ScoreGame は、owner が manifest 全体に署名した `game-session` の envelope（`envelopes/<envelope id>`。
   `state.last_envelope_id` が指す）で裏づけられた state だけを反映し、操作にも使う。metaverse room は訪問者も manifest を書くので owner の署名を要求せず、
   id と Spatial Context・owner の結び付けと、一覧の時点の署名つき Dome Instance で確かめる（Issue #1252。規則の正本は ADR 0052 §2）。
-- ScoreGame の local update と hydration の projection commit は room 単位で直列化する。hydration は blob 取得後に現在の local docs state を再確認し、取得中に pointer が変わった候補を cache へ書かない。新旧の判断に timestamp の大小や hash の辞書順を使わず、同 timestamp の正当な pointer 更新も反映する。
+- ScoreGame manifest は owner の署名対象となる必須の `score_revision` を持つ。初版は 1、更新ごとに 1 増やす。同じ key の候補と永続 projection は revision で新旧を判断し、
+  `state.updated_at`、envelope の時刻、hash、record の到着順を使わない。#1260 時点で本番 record は無いため、revision の無い旧形式は移行せず拒否する。
+- ScoreGame の local update と hydration の projection commit は room 単位で直列化する。hydration は blob 取得後に現在の local docs state を再確認し、取得中に pointer が変わった候補を cache へ書かない。同 timestamp の正当な revision 更新も反映する。
 - 同じ canonical state から同じ ScoreGame projection を再取得した場合は、`derived_at` だけを更新する書込みも行わない。Metaverse の専用 lifecycle／authority はこの ScoreGame の制御で変更しない。
 
 ## Consequences
 - late joiner と restart 後の復元は `docs state + manifest blob` だけで成立しなければならない。
 - score/status は docs pointer が指す最新 manifest blob だけで再構築できなければならない。
+- 過去に署名された revision を置き直しても、score/status と操作の土台は過去へ戻らない。
 - v1 では replay/snapshot/game move engine を含めない。
