@@ -4,6 +4,7 @@
 use super::hydration_integrity::{signed_post, write_object_entries};
 use super::shadowing_docs::honest_header;
 use super::*;
+use kukuri_store::PostWithdrawalStore;
 
 #[tokio::test]
 async fn a_missing_reply_target_is_reflected_in_the_background_without_docs_reads_in_the_view() {
@@ -277,11 +278,311 @@ async fn a_thread_page_reflects_the_reply_target_before_building_the_view() {
     );
 }
 
+// #1284 AC-1: boundedなProfileも、表示する行が参照する直前の返信先だけを
+// Timeline / Threadと同じ有限本文回復へ渡す。Bookmarksはviewport上のPostCardから起動する。
+#[tokio::test]
+async fn profile_view_recovers_the_visible_reply_target_body() {
+    let docs_sync = Arc::new(MemoryDocsSync::default());
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs_sync,
+        Arc::new(MemoryBlobService::default()),
+        generate_keys(),
+    );
+    let topic = "kukuri:topic:reply-target-secondary-views";
+    let parent_id = app
+        .create_post(topic, "parent visible through a preview", None)
+        .await
+        .expect("create parent");
+    let reply_id = app
+        .create_post(topic, "reply in secondary views", Some(parent_id.as_str()))
+        .await
+        .expect("create reply");
+    let parent_object_id = EnvelopeId::from(parent_id.as_str());
+    let mut parent_row = store
+        .get_object_projection(&parent_object_id)
+        .await
+        .expect("projection")
+        .expect("parent row");
+    parent_row.content = None;
+    store
+        .put_object_projection(parent_row.clone())
+        .await
+        .expect("store missing parent");
+
+    let profile = app
+        .list_profile_timeline(app.current_author_pubkey().as_str(), None, 20)
+        .await
+        .expect("profile timeline");
+    let profile_reply = profile
+        .items
+        .iter()
+        .find(|post| post.object_id == reply_id)
+        .expect("profile reply");
+    assert_eq!(
+        profile_reply
+            .reply_preview
+            .as_ref()
+            .map(|preview| preview.content.as_str()),
+        Some("parent visible through a preview")
+    );
+}
+
 /// 本文 blob が「手元には無いが、remote からは取れる」状態を表す blob service。`fetch_blob` の回数を数える。
 #[derive(Clone, Default)]
 struct RemoteBodyBlobService {
     inner: MemoryBlobService,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// 本文の提供元を test から復旧できる blob service。返信先の projection が `content: None` で
+/// 先に保存された後も、表示中の preview が既存の有限 retry に入ることを確認する。
+#[derive(Default)]
+struct GatedRemoteBodyBlobService {
+    inner: MemoryBlobService,
+    open: std::sync::atomic::AtomicBool,
+    fetches: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl BlobService for GatedRemoteBodyBlobService {
+    async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
+        self.inner.put_blob(data, mime).await
+    }
+
+    async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.open.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.inner.fetch_blob(hash).await
+    }
+
+    async fn pin_blob(&self, hash: &BlobHash) -> Result<()> {
+        self.inner.pin_blob(hash).await
+    }
+
+    async fn blob_status(&self, hash: &BlobHash) -> Result<BlobStatus> {
+        self.local_blob_status(hash).await
+    }
+
+    async fn local_blob_status(&self, hash: &BlobHash) -> Result<BlobStatus> {
+        if !self.open.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(BlobStatus::Missing);
+        }
+        self.inner.local_blob_status(hash).await
+    }
+
+    async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
+        self.inner.import_peer_ticket(ticket).await
+    }
+}
+
+// #1284 AC-1: 返信先としてだけ表示される行が `content: None` で projection に残っていても、
+// その返信を含む範囲の取得を契機に `MissingBodyLedger` の範囲で本文を取り直す。
+#[tokio::test]
+async fn a_visible_reply_target_with_a_missing_body_recovers_after_its_provider_returns() {
+    let docs_sync = Arc::new(super::subscription_catch_up::InjectedNoticesDocsSync::default());
+    let store = Arc::new(MemoryStore::default());
+    let blobs = Arc::new(GatedRemoteBodyBlobService::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs_sync.clone(),
+        blobs.clone(),
+        generate_keys(),
+    );
+    let topic = TopicId::new("kukuri:topic:reply-target-missing-body");
+    let replica = topic_replica_id(topic.as_str());
+    app.ensure_topic_subscription(topic.as_str())
+        .await
+        .expect("subscribe the topic");
+    sleep(Duration::from_millis(200)).await;
+    let keys = generate_keys();
+    let stored = blobs
+        .put_blob(b"recovered reply parent".to_vec(), "text/plain")
+        .await
+        .expect("put blob");
+    let parent_envelope = build_post_envelope_with_payload_in_channel(
+        &keys,
+        &topic,
+        PayloadRef::BlobText {
+            hash: stored.hash.clone(),
+            mime: "text/plain".into(),
+            bytes: stored.bytes,
+        },
+        Vec::new(),
+        Vec::new(),
+        None,
+        ObjectVisibility::Public,
+        None,
+        Vec::new(),
+    )
+    .expect("parent envelope");
+    let parent_header = parent_envelope
+        .to_post_object()
+        .expect("post object")
+        .expect("post object");
+    persist_post_object(
+        docs_sync.as_ref(),
+        &replica,
+        parent_header.clone(),
+        parent_envelope.clone(),
+    )
+    .await
+    .expect("persist parent");
+    let reply = super::range_reconcile::put_post_at(
+        docs_sync.as_ref(),
+        &replica,
+        &keys,
+        &topic,
+        parent_header.created_at + 10,
+        "the reply",
+        Some(&parent_envelope),
+    )
+    .await;
+    super::range_reconcile::project(store.as_ref(), &reply, &replica).await;
+
+    let cursor = TimelineCursor {
+        created_at: reply.created_at + 1,
+        object_id: EnvelopeId::from("f".repeat(64).as_str()),
+    };
+    app.list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("timeline while the body is unavailable");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if store
+                .get_object_projection(&parent_header.object_id)
+                .await
+                .expect("projection")
+                .is_some_and(|row| row.content.is_none())
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the reply target is projected without its body");
+
+    let mut target_row = store
+        .get_object_projection(&parent_header.object_id)
+        .await
+        .expect("projection")
+        .expect("reply target row");
+    let original_channel = target_row.channel_id.clone();
+    target_row.channel_id = "different-scope".into();
+    store
+        .put_object_projection(target_row.clone())
+        .await
+        .expect("store mismatched scope");
+    blobs.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    let fetches_before_scope_mismatch = blobs.fetches.load(std::sync::atomic::Ordering::SeqCst);
+    let mismatched = app
+        .list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("timeline with a mismatched reply target scope");
+    assert_eq!(
+        mismatched.items[0]
+            .reply_preview
+            .as_ref()
+            .map(|preview| preview.content.as_str()),
+        Some("[blob pending]")
+    );
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_scope_mismatch,
+        "a target from another scope must not start blob I/O"
+    );
+    target_row.channel_id = original_channel;
+    store
+        .put_object_projection(target_row)
+        .await
+        .expect("restore target scope");
+
+    let recovered = app
+        .list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("timeline after the provider returns");
+    let preview = recovered.items[0]
+        .reply_preview
+        .as_ref()
+        .expect("reply preview");
+    assert_eq!(preview.content, "recovered reply parent");
+    assert_eq!(
+        app.services.missing_body_ledger.attempts(&stored.hash),
+        0,
+        "a successful retry clears the finite retry ledger"
+    );
+
+    let mut adult_row = store
+        .get_object_projection(&parent_header.object_id)
+        .await
+        .expect("projection")
+        .expect("recovered target");
+    adult_row.content = None;
+    adult_row.content_labels = vec!["adult".into()];
+    store
+        .put_object_projection(adult_row.clone())
+        .await
+        .expect("store adult missing target");
+    let fetches_before_adult_gate = blobs.fetches.load(std::sync::atomic::Ordering::SeqCst);
+    app.list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("timeline with a gated missing target");
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_adult_gate,
+        "an adult-gated reply target must be rejected before blob I/O"
+    );
+    app.set_adult_content_display_enabled(true);
+    app.list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("timeline after enabling adult content");
+
+    let mut withdrawn_row = store
+        .get_object_projection(&parent_header.object_id)
+        .await
+        .expect("projection")
+        .expect("recovered target after enabling adult content");
+    withdrawn_row.content = None;
+    store
+        .put_object_projection(withdrawn_row.clone())
+        .await
+        .expect("store missing withdrawn target");
+    store
+        .put_post_withdrawal(PostWithdrawalRow {
+            target_object_id: parent_header.object_id.clone(),
+            target_author_pubkey: withdrawn_row.author_pubkey.clone(),
+            source_replica_id: withdrawn_row.source_replica_id.clone(),
+            withdrawal_envelope_id: EnvelopeId::from("withdrawal-for-reply-target"),
+            withdrawn_at: parent_header.created_at + 20,
+            generation: 1,
+            replacement_object_id: None,
+            reason_visibility: WithdrawalReasonVisibility::Public,
+            reason: Some(PostWithdrawalReason::AuthorRequest),
+        })
+        .await
+        .expect("store withdrawal");
+    let fetches_before_withdrawn = blobs.fetches.load(std::sync::atomic::Ordering::SeqCst);
+    app.list_timeline(topic.as_str(), Some(cursor), 1)
+        .await
+        .expect("timeline with a withdrawn missing target");
+    assert_eq!(
+        blobs.fetches.load(std::sync::atomic::Ordering::SeqCst),
+        fetches_before_withdrawn,
+        "a withdrawn reply target must be rejected before blob I/O"
+    );
 }
 
 #[async_trait]

@@ -93,6 +93,7 @@ export const postViewFull = {
       }
     },
     "content": "parent content",
+    "content_status": "Available",
     "attachments": [
       {
         "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

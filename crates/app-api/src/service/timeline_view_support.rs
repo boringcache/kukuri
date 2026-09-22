@@ -258,6 +258,12 @@ impl AppService {
             self.attachment_views_for_projection_row(&row).await?
         };
         inherit_post_observation_for_attachments(&mut attachments, provenance.as_ref());
+        let content_status = if is_withdrawn {
+            BlobViewStatus::Available
+        } else {
+            blob_view_status_for_payload(self.services.blob_service.as_ref(), &row.payload_ref)
+                .await?
+        };
         let profile = match profiles.get(row.author_pubkey.as_str()) {
             Some(profile) => Some(profile.clone()),
             None => {
@@ -285,6 +291,7 @@ impl AppService {
             } else {
                 row.content.unwrap_or_else(|| "[blob pending]".to_string())
             },
+            content_status,
             attachments,
             content_labels: row.content_labels.clone(),
             root_id: row.root_object_id.map(|id| id.0),

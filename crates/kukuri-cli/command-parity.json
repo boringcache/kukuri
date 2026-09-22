@@ -1,6 +1,6 @@
 {
   "baseline": "d372c91bdc963bda07308a359fe3baeca8e06150",
-  "scope_revision": "2026-09-22-1272-window-close-v1",
+  "scope_revision": "2026-09-22-1284-post-reload-v1",
   "entries": [
     {"tauri":"commands::startup::get_desktop_startup_status","cli":"get_desktop_startup_status","inventory":"INV-1"},
     {"tauri":"commands::system_locale::get_system_locales","excluded":"os","reason":"#917: desktopの同意前UI言語を選ぶOS local read。UIを持たないCLIの業務commandには追加しない。"},
@@ -66,6 +66,7 @@
     {"tauri":"commands::posts::resolve_community_index_posts","cli":"resolve_community_index_posts","inventory":"INV-2"},
     {"tauri":"commands::posts::list_thread","cli":"list_thread","inventory":"INV-2"},
     {"tauri":"commands::posts::list_profile_timeline","cli":"list_profile_timeline","inventory":"INV-2"},
+    {"tauri":"commands::posts::retry_post_elements","excluded":"gui_content_recovery","reason":"#1284: GUIで表示中の投稿cardにある欠損blobを明示的に1回再試行し、同じcardへ局所反映する操作。CLIはlist/get_blob系commandで対象を明示取得でき、GUI card stateを持たない。"},
     {"tauri":"commands::profile::get_my_profile","cli":"get_my_profile","inventory":"INV-2"},
     {"tauri":"commands::profile::set_my_profile","cli":"set_my_profile","inventory":"INV-2"},
     {"tauri":"commands::profile::follow_author","cli":"follow_author","inventory":"INV-2"},

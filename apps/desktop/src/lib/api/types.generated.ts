@@ -39,7 +39,7 @@ export type ContentDisplaySettings = { adult_content_enabled: boolean, };
 
 export type ReplyPreviewAuthorView = { pubkey: string, name?: string | null, display_name?: string | null, picture_asset?: ProfileAssetView | null, };
 
-export type ReplyPreviewView = { object_id: string, topic: string, author: ReplyPreviewAuthorView, content: string, attachments: Array<AttachmentView>, content_labels?: Array<string> | null, root_id?: string | null, reply_to?: string | null, };
+export type ReplyPreviewView = { object_id: string, topic: string, author: ReplyPreviewAuthorView, content: string, content_status: BlobViewStatus, attachments: Array<AttachmentView>, content_labels?: Array<string> | null, root_id?: string | null, reply_to?: string | null, };
 
 export type ReactionKeyView = { reaction_key_kind: string, normalized_reaction_key: string, emoji?: string | null, custom_asset?: CustomReactionAssetView | null, };
 
@@ -757,6 +757,8 @@ export type ListTimelineRequest = { topic: string, scope: TimelineScope, cursor?
 export type ListThreadRequest = { topic: string, thread_id: string, cursor?: TimelineCursor | null, limit?: number | null, };
 
 export type ListProfileTimelineRequest = { pubkey: string, cursor?: TimelineCursor | null, limit?: number | null, };
+
+export type RetryPostElementsRequest = { object_id: string, body_object_id?: string | null, manual: boolean, };
 
 export type ImportPeerTicketRequest = { ticket: string, };
 

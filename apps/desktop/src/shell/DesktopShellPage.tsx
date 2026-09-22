@@ -78,7 +78,7 @@ import {
   type ColumnTimelineView,
 } from '@/shell/slices/workspace';
 import { routeStateForColumn } from '@/shell/routing/initialWorkspaceRoute';
-import { MediaRetryContext } from '@/components/core/mediaRetryContext';
+import { PostRecoveryProviders } from '@/components/core/PostRecoveryProviders';
 
 const CLIPBOARD_TOAST_TIMEOUT_MS = 2200;
 export function DesktopShellPage({
@@ -214,6 +214,7 @@ export function DesktopShellPage({
     buildVideoDraftItem: buildComposerVideoDraftItem,
     gatedAdultMediaHashes,
     retryMediaFetch,
+    reloadPostElements,
   } = useDesktopShellData({
     api,
     translate,
@@ -886,7 +887,7 @@ export function DesktopShellPage({
   );
 
   return (
-    <MediaRetryContext.Provider value={retryMediaFetch}>
+    <PostRecoveryProviders mediaRetry={retryMediaFetch} postReload={reloadPostElements}>
       <div className='shell-phase1' data-workspace-layout='column'>
         <a className='shell-skip-link' href={`#${SHELL_WORKSPACE_ID}`}>
           {t('shell:workspace.skipToWorkspace')}
@@ -993,6 +994,6 @@ export function DesktopShellPage({
         handleCreateCustomReactionAsset={shellActions.handleCreateCustomReactionAsset}
         handleRemoveBookmarkedCustomReaction={shellActions.handleRemoveBookmarkedCustomReaction}
       />
-    </MediaRetryContext.Provider>
+    </PostRecoveryProviders>
   );
 }

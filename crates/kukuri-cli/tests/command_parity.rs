@@ -131,6 +131,8 @@ fn exclusion_allowed(tauri: &str, kind: &str) -> bool {
         ),
         // #1174: GUIでviewport内に表示した公開投稿だけの一時link preview。
         "gui_content_preview" => tauri == "commands::link_preview::fetch_link_preview",
+        // #1284: 表示中の投稿cardだけに作用する局所的な欠損blobの回復。
+        "gui_content_recovery" => tauri == "commands::posts::retry_post_elements",
         _ => false,
     }
 }
@@ -171,8 +173,8 @@ fn baseline_inventory_is_classified_once() {
         manifest.baseline,
         "d372c91bdc963bda07308a359fe3baeca8e06150"
     );
-    assert_eq!(manifest.scope_revision, "2026-09-22-1272-window-close-v1");
-    assert_eq!(manifest.entries.len(), 165);
+    assert_eq!(manifest.scope_revision, "2026-09-22-1284-post-reload-v1");
+    assert_eq!(manifest.entries.len(), 166);
     check_inventory(&registrations(TAURI_SOURCE), &manifest.entries).expect("全入口の分類");
 }
 

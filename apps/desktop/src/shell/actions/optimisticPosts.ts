@@ -188,6 +188,7 @@ export function createOptimisticPostActions({
               picture_asset: replyPost.author_picture_asset ?? null,
             },
             content: replyPost.content,
+            content_status: replyPost.content_status,
             attachments: replyPost.attachments.map((attachment) => ({ ...attachment })),
             root_id: replyPost.root_id ?? null,
             reply_to: replyPost.reply_to ?? null,
