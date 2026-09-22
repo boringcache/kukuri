@@ -18,6 +18,7 @@ mod discovery;
 mod fake;
 mod iroh;
 mod peers;
+mod receive_binding;
 #[cfg(test)]
 mod test_support;
 mod tickets;
@@ -28,5 +29,6 @@ pub use discovery::*;
 pub use fake::*;
 pub use iroh::*;
 pub use peers::*;
+pub use receive_binding::*;
 pub use tickets::*;
 pub use traits::*;

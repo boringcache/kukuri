@@ -89,6 +89,7 @@ Issue・PR・セッションの記述だけで「実装済み」「検証成功�
 - アカウントの署名鍵から docs author を導出し、著者の record を docs author と key の組で読む: `docs/adr/0053-account-derived-docs-author.md`（#1258。同じ key に不正な record を積まれても、著者の投稿と取り下げを定数の読み出しで反映する）
 - docs replica の時間分割: `docs/adr/0054-time-bucketed-docs-replicas.md`（#1243、Proposed。ID・同期停止の基盤から段階実装し、writer切替とCN追従は作業記録で管理する）
 - replica の読み出しの inventory: `docs/architecture/replica-read-inventory.md`（prefix の全件読みの全 caller、比例する総数、解消する段階）
+- 通信の需要・容量・停止の統合設計: `docs/adr/0055-demand-owned-network-work.md`（#1221、Proposed。画面外の通知対象を維持する受信経路と移行を含む）。調査中の入口・連鎖・上流APIは `docs/architecture/network-work-inventory.md`。
 - Linux GUI配布とCLIのローカル制御経路: `docs/adr/0049-linux-gui-cli-control-plane.md`（#885。CLI専用profile、常駐プロセス／IPC、command登録簿、要求単位の実行、配布成果物のデータ分類）
 - moderation event / safety advisory の trust semantics + deterministic (CSAM / known-hash) critical safety: `docs/adr/0027-deterministic-moderation-critical-safety.md`（optional trust input であり network-wide command ではないことを固定。旧 `community-node-critical-safety.md` / `moderation-event-trust-semantics.md` を集約）
 - community node trust / relation foundation: `docs/adr/0026-community-node-trust-relation-foundation.md`

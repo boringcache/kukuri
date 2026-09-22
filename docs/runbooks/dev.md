@@ -78,6 +78,11 @@ cargo xtask desktop-visual-test
 
 ## ローカル先行検証
 
+接続・同期・取得のtimer/retryを変更する際は、#1221で進めている
+[共通ownerの設計案](../adr/0055-demand-owned-network-work.md#6-周期処理の登録規則)と
+[現行inventory](../architecture/network-work-inventory.md)を参照する。
+設計案はProposedであり、現行経路の移行済みを意味しない。
+
 CI は課金対象の計算資源で動く。実装しながら CI へ push して確かめる進め方は費用が大きいので行わない。実装中の確認はローカルで済ませ、CI は PR を作った後の最終確認だけに使う。
 
 - 変更 path に対応する validation は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選び、ローカルで実行してから commit する。

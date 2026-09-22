@@ -19,6 +19,7 @@ mod posts;
 mod private_channels;
 mod profile;
 mod reactions;
+mod receive_endpoint_binding;
 mod rendezvous;
 mod trust_observations;
 pub mod wire;
@@ -194,6 +195,10 @@ pub use reactions::{
     ReactionKeyKind, ReactionKeyV1, build_custom_reaction_asset_envelope,
     build_custom_reaction_asset_envelope_with_docs_author, build_reaction_envelope,
     deterministic_reaction_id, parse_custom_reaction_asset, parse_reaction,
+};
+pub use receive_endpoint_binding::{
+    RECEIVE_ENDPOINT_BINDING_MAX_BYTES, RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS,
+    ReceiveEndpointBindingV1, VerifiedReceiveEndpointBinding, receive_route_for_account,
 };
 pub use rendezvous::{private_topic_rendezvous_key_hex_secret, public_topic_rendezvous_key};
 pub use trust_observations::{
