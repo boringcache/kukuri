@@ -159,3 +159,16 @@ active peerの無条件切断を認めなかった。iroh 1.0.3、gossip 0.101.0
 受付の関連unit testsは9件成功（`cargo test -p kukuri-transport --lib work_admission`）。transport all-targets clippyは、初回のunwrap診断4件を不変条件付きexpectへ修正した後に成功。実行していない全体suiteはPR/CIへ委譲する。これは純粋な状態機械の契約であり、停止指示から実QUICを止める結合はまだ含まない。
 
 SDK退役資源の修正はPR #1308、merge `9dc3f051c928cfabe5ca709adb715663cf394303`で統合済み。固定head独立監査PASS、15/15 CI成功、対象16pathの一致を確認した。
+
+## P2実証: gossipの公開topic状態機械と所有付きI/O
+
+D9の実装前提として、公開`proto::topic::State`へ入出力を渡し、既存native Gossipと実QUICで双方向に配送するcontractを追加した。net::utilは非公開だが、topic単位のMessageとStateは公開されている。wireはtopic IDだけのpostcard stream headerと、u32 big-endian lengthで区切ったpostcard topic Message。protocol/membership本体は複製しない。
+
+- GOSSIP-1（NET-AC-3/D9）: owner側から選択した1接続だけを使い、native peerとのjoinと双方向配送が成功する。`public_gossip_state_roundtrips_with_native_peer_on_owned_connection`。
+- GOSSIP-2（NET-AC-2(e)/NW-4）: 相手がlength headerの半分だけを送りstreamを閉じなくても、所有futureの取消でQUICが終了する。endpoint全体は継続。`owned_gossip_read_cancellation_closes_even_an_incomplete_header`。
+
+初回は上位`proto::State`が返すtopic付きMessageをそのままwireへ送り、10秒で失敗した。native wireはstream headerでtopicを束縛し、その後は`topic::Message`だけを送る。公開`topic::State`へ変更し、応答を処理してからjoin完了を待つように直した後、双方向testは1件0.09秒で成功。取消testは初回に1件成功した。失敗した実証をSDK非互換の根拠には使わない。
+
+追加はtestと既存lock内の3packageのdev依存参照だけ。productionにはnative Gossipを維持する。topic数・timer・I/O workerの予算、逆引き、同時dial、全transport callerへの組込みは未完了。timerを動かさない短いwire往復を、長時間の資源上限の証明にしない。
+
+公開APIの選択は、docsが`SyncHandle`+`net`、gossipが`proto::topic::State`+所有I/O。irohの`EndpointHooks::before_connect/after_handshake`と`RouterBuilder::incoming_filter`も公開され、送信前拒否・handshake後照合・受信前選別へ利用できる。hook単独には失敗/取消した接続試行を精算するAPIがないため、接続futureの所有を省略しない。SDK全体のforkやwireの独自変更を前提にせず、この構成でadapterを作る。

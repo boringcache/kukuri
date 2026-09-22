@@ -328,3 +328,12 @@ LocalOnlyはこのnetwork受付へ登録せず、既存local readに返す。
 executorは`start_next`の結果だけを実行し、取消を停止/awaitしてから`complete`する。
 `Publish`は世代と期限の判定だけであり、scope/内容/保存先の既存guardを省略する許可ではない。
 この部品のproduction組込み、protocol別予算の合算、実QUIC停止との結合は未完了。
+
+## gossip adapterで再利用する公開API
+
+D9のI/O所有は`iroh_gossip::proto::topic::State`と公開`topic::Message`を使う。
+選択した接続への書込み、各topicのtimer、受信読み込みと取消をownerが管理し、native Gossip actorと二重に動かさない。
+既存wireはtopic IDを含むstream headerの後に、u32 big-endian length付きpostcard topic Messageを流す。
+上位`proto::State`のtopic付きMessageをそのままwireへ書かない。
+実証ではnative peerと双方向配送し、未完結headerの読込みもfuture取消でQUIC closeできた。
+複数topic/peer・timer・台帳・worker予算のproduction統合は未完了で、この実証だけでD9全体を完了にしない。

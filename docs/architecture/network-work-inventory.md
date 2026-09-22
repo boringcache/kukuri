@@ -171,3 +171,9 @@ P2終了時に各groupのmember・caller・停止・連鎖と上流APIの実現�
 | N43 | `start_next/expire/next_deadline/next_cancellation/complete` → lane/deadline索引 → 実行許可・停止・完了判定 | 実行8にStoppingも計数。4:2:1、期限に待機時間を含む。取消・期限切れ・失効の結果はDiscard。I/Oと保存guardはadapterが所有 | ADMIT-3/4/5、weighted_lanes / queued_deadline / running_expiry tests |
 
 この3行のproduction callerはまだなく、追加したcontractから全public入口を通す段階。全caller検索は `rg -n 'NetworkWorkOwner|WorkAdmission|WorkCompletion' crates`。メモリ台帳以外のsensitive sinkは追加しない。4MiBはpayload計であり、固定長key・索引・waiterの管理領域は件数上限で別に有界にする。dispatch後のpayloadもcompleteまで予算へ計上する。executorによるI/O停止とguard直下の保存を後続で結合し、この部品の成功を通信全体の上限達成と混同しない。
+
+## gossip I/Oの公開API実証（D9）
+
+N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 contractでnative peerとの双方向wireと未完結header中の取消を確認した。`proto::topic::State`/`topic::Message`を使い、membership本体は再実装しない。`proto::State`の外側Messageはtopicも含む内部配送型で、実wireはheader後にtopic Messageだけを書く点を区別する。所有connectionのDropでcloseし、nativeの内部RecvLoopへ取消を委ねない。
+
+このfixtureは1topic/1peerの短い往復でtimerを発火しない。production入口は増えず、timer容量・複数topicの共有接続・再試行・受信/送信workerの上限は残る。`EndpointHooks`は送信前拒否とhandshake後観測、`RouterBuilder::incoming_filter`は受信spawn前選別に使用可能だが、接続試行futureの失敗/cancel精算はownerが持つ。
