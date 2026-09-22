@@ -140,6 +140,7 @@ pub struct ReplyPreviewView {
     pub topic: String,
     pub author: ReplyPreviewAuthorView,
     pub content: String,
+    pub content_status: BlobViewStatus,
     pub attachments: Vec<AttachmentView>,
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>"))]

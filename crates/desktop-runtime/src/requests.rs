@@ -209,6 +209,15 @@ pub struct ListProfileTimelineRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(optional_fields = nullable))]
+pub struct RetryPostElementsRequest {
+    pub object_id: String,
+    pub body_object_id: Option<String>,
+    pub manual: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(optional_fields = nullable))]
 pub struct ImportPeerTicketRequest {
     pub ticket: String,
 }

@@ -80,6 +80,10 @@ Columnの外底面とCanvasの横スクロールバーの間には`--space-sm`�
 
 投稿・DMの画像／動画と画像viewerは、自動取得が固定回数で失敗したら、その部分だけを「取得に失敗しました」と再取得のicon buttonへ置き換える。投稿本文、scroll位置、focus、表示制限による代替表示は変えず、表示制限中は失敗表示も再取得操作も出さない。icon buttonはaccessible nameを持ち、再取得中は同じ位置に残したままbusyを示して重複操作を受け付けない。reduced motionではiconの回転を止め、状態名で伝える。avatar・カスタムリアクションは既存のfallbackを使い、再取得操作を置かない。回数とリセット条件は`docs/architecture/blob-cache.md`に従う。
 
+投稿本文と返信先previewの本文blobも、取得できないときは該当部分を同じ失敗表示と再読み込みicon buttonへ置き換える。投稿カードの操作群の一番右には「投稿を再読み込み」icon buttonを常時置き、そのカードで欠けている本文・直前の返信先本文・添付だけを1回再試行する。投稿単位の操作でtopic全体を同期せず、取得済み内容、scroll、focus、draftを保持する。再読み込み中は同じ位置でbusyを示し、対象カードの操作を重複実行しない。
+
+返信先previewの本文が欠けた表示中の投稿は、有限backoffで局所再取得する。Bookmarksは20件単位のページを置き換えて表示し、ページ移動で過去のカードを残さない。これにより自動再取得の監視とtimerは表示ページの上限内に収める。
+
 投稿本文の資格情報を含まない絶対HTTP(S) URLは、全文を折り返せるlinkとして表示する。公開・表示可能・settledな投稿がviewport内にある場合は、primary contentの先頭URL 1件だけにsite、title、任意description／imageのpreview cardを表示できる。取得中は本文を押し下げるskeletonを置かず、失敗時はinline linkだけを維持する。private channel／DM、Composer参照preview、adult-content gate／trust collapse中、withdrawn／missing／local pending、viewport外では自動取得しない。cardとinline linkはpointer／keyboardから元URLをOS browserへ開き、親のthread操作を重複発火しない。remote HTML／imageをWebViewから直接読み込まず、送信・取得境界はADR 0051に従う。
 
 #### 自分のアカウント操作（#1005）

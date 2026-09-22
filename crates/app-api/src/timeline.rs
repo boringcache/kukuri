@@ -54,6 +54,8 @@ impl AppService {
             self.clear_empty_result_restart_marker(empty_recovery_key.as_str())
                 .await;
         }
+        self.reflect_reply_targets_for_profile_items(&page.items)
+            .await;
         let mut views = Vec::with_capacity(page.items.len());
         for item in page.items {
             match item {

@@ -886,6 +886,54 @@ export function useDesktopShellData({
     setTimelineScopeByTopic,
     setMediaObjectUrls,
   });
+  const reloadPostElements = useCallback(
+    async (post: PostView, bodyObjectId?: string | null, manual = true) => {
+      let mediaRetry: Promise<void> = Promise.resolve();
+      if (manual && bodyObjectId == null) {
+        const currentUrls = storeApi.getState().mediaObjectUrls;
+        const relatedAttachments = [
+          ...post.attachments,
+          ...(post.reply_preview?.attachments ?? []),
+          ...(post.repost_of?.attachments ?? []),
+        ];
+        const accepted = retryMediaFetch(
+          relatedAttachments
+            .map((attachment) => attachment.hash)
+            .filter(
+              (hash, index, hashes) =>
+                currentUrls[hash] === null && hashes.indexOf(hash) === index
+            )
+        );
+        if (accepted.length > 0) {
+          mediaRetry = new Promise<void>((resolve) => {
+            let observedInFlight = false;
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timeoutId);
+              unsubscribe();
+              resolve();
+            };
+            const check = () => {
+              const retrying = storeApi.getState().mediaRetryingHashes;
+              if (accepted.some((hash) => retrying[hash])) observedInFlight = true;
+              if (observedInFlight && accepted.every((hash) => !retrying[hash])) finish();
+            };
+            const unsubscribe = storeApi.subscribe(check);
+            const timeoutId = window.setTimeout(finish, 35_000);
+            check();
+          });
+        }
+      }
+      const [updated] = await Promise.all([
+        api.retryPostElements(post.object_id, bodyObjectId ?? null, manual),
+        mediaRetry,
+      ]);
+      return updated;
+    },
+    [api, retryMediaFetch, storeApi]
+  );
 
   const {
     rememberDraftPreview,
@@ -905,6 +953,7 @@ export function useDesktopShellData({
   return {
     gatedAdultMediaHashes,
     retryMediaFetch,
+    reloadPostElements,
     loadTopics,
     retryCommunityNode,
     refreshConnectivityStatus,

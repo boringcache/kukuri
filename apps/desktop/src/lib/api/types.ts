@@ -317,6 +317,11 @@ export interface DesktopApi {
     cursor?: TimelineCursor | null,
     limit?: number
   ): Promise<TimelineView>;
+  retryPostElements(
+    objectId: string,
+    bodyObjectId?: string | null,
+    manual?: boolean
+  ): Promise<PostView | null>;
   getMyProfile(): Promise<Profile>;
   setMyProfile(input: ProfileInput): Promise<Profile>;
   followAuthor(pubkey: string): Promise<AuthorSocialView>;

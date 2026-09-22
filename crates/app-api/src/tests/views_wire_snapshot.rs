@@ -155,6 +155,7 @@ fn post_view_full() -> PostView {
                 picture_asset: Some(profile_asset()),
             },
             content: "parent content".to_string(),
+            content_status: BlobViewStatus::Available,
             attachments: vec![observed_attachment()],
             content_labels: Vec::new(),
             root_id: Some("root-1".to_string()),

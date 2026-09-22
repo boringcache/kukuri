@@ -751,9 +751,10 @@ export function useDesktopShellDataEffects({
           mediaFetchLedgerRef.current.requestManualRetry(hash)
       );
       if (accepted.length === 0) {
-        return;
+        return accepted;
       }
       setMediaRetryTick((tick) => tick + 1);
+      return accepted;
     },
     []
   );

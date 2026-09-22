@@ -139,7 +139,8 @@ fn reply_preview() -> Value {
     view(json!({"object_id": string(), "topic": string(),
         "author": view(json!({"pubkey": string(), "name": optional_string(), "display_name": optional_string(),
             "picture_asset": nullable(schema::profile_asset())})),
-        "content": string(), "attachments": array(schema::attachment()), "content_labels": array(string()),
+        "content": string(), "content_status": {"enum": ["Missing", "Available", "Pinned"]},
+        "attachments": array(schema::attachment()), "content_labels": array(string()),
         "root_id": optional_string(), "reply_to": optional_string()}))
 }
 

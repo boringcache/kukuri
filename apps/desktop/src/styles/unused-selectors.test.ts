@@ -15,6 +15,7 @@ const CSS_FILES = [
   'shell-phase1-part4.css',
   'shell-scoped-overrides.css',
   'column-span-workspace.css',
+  'bookmark-pagination.css',
 ] as const;
 
 // Classes that are intentionally declared without a source reference (injected

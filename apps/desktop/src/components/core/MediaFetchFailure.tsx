@@ -13,6 +13,7 @@ type MediaFetchFailureProps = {
   retrying?: boolean;
   testId?: string;
   className?: string;
+  onRetry?: () => void;
 };
 
 /// 自動取得が上限に達したメディアの代替表示。失敗した部分だけを置き換える。
@@ -21,6 +22,7 @@ export function MediaFetchFailure({
   retrying = false,
   testId,
   className,
+  onRetry,
 }: MediaFetchFailureProps) {
   const { t } = useTranslation('common');
   const retry = useContext(MediaRetryContext);
@@ -33,16 +35,21 @@ export function MediaFetchFailure({
       <p className='topic-diagnostic topic-diagnostic-secondary' role='status'>
         {retrying ? t('media.retryingFetch') : t('media.fetchFailed')}
       </p>
-      {retry && hashes.length > 0 ? (
+      {(onRetry || (retry && hashes.length > 0)) ? (
         <IconButton
           variant='secondary'
           type='button'
           className='media-fetch-retry'
           aria-disabled={retrying}
           aria-busy={retrying}
-          onClick={() => {
+          onClick={(event) => {
+            event.stopPropagation();
             if (!retrying) {
-              retry(hashes);
+              if (onRetry) {
+                onRetry();
+              } else {
+                retry?.(hashes);
+              }
             }
           }}
           label={t('media.retryFetch')}

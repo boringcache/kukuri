@@ -797,7 +797,7 @@ test('browser mock shell persists language changes across reloads', async ({ pag
   await expect(settingsDialog).toBeHidden();
   await openComposerDialog(page);
   await expect(page.getByPlaceholder('投稿を書く')).toBeVisible();
-  await expect(page.getByRole('button', { name: '投稿' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '投稿', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
 
   await page.reload();

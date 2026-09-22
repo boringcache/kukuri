@@ -110,7 +110,7 @@ test('missing text body does not occupy normal UI', async () => {
   expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
 });
 
-test('developer mode shows concise diagnostics after body and media become unavailable', async () => {
+test('body and media failures expose separate retry states', async () => {
   const api = createDesktopMockApi({
     seedPosts: {
       'kukuri:topic:general': [buildImagePost()],
@@ -120,8 +120,11 @@ test('developer mode shows concise diagnostics after body and media become unava
 
   render(<App api={api} />);
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Content unavailable.')).toBeInTheDocument();
-  expect(await within(getActiveColumn('Timeline')).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
+  await waitFor(
+    () =>
+      expect(within(getActiveColumn('Timeline')).getAllByText('Failed to load.')).toHaveLength(2),
+    FAILURE_WAIT
+  );
   expect(screen.queryByTestId('text-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
@@ -299,11 +302,14 @@ test('thread pane reuses the same unavailable media renderer', async () => {
   await waitFor(() => expect(getDetailPane('Thread')).toBeInTheDocument());
   const threadPanel = getDetailPane('Thread');
 
-  expect(await within(threadPanel).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
+  await waitFor(
+    () => expect(within(threadPanel).getAllByText('Failed to load.')).toHaveLength(2),
+    FAILURE_WAIT
+  );
   expect(within(threadPanel).queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
 });
 
-test('developer mode reports an unavailable text body without rendering its placeholder', async () => {
+test('an unavailable text body shows its retry state without rendering the placeholder', async () => {
   render(
     <App
       api={createDesktopMockApi({
@@ -314,7 +320,10 @@ test('developer mode reports an unavailable text body without rendering its plac
     />
   );
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Content unavailable.')).toBeInTheDocument();
+  expect(await within(getActiveColumn('Timeline')).findByText('Failed to load.')).toBeInTheDocument();
+  expect(
+    within(getActiveColumn('Timeline')).getByRole('button', { name: 'Retry loading' })
+  ).toBeInTheDocument();
   expect(screen.queryByTestId('text-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
 });
@@ -706,3 +715,48 @@ test('manual retry that fails returns to the failure display without looping', a
   expect(within(timeline).getByText('Failed to load.')).toBeInTheDocument();
   expect(calls).toBe(before + 1);
 });
+
+test('post reload action is rightmost and requests the whole card', async () => {
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'reloadable post', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  api.retryPostElements = vi.fn(async () => post);
+
+  render(<App api={api} />);
+
+  const timeline = getActiveColumn('Timeline');
+  const reload = await within(timeline).findByRole('button', { name: 'Reload post' });
+  const actions = reload.closest('.post-actions');
+  expect(actions).not.toBeNull();
+  expect(within(actions as HTMLElement).getAllByRole('button').at(-1)).toBe(reload);
+
+  await user.click(reload);
+  expect(api.retryPostElements).toHaveBeenCalledWith(post.object_id, null, true);
+});
+
+test('post reload stays busy until its failed media retry settles', async () => {
+  installObjectUrlMocks();
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'reload media with the card', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const retryPayload = createDeferred<{ bytes_base64: string; mime: string } | null>();
+  let recovering = false;
+  api.getBlobMediaPayload = async () =>
+    recovering ? retryPayload.promise : Promise.resolve(null);
+  api.retryPostElements = vi.fn(async () => post);
+
+  render(<App api={api} />);
+  const timeline = getActiveColumn('Timeline');
+  await within(timeline).findByTestId(`media-fetch-failure-${post.object_id}`, {}, FAILURE_WAIT);
+  const reload = within(timeline).getByRole('button', { name: 'Reload post' });
+  recovering = true;
+  await user.click(reload);
+
+  await waitFor(() => expect(reload).toHaveAttribute('aria-busy', 'true'));
+  expect(api.retryPostElements).toHaveBeenCalledWith(post.object_id, null, true);
+  expect(reload).toHaveAttribute('aria-busy', 'true');
+
+  act(() => retryPayload.resolve({ bytes_base64: 'ZmFrZS1pbWFnZQ==', mime: 'image/png' }));
+  await within(timeline).findByTestId(`media-preview-${post.object_id}`);
+  await waitFor(() => expect(reload).toHaveAttribute('aria-busy', 'false'));
+}, 10_000);
