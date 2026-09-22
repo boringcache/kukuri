@@ -5,6 +5,7 @@ import {
   DEFAULT_CLIENT_RESOURCE_BUDGET,
   createClientResourcePlan,
   readClientResourceBudget,
+  selectVisibleAvatarPeerIds,
 } from './MetaverseResourceBudgetModel';
 
 function model(name: string, triangles: number): MetaverseAssetRef {
@@ -23,6 +24,10 @@ function model(name: string, triangles: number): MetaverseAssetRef {
 }
 
 describe('createClientResourcePlan', () => {
+  it('selects the same deterministic peer window used by the render plan', () => {
+    expect(selectVisibleAvatarPeerIds(['c', 'a', 'b'], 2)).toEqual(['a', 'b']);
+  });
+
   it('falls back and then hides remote avatars deterministically at the boundary', () => {
     const budget = {
       ...DEFAULT_CLIENT_RESOURCE_BUDGET,

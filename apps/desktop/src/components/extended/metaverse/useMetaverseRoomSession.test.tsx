@@ -531,7 +531,7 @@ describe('useMetaverseRoomSession', () => {
 
     await act(async () => {
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1_100);
     });
 
     expect(vi.mocked(api.listMetaverseRoomEvents).mock.calls.length).toBeGreaterThanOrEqual(3);

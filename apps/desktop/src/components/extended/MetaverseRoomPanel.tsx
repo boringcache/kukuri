@@ -34,6 +34,7 @@ import {
   DEFAULT_AVATAR_ASSET_URL,
   type AvatarAssetStatus,
 } from './MetaverseSceneModel';
+import { useColumnRuntime } from '@/shell/ColumnRuntimeContext';
 
 type MetaverseRoomPanelProps = {
   loadError?: string | null;
@@ -75,6 +76,7 @@ export function MetaverseRoomPanel({
   onOpenCommunityNodeSettings,
 }: MetaverseRoomPanelProps) {
   const { t } = useTranslation('metaverse', { lng: locale });
+  const columnRuntime = useColumnRuntime();
   const managementContext = useMemo<SpatialContextV1>(() => activeChannel ? { kind: 'channel', topic_id: activeTopic, channel_id: activeChannel.channel_id } : { kind: 'topic', topic_id: activeTopic }, [activeTopic, activeChannel]);
   const [managedId, setManagedId] = useState<string | null>(null);
   const [managementRequest, setManagementRequest] = useState(0);
@@ -121,6 +123,8 @@ export function MetaverseRoomPanel({
     localDisplayName,
     localAvatarAssetRef,
     localAvatarAssetUrl,
+    avatarFetchActive:
+      columnRuntime.active && columnRuntime.visible && !columnRuntime.suspended,
     mutedAuthorPubkeys,
     initialSelectedRoomId,
     activeChannelId: activeChannel?.channel_id ?? null,

@@ -52,6 +52,13 @@ export type ClientResourcePlanInput = {
   neighborDomes?: Array<{ textureBytes: number; triangles: number }>;
 };
 
+export function selectVisibleAvatarPeerIds(
+  peerIds: Iterable<string>,
+  maxRenderedAvatars: number
+): string[] {
+  return [...peerIds].sort((left, right) => left.localeCompare(right)).slice(0, maxRenderedAvatars);
+}
+
 function assetTriangles(asset: MetaverseAssetRef | null): number {
   return asset?.budget_metadata?.model_triangles ?? 0;
 }
