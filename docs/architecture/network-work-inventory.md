@@ -66,6 +66,17 @@ irohのmapped address表は `mapped_addrs.rs::AddrMap` の正引き/逆引きHas
 
 ## Sensitive sinkの逆引き
 
+### 追加したbinding交換（P2実証、常設runtime未登録）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N29 | `fetch_receive_endpoint_binding` → endpoint connect/open_bi/read → `verify_for` | 候補1件、受付deadline、1,024byte、QUIC remote ID照合。完了/失敗/cancelでclose | `receive_binding_exchange_uses_authenticated_endpoint_without_cn`、`receive_binding_replay_from_another_endpoint_is_rejected`、`receive_binding_cancel_closes_the_connection` |
+| N30 | Router → `ReceiveBindingProtocol::accept/serve` → binding write | try_acquireで2要求、2秒、1byte request。失効検証、scope取得なし | `receive_binding_full_server_rejects_instead_of_waiting` |
+| N31 | `ReceiveBindingProtocol::new/replace` → binding更新 | account/endpoint/署名/時刻/単調更新。鍵は保持しない | `receive_binding_replacement_cannot_switch_account_or_endpoint`、core binding tests |
+
+この3行は§4.1の限定実装範囲。署名bindingを取り交わすだけでは、account routeのgossip配信、
+private capsule、旧DM outboxの移行を達成したとは扱わない。
+
 | sink | 既知の入口group | 必須の支配guard / 禁止副作用 | 差分前の残確認 |
 | --- | --- | --- | --- |
 | endpoint connect / gossip join,publish | N01/03/04、N07〜11、N13/14 | owner受付、protocol/scope候補、同意、endpoint世代。無関係/休止topicのI/O 0 | upstream内部の接続保持/再試行、各public trait caller |

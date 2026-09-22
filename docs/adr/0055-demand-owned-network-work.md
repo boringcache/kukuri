@@ -171,6 +171,34 @@ reply > quote_repost > repost > followed > mentionの優先度、既読状態、
 次の実装contractで固定する技術残件。対応する二端末contractが通るまで既存受信経路を削除しない。
 公開routeによる到達、private epoch隔離、offline DM再開の実証前にP2完了としない。
 
+### 4.1 endpoint bindingのwire契約
+
+P2の実現性確認として `core::ReceiveEndpointBindingV1` と
+`transport::ReceiveBindingProtocol` を実装する。account runtimeへの常時登録はP3で行い、
+bindingの追加だけで通知/DM受信経路を置換しない。
+
+- routeは `receive::v1::<hex>`。hexはBLAKE3の
+  `b"kukuri:account-receive-route:v1\0" || accountの32byte公開鍵` の小文字hex。
+- wireはversion、account、route、endpoint_id、issued_at_ms、expires_at_ms、signatureを持つJSON。
+  公開鍵/endpoint IDは小文字hex64桁、署名は小文字hex128桁。未知field/未知版を受け入れない。
+- 署名は固定順JSON配列
+  `["kukuri:receive-endpoint-binding:v1", version, account, route, endpoint_id, issued_at_ms, expires_at_ms]`
+  のUTF-8 bytesをSHA-256にし、既存account鍵でSchnorr署名する。
+- bindingの最大寿命は300,000ms、発行時刻の未来許容は60,000ms、失効時刻は排他的。
+  署名が正しくても失効後の利用を許可しない。複数端末は同じrouteに別endpointのbindingを持てる。
+- 交換のALPNは `/kukuri/receive-binding/1`。双方向streamへrequest `[1]` を送りFIN、
+  responseは最大1,024byteのbinding JSONとFIN。受信上限はdeserialize前に適用する。
+- serverは同時2要求まで、超過は待機せず接続を閉じる。1要求は2秒で終了する。
+  これはprotocol処理枠であり、上流のQUIC handshake/全接続数の上限を証明するものではない。
+- clientはownerの選択候補1件へ接続し、受付時からのdeadline内で照合する。内部retryを持たない。
+  照合先はwire中のendpoint IDの自己比較ではなく、QUICが認証した `Connection::remote_id()`。
+  結果・失敗・caller取消のいずれでもこの短期接続を閉じる。
+- bindingの更新は同一account/endpointの新しい発行時刻だけ。account切替/endpoint再構築は
+  runtimeの世代切替でhandlerごと置換する。未知accountのlistenerを旧accountのhandlerへ混ぜない。
+
+この交換が確認するのはaccountとendpointの対応であり、投稿scope・private能力・通知条件は
+後続の受信guardで別に確認する。外部送信は公開bindingだけで、秘密鍵・private参照・通知本文は含めない。
+
 ## 5. 保存・再起動・bucket切替（D8・D10）
 
 [ADR 0054](0054-time-bucketed-docs-replicas.md) のlocator・writer・回収契約を共通ownerへ接続する。
