@@ -13,8 +13,9 @@ Issue #1207 の AC-1 / AC-2 として、desktop が blob（画像・動画・本
 | backend: local blob store | blob bytes | blake3 hash | `<data root>/blobs.db` の `FsStore`（test と一部の構成は `MemStore`）。GC は設定していない（`BlobStoreOptions::new` の既定 `gc: None`）。容量上限・保持期間は無い | `crates/iroh-node/src/node.rs` |
 | backend: pin | metaverse 用の tag と in-memory の pinned 集合 | blob hash | tag は store に永続。pinned 集合はプロセス内 | `crates/blob-service/src/lib.rs` の `pin_blob` / `unpin_blob` |
 | backend: projection の blob 状態 | 添付ごとの `BlobCacheStatus`（`Available` / `Missing` など） | blob hash | projection store に永続。表示用で、local の有無だけを見る（remote 取得しない） | `crates/app-api/src/service/object_persistence_support.rs` の `best_effort_blob_view_status` |
-| backend: remote 取得の retry state | 失敗クールダウン（3 秒）、実行中の走査の予約 | hash（bounded 取得は `bounded:{limit}:{hash}`）。予約は保存先ごとに分ける | プロセス内。期限切れのクールダウンは `finish` のたびに捨てる。blob-service と docs-sync が別々に 1 つずつ持つ | `crates/transport/src/peers.rs` の `RemoteFetchRetryState` |
-| backend: peer 台帳 | peer ごとの接続状態、取得の成否、backoff（2〜60 秒）、要求頻度（peer あたり 16 回 / 秒） | endpoint id | プロセス内。削除経路は無い（#1224 で扱う） | `crates/transport/src/peers.rs` の `PeerAddrBook` |
+| backend: remote取得のretry state | 失敗cooldown（3秒） | hash（bounded取得は `bounded:{limit}:{hash}`） | serviceごと最大1,024件、key最大256byte。期限索引で回収し、満杯なら期限の近い記録を捨てる。プロセス内だけ | `crates/transport/src/peers.rs` の `RemoteFetchRetryState` |
+| backend: 取得の共通受付 | 表示lease、通常取得の合流・queue・実行・完了 | node/service世代、保存方針、flight key、byte limit、最初の受付deadline | このadapterを通る取得をnode共通64scope/8実行、1flight64waiters。待機中はfutureだけを持ちtaskをspawnしない | `crates/iroh-node/src/network_work.rs` / `network_work/fetch.rs` |
+| backend: peer 台帳 | peer ごとの接続状態、取得の成否、backoff（2〜60 秒）、要求頻度（peer あたり 16 回 / 秒） | endpoint id | プロセス内。削除経路は無い（集約先#1221で扱う） | `crates/transport/src/peers.rs` の `PeerAddrBook` |
 
 `BlobMediaPayload`（base64 の bytes）は IPC の応答として渡るだけで、backend 側の memory キャッシュは無い。
 画面側は応答から object URL を作り、以後はその URL を使う。
@@ -71,11 +72,9 @@ relay 経由の接続確立や提供 peer の一時的な不在（数十秒）�
 ### backend 側の契約
 
 - 同じ対象の remote 走査は 1 本だけにする。実行中に届いた要求は同じ結果に合流する。
-- 走査は呼び出し側の future から切り離した task で最後まで実行する。呼び出し側が外側の timeout や cancel で待つのをやめても、
-  失敗クールダウン（3 秒）と peer 単位の成否は必ず記録される。
+- 開始した通常の走査は呼出元から独立したtaskで最後まで所有し、待機者のcancel後も成否と3秒cooldownを記録する。待機queueの最後の需要が消えた場合は、後からI/Oを開始しない（#1221 NW-4）。cooldownは最大1,024件の一時cacheで、容量超過時は近い期限から回収する。
 - 保存先が違う取得（永続 / 一時 / 上限つき一時）は合流させない。一時取得の bytes を保存経路へ混ぜないためである。クールダウンの key は共有する。
-- 同時に実行する走査は retry state ごとに 8 本まで。超過分は順番を待つ。blob の取得（blob-service）と docs entry の取得（docs-sync）は
-  別の retry state を持つため、取得できない blob の走査が docs entry の取得を待たせることはない。順番待ちの時間は走査の総予算 30 秒に含めない。
+- 明示的な通常取得と表示取得はnode共通で8実行まで。最大64scopeのqueueを持ち、順番待ちも最初の受付から30秒に含める。合流で期限を延ばさず、満杯は型付きの延期エラー。終了時はqueue/実行を取消し、結果を返さない。native docsの自動downloader等、このadapterを通らない内部処理の統合は#1221の残作業。
 
 ## restart・account 切替
 
@@ -91,7 +90,7 @@ relay 経由の接続確立や提供 peer の一時的な不在（数十秒）�
 - local blob store に容量上限・GC・保持期間が無い。取得した blob は増え続ける。
 - `put_blob` は一時 tag で追加するだけで、pin していない blob を保護する仕組みは無い（現状は GC が無いため消えない）。
 - 画面側の `mediaObjectUrls` と object URL に件数の上限が無い。長時間の閲覧で memory が増える（#1221 の調査で記録）。
-- peer 台帳に削除経路が無い（#1224）。
+- peer 台帳に削除経路が無い（集約先#1221）。
 - 本文 blob の取得は #1225 で有限にした。local に無い本文は hash 単位の台帳（`MissingBodyLedger`）に従い、5 秒・30 秒・2 分・10 分の間隔で最大 8 試行、
   同時実行は 4 本まで。取得側の反映（窓の追いつき・ページの範囲の照合、#1239）も同じ台帳に従う。上限に達した後は、その行を指す docs event / hint の個別反映と再起動でだけ取り直す
   （`docs/progress/2026-09-20-1225-timeline-hydration-finite.md`）。

@@ -25,6 +25,9 @@ use crate::config::SeedPeer;
 use crate::tickets::relay_assisted_endpoint_addr;
 
 pub const REMOTE_FETCH_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
+pub const REMOTE_FETCH_MAX_COOLDOWNS: usize = 1_024;
+const REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES: usize = 256;
+static REMOTE_FETCH_STATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// 1 つの retry state が同時に実行する remote 走査の上限(#1207)。超過分は順番を待つ。
 pub const REMOTE_FETCH_MAX_CONCURRENT_WALKS: usize = 8;
 const PEER_FETCH_BACKOFF_BASE: Duration = Duration::from_secs(2);
@@ -191,15 +194,13 @@ pub enum RemoteFetchBegin {
     CoolingDown,
 }
 
-/// リモートフェッチ失敗のクールダウン(対象キー毎)と、実行中の走査の予約(#1207)。
-///
-/// 同じ flight key の走査は 1 本だけにする。実行中の予約は `finish` まで残るため、
-/// 呼び出し側が途中で待つのをやめても、後続の呼び出しが並行して走査を始めることはない。
-///
-/// 走査の同時実行数もこの state ごとに数える。blob の取得と docs entry の取得は別の state を
-/// 持つため、取得できない blob の走査が docs entry の取得を待たせることはない。
+/// serviceごとの失敗cooldown。明示的なremote取得の合流と実行枠は
+/// iroh-nodeのNetworkWorkRuntimeがnode単位で所有する（#1221）。
+/// `begin`の旧予約APIとwalk permitは互換用に残すが、通常取得taskは起動しない。
 pub struct RemoteFetchRetryState {
+    instance_id: u64,
     retry_after: BTreeMap<String, Instant>,
+    retry_deadlines: BTreeSet<(Instant, String)>,
     in_flight: BTreeMap<String, RemoteFetchResultReceiver>,
     walk_permits: Arc<Semaphore>,
 }
@@ -207,7 +208,11 @@ pub struct RemoteFetchRetryState {
 impl Default for RemoteFetchRetryState {
     fn default() -> Self {
         Self {
+            instance_id: REMOTE_FETCH_STATE_SEQUENCE
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("remote fetch service identity exhausted"),
             retry_after: BTreeMap::new(),
+            retry_deadlines: BTreeSet::new(),
             in_flight: BTreeMap::new(),
             walk_permits: Arc::new(Semaphore::new(REMOTE_FETCH_MAX_CONCURRENT_WALKS)),
         }
@@ -215,6 +220,17 @@ impl Default for RemoteFetchRetryState {
 }
 
 impl RemoteFetchRetryState {
+    /// Process-local service generation, never reused after this ledger drops.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    pub fn is_cooling_down(&self, key: &str, now: Instant) -> bool {
+        self.retry_after
+            .get(key)
+            .is_some_and(|deadline| *deadline > now)
+    }
+
     /// `cooldown_key` は失敗クールダウンの単位、`flight_key` は合流の単位。
     /// 保存先が異なる取得(永続 / 一時)は `flight_key` を分けて合流させない。
     pub fn begin(
@@ -237,7 +253,7 @@ impl RemoteFetchRetryState {
         {
             return RemoteFetchBegin::CoolingDown;
         }
-        self.retry_after.remove(cooldown_key);
+        self.remove_cooldown(cooldown_key);
         let (sender, receiver) = watch::channel(None);
         self.in_flight.insert(flight_key.to_string(), receiver);
         RemoteFetchBegin::Lead(sender)
@@ -245,13 +261,34 @@ impl RemoteFetchRetryState {
 
     pub fn finish(&mut self, cooldown_key: &str, flight_key: &str, success: bool, now: Instant) {
         self.in_flight.remove(flight_key);
-        // 期限切れのクールダウンを残さない(台帳を有限に保つ)。
-        self.retry_after.retain(|_, retry_after| *retry_after > now);
-        if success {
-            self.retry_after.remove(cooldown_key);
-        } else {
-            self.retry_after
-                .insert(cooldown_key.to_string(), now + REMOTE_FETCH_RETRY_COOLDOWN);
+        while let Some((deadline, key)) = self.retry_deadlines.first() {
+            if *deadline > now {
+                break;
+            }
+            let key = key.clone();
+            self.remove_cooldown(&key);
+        }
+        self.remove_cooldown(cooldown_key);
+        if success || cooldown_key.len() > REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES {
+            return;
+        }
+        if self.retry_after.len() >= REMOTE_FETCH_MAX_COOLDOWNS {
+            let (_, key) = self
+                .retry_deadlines
+                .first()
+                .expect("nonempty cooldown index")
+                .clone();
+            self.remove_cooldown(&key);
+        }
+        let deadline = now + REMOTE_FETCH_RETRY_COOLDOWN;
+        self.retry_after.insert(cooldown_key.to_owned(), deadline);
+        self.retry_deadlines
+            .insert((deadline, cooldown_key.to_owned()));
+    }
+
+    fn remove_cooldown(&mut self, key: &str) {
+        if let Some(deadline) = self.retry_after.remove(key) {
+            self.retry_deadlines.remove(&(deadline, key.to_owned()));
         }
     }
 
@@ -781,5 +818,23 @@ mod tests {
         let _ = state.begin("hash-z", "hash-z", later);
         state.finish("hash-z", "hash-z", false, later);
         assert_eq!(state.cooldown_len(), 1);
+    }
+
+    #[test]
+    fn remote_fetch_failure_history_has_a_fixed_capacity() {
+        let now = Instant::now();
+        let mut state = RemoteFetchRetryState::default();
+        for index in 0..10_240 {
+            let key = format!("hash-{index:05}");
+            state.finish(&key, &key, false, now);
+        }
+        assert_eq!(state.cooldown_len(), 1_024);
+        assert!(state.is_cooling_down("hash-10239", now));
+        state.finish("fresh", "fresh", true, now + REMOTE_FETCH_RETRY_COOLDOWN);
+        assert_eq!(state.cooldown_len(), 0);
+        let oversized = "x".repeat(REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES + 1);
+        state.finish(&oversized, &oversized, false, now);
+        assert_eq!(state.cooldown_len(), 0);
+        assert!(state.retry_deadlines.is_empty());
     }
 }

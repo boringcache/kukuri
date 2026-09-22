@@ -186,8 +186,18 @@ N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 
 
 | ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N44 | app-api `SessionProjectionRegistry::schedule` → BlobService trait / stack proxy → `IrohBlobService::prepare_display_fetch` → `remote_fetch::prepare_display_fetch` → `DisplayWorkAdmission::acquire` | LocalOnlyの既存fast pathは別。remoteだけnode共通64lease/8枠、deadlineは受付から30秒、待機spawnなし、hash32byte。既存walk枠も準備成功前に取得 | DISPLAY-1/4、`display_admission_wait_is_included_in_total_budget`（修正前FAIL）、`display_admission_is_shared_across_services_using_one_node` |
+| N44 | app-api `SessionProjectionRegistry::schedule` → BlobService trait / stack proxy → `IrohBlobService::prepare_display_fetch` → `remote_fetch::prepare_display_fetch` → `NetworkWorkRuntime::acquire` | LocalOnlyの既存fast pathは別。remoteだけnode共通64lease/8枠、deadlineは受付から30秒、待機spawnなし、hash32byte。既存walk枠も準備成功前に取得 | DISPLAY-1/4、`display_admission_wait_is_included_in_total_budget`（修正前FAIL）、`display_admission_is_shared_across_services_using_one_node` |
 | N45 | 準備済み表示future → `lease.cancelled`と実fetchのselect → 検証済み一時bytes返却 | deadline/closeを優先、finishで世代/期限判定。caller dropでleaseと取得future/旧permitを解放。app-api保存前のscope/token guardを維持 | DISPLAY-2/3、既存caller取消と新node終了の実QUIC tests、adapter queue/close tests |
-| N46 | node `shutdown/shutdown_owned/Drop` → `DisplayWorkAdmission::close` → active scope失効と通知 | 受付を先に閉じ、queued/準備済み/実行中を取消。停止応答までは枠を保持し別nodeは独立。nodeの既存Router/endpoint停止は維持 | DISPLAY-3、`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes` / `display_node_close_does_not_stop_another_nodes_work` |
+| N46 | node `shutdown/shutdown_owned/Drop` → `NetworkWorkRuntime::close` → active scope失効と通知 | 受付を先に閉じ、queued/準備済み/実行中を取消。停止応答までは枠を保持し別nodeは独立。nodeの既存Router/endpoint停止は維持 | DISPLAY-3、`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes` / `display_node_close_does_not_stop_another_nodes_work` |
 
 N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstackのproxyを含む。remote helperへのproduction callerはIrohBlobServiceだけ。新台帳に秘密値/本文を保持せず、bytesの保存sinkは従来の`cache_and_project_displayed_manifest`でscope/tokenを再確認する。通常fetch・docs・gossipはこのadapterへ未移行なので、全networkの合計8枠達成とは扱わない。
+
+## 明示的な通常取得の共通受付（P3）
+
+| ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N47 | BlobService/DocsSyncのremote helper（通常/一時/上限付き一時）→ `run_single_flight` → retry guard → `NetworkWorkRuntime::submit_fetch` | 非再利用のservice世代＋flight key、persistence/byte limit一致、最初のdeadline、64scope/64waiters。LocalOnly fast pathは入らない | FETCH-1/2、既存singleflight/result/取消/保存方針tests、waiter上限/cooldown-join test |
+| N48 | 単一driverの期限/ready/task完了 → 実行枠取得済みfutureだけspawn → 成否callback → flight退役/結果通知 | 表示と通常の合計8。待機時spawn0、期限/cancel/panic/closeの精算、callbackとfuture Dropはlock外、結果反映は現在世代だけ | FETCH-1〜3、`ordinary_fetch_waits_for_the_same_capacity_as_display_work`、node close/panic/reentrant Drop tests |
+| N49 | `RemoteFetchRetryState::finish/is_cooling_down` → retry_after/期限索引 | 3秒cache、1,024件、key256byte、容量時は近い期限から回収。全件retainなし。未送信outboxは対象外 | FETCH-4、`remote_fetch_failure_history_has_a_fixed_capacity`（修正前10,240件FAIL）、既存cooldown tests |
+
+通常helperの全callerは `rg -n 'fetch_bytes_.*cooldown|run_single_flight|submit_fetch' crates`。runtimeのsubmit callerはremote_fetchだけで、ほかはtests。旧`RemoteFetchBegin::begin`の予約APIは互換/tests向けに残るが、productionの通常取得は使用しない。表示の既存walk permitは追加制約として残す。SDK内部の自動downloader/peer走査・全protocolのscope世代接続はU08等の残作業。
