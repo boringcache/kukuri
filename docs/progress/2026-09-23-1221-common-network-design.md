@@ -231,3 +231,24 @@ runtimeの表示＋通常の容量共有、waiter上限と合流期限、panic�
 head `0d4506ad`の独立監査はN47/FETCH-2でFAIL。service IDにretry Arcのアドレスを使うと、完了callbackが最後のArcをdropしてからidentityを退役するまで、旧identityが残ったままそのアドレスを再利用できる。callback/queueがArcを保持するという最初の説明は、この最後の窓を覆っていなかった。
 
 修正前の所有権順序を監査で確認し、allocatorの再利用時機を成功条件にする不安定なtestは置かず、旧serviceをdropしてidentity退役前で止めるcontractを追加した。retry台帳の構築時に単調な非再利用IDを割当て、取得時はそのIDを使う。`retired_service_identity_cannot_be_reused_before_old_flight_is_removed`は旧serviceをcallbackで解放し、同じkeyの新serviceが別flightになって別の結果を得ることを確認して1件成功。cooldown記録→identity退役の順序は維持する。修正deltaの独立監査を別途行う。
+
+## P3: blob protocolの成否台帳と有界なpeer候補
+
+共有対象はblob protocolの成否・接続観測・要求頻度。learned/seed/importedの入口台帳はservice別に維持する。単純に入口台帳も共有すると、blob側の先行learnでdocs側の変更boolがfalseになり、既存reapplyを省略するためである。gossip/docs同期の観測をblob成功へ混ぜない。
+
+- PEER-1（NW-6/D6）: 型付きNotFound/部分欠損を接続不良と区別する。現SDKが欠損にも返すERR_INTERNAL(3)は本当の内部エラーと区別不能なので「拒否/内部結果」として別計数し、NotFoundと断定しない。接続不良はbackoffし、ローカル保存失敗はpeerへ転嫁しない。
+- PEER-2（NET-AC-2/3）: 同じnodeのdocs/blob helperはblob成否/要求頻度を共有し、入口台帳の変更通知・既存のsource優先度を維持する。
+- PEER-3（NET-AC-2）: 成否cacheとP2P要求頻度のsubjectを各1,024件に制限する。稼働attemptはRAIIで保持し、古い完了が新しい世代を上書きしない。頻度窓の途中で記録を捨てて制限を迂回させない。
+- PEER-4（NET-AC-2/3）: fetchの候補はlearned/seed/importedをそれぞれ最大4件のcursorで読み、最大12候補だけ順位付けし最大4peerを選ぶ。全historyのclone/sortを行わず、次回は窓を進める。source自体の保持とnative同期/診断の全件APIは後続。
+
+変更はtransportのpeer部品、iroh-node composition/remote fetch、docs-sync/blob-serviceのconstructorと関連tests。実NotFoundの修正前testは失敗を5件計上してFAILした。candidate読取り量とcache/要求頻度を境界testで固定し、既存connect候補順序と実blob往復をローカルで確認する。全体/slowはPR/CI、固定headは独立監査する。
+
+### blob protocolのpeer観測と候補窓の局所結果
+
+`PeerAddrBook`のlearned/seed/importedはdocs/blobそれぞれのままにし、node所有`BlobPeerHealth`だけを共有した。入口台帳まで統合するとblob側の先行learn後にdocs側の変更boolがfalseとなりreapplyを失うため。healthはblob ALPNの接続/検証済み転送の観測・要求頻度だけを持ち、gossip/docs同期の成功として流用しない。
+
+- 実Irohの空providerへStore/Ephemeral/Boundedの3種類で問合せると、修正前は5件の転送失敗を記録した。pin済みiroh-blobs 0.103.0はこの欠損もstream reset `ERR_INTERNAL(3)`で返すため、欠損と確定できない。型付き欠損は`fetch_misses`、3等のstream応答は`fetch_rejections`へ分離し、どちらも接続不良のbackoffを増やさない。ローカルblob store故障はpeer失敗にせず呼出元へエラーで返す。両実Iroh testsが成功。
+- 1nodeの成否cache1,024件とP2P要求頻度subject1,024件を別に上限化した。接続attemptが使う観測をArcでpinし、古い世代の遅い終了は新しい接続判定を上書きしない。生存する要求頻度窓は容量超過時に捨てず、新しいsubjectを延期する。履歴2,048件、全1,024件pin、頻度窓の関連testsが成功。
+- 取得候補は各sourceでcursorを進めながら最大4 IDだけ読み、直近に成功した2 IDと30秒以内に得た4 IDを同じsourceに存在する場合だけ加える。実addressを最大12件だけmaterialize/rankし、1要求は最大4peerへ進む。新しいmanual ticketが既存の成功peer4件に押し出される失敗を修正前に再現し、最新ticketを4枠に含める。直近ticketの連続blob要求も修正前FAIL→修正後PASS。source履歴100/1,000件で読取りは各source4以下、別bookにだけ存在する健康peerは選択0。transport関連testsと実blob取得・docsのdirect候補testが成功。
+
+保存済みsource台帳とSDK内部address mapはまだ上限化していない。`merged_peers`、`available_peer_ids`、保存/復旧のsnapshotは全sourceを読むのでP3に残し、この結果を全peer経路の完了とは判定しない。protocolごとのroute優先度はper-peer `connect_candidates`のdirect→remote_info→relay順を維持した。全体・slow/複数nodeの確認はPR/CIへ委譲する。

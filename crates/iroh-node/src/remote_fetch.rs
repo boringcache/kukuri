@@ -391,6 +391,53 @@ where
     }
 }
 
+enum BlobTransferFailure {
+    Missing,
+    Rejected,
+    Local,
+    Remote,
+}
+
+fn classify_blob_transfer(error: &iroh_blobs::get::GetError) -> BlobTransferFailure {
+    use iroh_blobs::protocol::{ERR_INTERNAL, ERR_LIMIT, ERR_PERMISSION};
+    // The pinned provider reports absent data as ERR_INTERNAL, which also
+    // covers genuine server faults. Preserve that ambiguity: a stream-level
+    // application reply is neither proven NotFound nor a transport failure.
+    // Connection-close codes occupy a different namespace, so do not use them.
+    if (error.remote_read().is_some() || error.remote_write().is_some())
+        && error
+            .iroh_error_code()
+            .is_some_and(|code| code == ERR_INTERNAL || code == ERR_LIMIT || code == ERR_PERMISSION)
+    {
+        return BlobTransferFailure::Rejected;
+    }
+    use iroh_blobs::get::{
+        GetError,
+        fsm::{AtBlobHeaderNextError, DecodeError},
+    };
+    match error {
+        GetError::AtBlobHeaderNext {
+            source: AtBlobHeaderNextError::NotFound { .. },
+            ..
+        }
+        | GetError::Decode {
+            source:
+                DecodeError::ChunkNotFound { .. }
+                | DecodeError::ParentNotFound { .. }
+                | DecodeError::LeafNotFound { .. },
+            ..
+        } => BlobTransferFailure::Missing,
+        GetError::LocalFailure { .. }
+        | GetError::IrpcSend { .. }
+        | GetError::BadRequest { .. }
+        | GetError::Decode {
+            source: DecodeError::Write { .. },
+            ..
+        } => BlobTransferFailure::Local,
+        _ => BlobTransferFailure::Remote,
+    }
+}
+
 async fn fetch_bytes_from_remote(
     node: &IrohDocsNode,
     peers: &PeerAddrBook,
@@ -401,11 +448,12 @@ async fn fetch_bytes_from_remote(
     mode: FetchMode,
 ) -> Result<Option<Vec<u8>>> {
     let imported_peers = peers.ranked_peers().await;
+    let mut had_transport_failure = false;
     info!(
         subject,
         hash = %hash_text,
         error = %local_error,
-        configured_peer_count = imported_peers.len(),
+        selected_peer_count = imported_peers.len(),
         "fetch local miss, trying remote peers"
     );
     for imported_peer in imported_peers {
@@ -431,7 +479,9 @@ async fn fetch_bytes_from_remote(
                 );
                 break;
             }
-            let connection_generation = peers.begin_connection_attempt(imported_peer.id).await;
+            let Some(attempt) = peers.begin_fetch_attempt(imported_peer.id).await else {
+                break;
+            };
             match timeout(
                 REMOTE_FETCH_CONNECT_TIMEOUT,
                 node.endpoint().connect(peer.clone(), iroh_blobs::ALPN),
@@ -439,13 +489,7 @@ async fn fetch_bytes_from_remote(
             .await
             {
                 Ok(Ok(conn)) => {
-                    peers
-                        .record_connection_state(
-                            imported_peer.id,
-                            connection_generation,
-                            PeerConnectionStatus::Connected,
-                        )
-                        .await;
+                    attempt.connection(PeerConnectionStatus::Connected).await;
                     info!(
                         subject,
                         hash = %hash_text,
@@ -463,12 +507,7 @@ async fn fetch_bytes_from_remote(
                             .await
                             {
                                 Ok(Ok(_)) => {
-                                    peers
-                                        .record_fetch_success(
-                                            imported_peer.id,
-                                            transfer_started.elapsed(),
-                                        )
-                                        .await;
+                                    attempt.success(transfer_started.elapsed()).await;
                                     info!(
                                         subject,
                                         hash = %hash_text,
@@ -477,12 +516,21 @@ async fn fetch_bytes_from_remote(
                                     );
                                 }
                                 Ok(Err(error)) => {
-                                    peers
-                                        .record_fetch_failure(
-                                            imported_peer.id,
-                                            PeerFetchFailure::TransferFailed,
-                                        )
-                                        .await;
+                                    match classify_blob_transfer(&error) {
+                                        BlobTransferFailure::Missing => {
+                                            attempt.failure(PeerFetchFailure::NotFound).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Rejected => {
+                                            attempt.failure(PeerFetchFailure::Rejected).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Local => return Err(error.into()),
+                                        BlobTransferFailure::Remote => {
+                                            had_transport_failure = true;
+                                            attempt.failure(PeerFetchFailure::TransferFailed).await
+                                        }
+                                    }
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -494,12 +542,8 @@ async fn fetch_bytes_from_remote(
                                     continue;
                                 }
                                 Err(_) => {
-                                    peers
-                                        .record_fetch_failure(
-                                            imported_peer.id,
-                                            PeerFetchFailure::TransferTimeout,
-                                        )
-                                        .await;
+                                    had_transport_failure = true;
+                                    attempt.failure(PeerFetchFailure::TransferTimeout).await;
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -534,12 +578,7 @@ async fn fetch_bytes_from_remote(
                             .await
                             {
                                 Ok(Ok(bytes)) => {
-                                    peers
-                                        .record_fetch_success(
-                                            imported_peer.id,
-                                            transfer_started.elapsed(),
-                                        )
-                                        .await;
+                                    attempt.success(transfer_started.elapsed()).await;
                                     info!(
                                         subject,
                                         hash = %hash_text,
@@ -552,12 +591,25 @@ async fn fetch_bytes_from_remote(
                                     if error.is::<BlobTooLarge>() {
                                         return Err(error);
                                     }
-                                    peers
-                                        .record_fetch_failure(
-                                            imported_peer.id,
-                                            PeerFetchFailure::TransferFailed,
-                                        )
-                                        .await;
+                                    match error
+                                        .downcast_ref::<iroh_blobs::get::GetError>()
+                                        .map(classify_blob_transfer)
+                                        .unwrap_or(BlobTransferFailure::Remote)
+                                    {
+                                        BlobTransferFailure::Missing => {
+                                            attempt.failure(PeerFetchFailure::NotFound).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Rejected => {
+                                            attempt.failure(PeerFetchFailure::Rejected).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Local => return Err(error),
+                                        BlobTransferFailure::Remote => {
+                                            had_transport_failure = true;
+                                            attempt.failure(PeerFetchFailure::TransferFailed).await
+                                        }
+                                    }
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -569,12 +621,8 @@ async fn fetch_bytes_from_remote(
                                     continue;
                                 }
                                 Err(_) => {
-                                    peers
-                                        .record_fetch_failure(
-                                            imported_peer.id,
-                                            PeerFetchFailure::TransferTimeout,
-                                        )
-                                        .await;
+                                    had_transport_failure = true;
+                                    attempt.failure(PeerFetchFailure::TransferTimeout).await;
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -590,9 +638,8 @@ async fn fetch_bytes_from_remote(
                     }
                 }
                 Ok(Err(error)) => {
-                    peers
-                        .record_fetch_failure(imported_peer.id, PeerFetchFailure::ConnectFailed)
-                        .await;
+                    had_transport_failure = true;
+                    attempt.failure(PeerFetchFailure::ConnectFailed).await;
                     warn!(
                         subject,
                         hash = %hash_text,
@@ -603,9 +650,8 @@ async fn fetch_bytes_from_remote(
                     );
                 }
                 Err(_) => {
-                    peers
-                        .record_fetch_failure(imported_peer.id, PeerFetchFailure::ConnectTimeout)
-                        .await;
+                    had_transport_failure = true;
+                    attempt.failure(PeerFetchFailure::ConnectTimeout).await;
                     warn!(
                         subject,
                         hash = %hash_text,
@@ -618,11 +664,11 @@ async fn fetch_bytes_from_remote(
             }
         }
     }
-    warn!(
-        subject,
-        hash = %hash_text,
-        "fetch exhausted remote peers without success"
-    );
+    if had_transport_failure {
+        warn!(subject, hash = %hash_text, "fetch exhausted selected peers after transport failures");
+    } else {
+        info!(subject, hash = %hash_text, "fetch ended without content from the selected peer window");
+    }
     Ok(None)
 }
 

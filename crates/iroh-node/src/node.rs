@@ -145,6 +145,7 @@ pub struct IrohDocsNode {
     router: Arc<Router>,
     docs: DocsApi,
     blobs: BlobStore,
+    fetch_peer_health: Arc<kukuri_transport::BlobPeerHealth>,
     pub(crate) network_work: Arc<crate::network_work::NetworkWorkRuntime>,
     shutdown_started: AtomicBool,
     shutdown_result: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
@@ -357,6 +358,7 @@ impl IrohDocsNode {
             router: Arc::new(router),
             docs: docs.api().clone(),
             blobs,
+            fetch_peer_health: Arc::new(kukuri_transport::BlobPeerHealth::default()),
             network_work: Arc::new(crate::network_work::NetworkWorkRuntime::default()),
             shutdown_started: AtomicBool::new(false),
             shutdown_result: tokio::sync::watch::channel(None).0,
@@ -377,6 +379,10 @@ impl IrohDocsNode {
 
     pub fn discovery(&self) -> Arc<MemoryLookup> {
         self.discovery.clone()
+    }
+
+    pub fn fetch_peer_health(&self) -> Arc<kukuri_transport::BlobPeerHealth> {
+        self.fetch_peer_health.clone()
     }
 
     pub async fn relay_urls(&self) -> Vec<RelayUrl> {

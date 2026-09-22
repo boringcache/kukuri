@@ -360,3 +360,13 @@ queueに保持する診断ラベルはsubject128byte/error4,096byte、hash/fligh
 
 native docsの自動downloader、gossip、peer台帳、意味上のscope世代/需要理由の全caller接続は未完了。
 このadapterを通る取得の合計上限を、SDK内部を含む全通信の上限達成と読み替えない。
+
+## blob protocolのpeer観測と候補選択
+
+`IrohDocsNode`はblob ALPN専用の`BlobPeerHealth`を一つ持つ。docs-sync/blob-serviceは接続観測、検証済み転送、要求頻度を共有するが、learned/seed/importedの入口台帳は別に保持する。これによりdocs側の変更検知とscopeを保ち、他serviceのhealthだけでpeerを候補へ追加しない。
+
+実行/待機のnode予算とは別に、観測とP2P頻度subjectを各1,024件にする。実行中のattemptは観測をpinして期限まで保持し、遅い旧世代の結果で新世代のstatus/backoffを上書きしない。頻度窓を途中でevictして制限を迂回させず、満杯は延期する。3秒のhash別cooldownは前節のまま。
+
+fetch側は各sourceのcursorから最大4 IDを読み、直近に成功した2 ID/30秒以内の新peer4 IDを候補へ加える。入口台帳に存在する場合だけ最大12件のaddressをmaterializeし、最大4peerを選ぶ。明示的に取り込んだ直近ticketは、既存の成功peer4件がいても4枠へ含める。1peer内の接続候補は既存のdirect→remote_info→relay順を変えない。source台帳の永続意思と現在の選択窓は別であり、この窓から外れても保存済み投稿を削除しない。
+
+remote hashの型付き欠損はpeerの接続失敗とせず、欠損counterへ入れる。pin済みiroh-blobsは実際の欠損にも`ERR_INTERNAL(3)`を返すため、このコードをNotFoundと断定せず別の拒否/内部結果counterへ入れる。どちらも接続不能のbackoffを増やさず、別addressで同じendpointを再試行しない。ローカルstoreの失敗もpeerへ転嫁しない。署名・capability・audienceの検証とprivate hashの取得先制限をこのscoreで代用しない。

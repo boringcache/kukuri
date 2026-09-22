@@ -1,5 +1,103 @@
 use super::*;
 
+#[tokio::test]
+async fn missing_blob_does_not_penalize_a_reachable_peer() {
+    let client = IrohDocsNode::memory().await.unwrap();
+    let provider = IrohDocsNode::memory().await.unwrap();
+    let peers = Arc::new(PeerAddrBook::new(
+        client.endpoint().clone(),
+        client.discovery(),
+    ));
+    peers
+        .insert_imported_peer_addr(provider.endpoint().addr())
+        .await;
+    for (index, mode) in [
+        FetchMode::Store,
+        FetchMode::Ephemeral,
+        FetchMode::EphemeralBounded(1024),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let retries = Arc::new(Mutex::new(RemoteFetchRetryState::default()));
+        let hash = iroh_blobs::Hash::new(format!("missing-{index}"));
+        let result = fetch_bytes_with_cooldown_mode(
+            &client,
+            &peers,
+            &retries,
+            "missing test blob",
+            &hash.to_string(),
+            hash,
+            "missing locally",
+            mode,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, None);
+    }
+    let state = peers
+        .peer_state_snapshot(provider.endpoint().id())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+    provider.shutdown().await.unwrap();
+    assert_eq!(
+        state.fetch_failures, 0,
+        "object absence is not a peer transport failure"
+    );
+    assert_eq!(state.consecutive_fetch_failures, 0);
+    assert_eq!(state.connection_status, PeerConnectionStatus::Connected);
+    assert_eq!(
+        state.fetch_misses + state.fetch_rejections,
+        3,
+        "one application response per mode, without retrying this endpoint's other address"
+    );
+}
+
+#[tokio::test]
+async fn local_blob_store_failure_does_not_penalize_the_provider() {
+    let client = IrohDocsNode::memory().await.unwrap();
+    let provider = IrohDocsNode::memory().await.unwrap();
+    let tag = provider
+        .blobs()
+        .blobs()
+        .add_bytes(b"available remotely".to_vec())
+        .await
+        .unwrap();
+    let peers = Arc::new(PeerAddrBook::new(
+        client.endpoint().clone(),
+        client.discovery(),
+    ));
+    peers
+        .insert_imported_peer_addr(provider.endpoint().addr())
+        .await;
+    client.blobs().shutdown().await.unwrap();
+    let retries = Arc::new(Mutex::new(RemoteFetchRetryState::default()));
+    let result = fetch_bytes_with_cooldown_mode(
+        &client,
+        &peers,
+        &retries,
+        "local failure test",
+        &tag.hash.to_string(),
+        tag.hash,
+        "local actor closed",
+        FetchMode::Store,
+    )
+    .await;
+    let state = peers
+        .peer_state_snapshot(provider.endpoint().id())
+        .await
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "local storage failure must propagate instead of trying more peers"
+    );
+    assert_eq!(state.fetch_failures, 0);
+    assert_eq!(state.consecutive_fetch_failures, 0);
+    let _ = client.shutdown().await; // The deliberately closed local store cannot flush again.
+    provider.shutdown().await.unwrap();
+}
+
 #[test]
 fn queued_fetch_diagnostic_labels_are_bounded_utf8() {
     let value = "あいうえお".repeat(1_000);
