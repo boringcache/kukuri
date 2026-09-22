@@ -63,8 +63,14 @@ impl AppService {
                 let replica = self
                     .hosting_context_replica(&metaverse.spatial_context)
                     .await?;
+                let owner = Pubkey::from(row.host_pubkey.clone());
                 let instance = match self
-                    .hosting_instance(&replica, &metaverse.instance_id)
+                    .hosting_instance_for_owner(
+                        &replica,
+                        &metaverse.spatial_context,
+                        &metaverse.instance_id,
+                        &owner,
+                    )
                     .await
                 {
                     Ok(Some(instance)) => instance,
@@ -79,10 +85,7 @@ impl AppService {
                 }
                 // Resolve readiness from the canonical Instance, not the cached ref.
                 // A pending Preset keeps its row for refresh; invalid data still fails.
-                match self
-                    .get_dome_hosting(metaverse.spatial_context.clone(), &metaverse.instance_id)
-                    .await
-                {
+                match self.hosting_view_for_instance(&replica, &instance).await {
                     Ok(hosting)
                         if hosting.preset_manifest_json.is_none()
                             && instance.owner_pubkey != self.services.keys.public_key() =>

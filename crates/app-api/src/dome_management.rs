@@ -11,7 +11,7 @@ impl AppService {
     ) -> Result<DomeHostingView> {
         let replica = self.hosting_context_replica(&context).await?;
         let instance = self
-            .hosting_instance(&replica, id)
+            .hosting_instance(&replica, &context, id)
             .await?
             .context("Dome instance not found")?;
         let records = self.list_dome_hosting_records(&replica, id).await?;

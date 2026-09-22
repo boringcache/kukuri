@@ -222,10 +222,11 @@ pub(crate) use object_persistence_support::{
     persist_post_withdrawal, persist_private_channel_epoch_handoff_grant,
     persist_private_channel_metadata, persist_private_channel_participant,
     persist_private_channel_policy, persist_session_envelope, post_withdrawal_row,
-    private_channel_rotation_is_pending, projection_row_from_post, reaction_cache_key,
-    reaction_projection_row, reaction_state_view_from_rows, recent_reaction_view_from_projection,
-    search_key_or_asset_id, session_projection_retry_attempts, session_projection_retry_delay,
-    store_manifest_blob, wait_for_private_channel_epoch_snapshot,
+    private_channel_rotation_is_pending, projection_blob_fetch_timeout, projection_row_from_post,
+    reaction_cache_key, reaction_projection_row, reaction_state_view_from_rows,
+    recent_reaction_view_from_projection, search_key_or_asset_id,
+    session_projection_retry_attempts, session_projection_retry_delay, store_manifest_blob,
+    wait_for_private_channel_epoch_snapshot,
 };
 pub(crate) use post_integrity::{
     MAX_ENVELOPE_RECORDS_PER_OBJECT, MAX_WITHDRAWAL_RECORDS_PER_OBJECT, PostLoad, ReplicaPostScope,
@@ -256,6 +257,7 @@ pub(crate) use projection_support::{
     profile_timeline_item_is_hidden,
 };
 pub(crate) use reaction_integrity::{ReactionKey, VerifiedReaction, load_verified_reaction};
+pub(crate) use session_integrity::dome_instance_id;
 pub(crate) use session_integrity::{
     VerifiedGameRoom, VerifiedLiveSession, load_verified_game_room, load_verified_live_session,
     owner_bound_id_suffix, verify_game_room_record, verify_live_session_record,

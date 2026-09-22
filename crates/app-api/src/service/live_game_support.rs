@@ -1,4 +1,5 @@
 use super::*;
+use kukuri_core::SpatialContextV1;
 
 #[derive(Debug)]
 pub(crate) enum DomeReadUnavailable {
@@ -18,6 +19,47 @@ impl std::fmt::Display for DomeReadUnavailable {
 }
 
 impl std::error::Error for DomeReadUnavailable {}
+
+async fn load_signed_dome_instance_manifest(
+    docs_sync: &dyn DocsSync,
+    replica: &ReplicaId,
+    envelope_id: &EnvelopeId,
+    owner_pubkey: &Pubkey,
+) -> Result<Option<DomeInstanceManifestV1>> {
+    let key = stable_key("envelopes", envelope_id.as_str());
+    let records = docs_sync
+        .query_replica_exact_bounded(
+            replica,
+            key.as_str(),
+            MAX_ENVELOPE_RECORDS_PER_OBJECT,
+            DocFetchPolicy::LocalThenRemote,
+        )
+        .await?;
+    for record in records {
+        let envelope = match serde_json::from_slice::<KukuriEnvelope>(&record.value) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                warn!(replica = %replica.as_str(), key, %error, "ignored an unreadable Dome Instance envelope");
+                continue;
+            }
+        };
+        if envelope.verify().is_err()
+            || envelope.id != *envelope_id
+            || envelope.kind != "dome-instance"
+            || envelope.pubkey != *owner_pubkey
+        {
+            warn!(replica = %replica.as_str(), key, "ignored an invalid Dome Instance envelope");
+            continue;
+        }
+        match serde_json::from_str::<DomeInstanceManifestV1>(&envelope.content) {
+            Ok(manifest) => return Ok(Some(manifest)),
+            Err(error) => {
+                warn!(replica = %replica.as_str(), key, %error, "ignored an unreadable signed Dome Instance manifest");
+            }
+        }
+    }
+    Ok(None)
+}
 
 impl AppService {
     pub async fn fetch_metaverse_blob_bytes(&self, hash: &str) -> Result<Option<Vec<u8>>> {
@@ -308,48 +350,168 @@ impl AppService {
         replica: &ReplicaId,
         owner_pubkey: &Pubkey,
     ) -> Result<Option<(DomeInstanceStateDocV1, DomeInstanceManifestV1)>> {
+        let key = stable_key(
+            "metaverse/dome-instances",
+            &format!("{}/state", owner_pubkey.as_str()),
+        );
         let records = self
             .services
             .docs_sync
-            .query_replica(
+            .query_replica_exact_bounded(
                 replica,
-                DocQuery::Exact(stable_key(
-                    "metaverse/dome-instances",
-                    &format!("{}/state", owner_pubkey.as_str()),
-                )),
+                key.as_str(),
+                MAX_ENVELOPE_RECORDS_PER_OBJECT,
+                DocFetchPolicy::LocalThenRemote,
             )
             .await?;
-        let Some(record) = records.into_iter().next() else {
-            return Ok(None);
-        };
-        let state: DomeInstanceStateDocV1 = serde_json::from_slice(&record.value)?;
-        let manifest = fetch_manifest_blob::<DomeInstanceManifestV1>(
+        let mut newest: Option<(DomeInstanceStateDocV1, DomeInstanceManifestV1)> = None;
+        let mut unavailable = None;
+        for record in records {
+            let state = match serde_json::from_slice::<DomeInstanceStateDocV1>(&record.value) {
+                Ok(state) => state,
+                Err(error) => {
+                    warn!(replica = %replica.as_str(), key, %error, "ignored an unreadable Dome Instance state");
+                    continue;
+                }
+            };
+            if state.owner_pubkey != *owner_pubkey {
+                warn!(replica = %replica.as_str(), key, "ignored a Dome Instance state with a mismatched owner");
+                continue;
+            }
+            let bytes = match tokio::time::timeout(
+                projection_blob_fetch_timeout(),
+                self.services
+                    .blob_service
+                    .fetch_blob(&state.current_manifest.hash),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(error) => return Err(error.into()),
+            };
+            let Some(bytes) = bytes else {
+                unavailable = Some(DomeReadUnavailable::Instance);
+                continue;
+            };
+            let manifest = match serde_json::from_slice::<DomeInstanceManifestV1>(&bytes) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    warn!(replica = %replica.as_str(), key, %error, "ignored an unreadable Dome Instance manifest");
+                    continue;
+                }
+            };
+            if let Err(error) = kukuri_core::validate_dome_instance_manifest(&manifest) {
+                warn!(replica = %replica.as_str(), key, %error, "ignored an invalid Dome Instance manifest");
+                continue;
+            }
+            if state.instance_id != manifest.instance_id
+                || state.owner_pubkey != manifest.owner_pubkey
+                || state.spatial_context != manifest.spatial_context
+                || state.generation != manifest.generation
+                || state.status != manifest.status
+            {
+                warn!(replica = %replica.as_str(), key, "ignored a Dome Instance state that does not match its manifest");
+                continue;
+            }
+            let Some(signed) = load_signed_dome_instance_manifest(
+                self.services.docs_sync.as_ref(),
+                replica,
+                &state.last_envelope_id,
+                &manifest.owner_pubkey,
+            )
+            .await?
+            else {
+                unavailable = Some(DomeReadUnavailable::Envelope);
+                continue;
+            };
+            if signed != manifest {
+                warn!(replica = %replica.as_str(), key, "ignored a Dome Instance without a matching owner signature");
+                continue;
+            }
+            if newest.as_ref().is_none_or(|(_, current)| {
+                (manifest.generation, manifest.updated_at)
+                    > (current.generation, current.updated_at)
+            }) {
+                newest = Some((state, manifest));
+            }
+        }
+        match newest {
+            Some(value) => Ok(Some(value)),
+            None => match unavailable {
+                Some(reason) => Err(reason.into()),
+                None => Ok(None),
+            },
+        }
+    }
+
+    pub(crate) async fn hosting_instance(
+        &self,
+        replica: &ReplicaId,
+        spatial_context: &SpatialContextV1,
+        instance_id: &str,
+    ) -> Result<Option<DomeInstanceManifestV1>> {
+        let local_owner = self.services.keys.public_key();
+        if dome_instance_id(spatial_context, &local_owner) == instance_id {
+            return self
+                .hosting_instance_for_owner(replica, spatial_context, instance_id, &local_owner)
+                .await;
+        }
+        let Some(room) = load_verified_game_room(
+            self.services.docs_sync.as_ref(),
             self.services.blob_service.as_ref(),
-            &state.current_manifest,
+            replica,
+            spatial_context.topic_id().as_str(),
+            instance_id,
+            DocFetchPolicy::LocalThenRemote,
         )
         .await?
-        .ok_or(DomeReadUnavailable::Instance)?;
-        kukuri_core::validate_dome_instance_manifest(&manifest)?;
-        if state.instance_id != manifest.instance_id
-            || state.owner_pubkey != manifest.owner_pubkey
-            || state.spatial_context != manifest.spatial_context
-            || state.generation != manifest.generation
-            || state.status != manifest.status
-        {
-            anyhow::bail!("Dome Instance state does not match its manifest");
+        else {
+            return Ok(None);
+        };
+        let Some(metaverse) = room.manifest().metaverse.as_ref() else {
+            return Ok(None);
+        };
+        if metaverse.spatial_context != *spatial_context || metaverse.instance_id != instance_id {
+            return Ok(None);
         }
-        let signed: DomeInstanceManifestV1 = fetch_verified_dome_envelope(
-            self.services.docs_sync.as_ref(),
+        self.hosting_instance_for_owner(
             replica,
-            &state.last_envelope_id,
-            "dome-instance",
-            &manifest.owner_pubkey,
+            spatial_context,
+            instance_id,
+            &room.manifest().owner_pubkey,
         )
-        .await?;
-        if signed != manifest {
-            anyhow::bail!("signed Dome Instance content does not match its manifest blob");
+        .await
+    }
+
+    pub(crate) async fn hosting_instance_for_owner(
+        &self,
+        replica: &ReplicaId,
+        spatial_context: &SpatialContextV1,
+        instance_id: &str,
+        owner_pubkey: &Pubkey,
+    ) -> Result<Option<DomeInstanceManifestV1>> {
+        if dome_instance_id(spatial_context, owner_pubkey) != instance_id {
+            return Ok(None);
         }
-        Ok(Some((state, manifest)))
+        let resolved = self
+            .fetch_dome_instance_manifest(replica, owner_pubkey)
+            .await?;
+        let Some((_, manifest)) = resolved else {
+            return Ok(None);
+        };
+        if manifest.instance_id != instance_id
+            || manifest.spatial_context != *spatial_context
+            || manifest.owner_pubkey != *owner_pubkey
+        {
+            warn!(
+                replica = %replica.as_str(),
+                instance_id,
+                owner_pubkey = %owner_pubkey.as_str(),
+                "ignored a Dome Instance that does not match its lookup identity"
+            );
+            return Ok(None);
+        }
+        Ok(Some(manifest))
     }
 
     pub(crate) async fn persist_dome_move_record(&self, record: &DomeMoveRecordV1) -> Result<()> {
