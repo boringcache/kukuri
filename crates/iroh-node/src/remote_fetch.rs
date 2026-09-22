@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use kukuri_transport::{
-    PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchBegin, RemoteFetchRetryState,
+    PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchRetryState,
     RequestRateDecision, SharedRemoteFetchResult,
 };
 use tokio::sync::Mutex;
@@ -21,6 +21,8 @@ use tokio::time::{Instant, timeout};
 use tracing::{info, warn};
 
 use crate::IrohDocsNode;
+use crate::network_work::{FetchIdentity, FetchRequest, NetworkWorkRuntime};
+use kukuri_transport::work_admission::WorkPersistence;
 
 pub const REMOTE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REMOTE_FETCH_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
@@ -44,7 +46,7 @@ pub async fn prepare_display_fetch(
 ) -> Result<DisplayBlobFetch> {
     let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
     let lease = node
-        .display_work
+        .network_work
         .acquire(*hash.as_bytes(), deadline)
         .await?;
     // Keep the legacy shared-walk bound during staged migration. Successful
@@ -247,16 +249,25 @@ async fn fetch_bytes_with_cooldown_mode(
     let walk = {
         let node = Arc::clone(node);
         let peers = Arc::clone(peers);
-        let subject = subject.to_owned();
+        let subject = bounded_fetch_log_text(subject, 128);
         let hash_text = hash_text.to_owned();
-        let local_error = local_error.to_string();
+        let local_error = bounded_fetch_log_text(local_error, 4096);
         async move {
             fetch_bytes_from_remote(&node, &peers, &subject, &hash_text, hash, local_error, mode)
                 .await
         }
     };
-    let Some(result) =
-        run_single_flight(retries, &retry_key, &flight_key, subject, hash_text, walk).await
+    let Some(result) = run_single_flight(
+        &node.network_work,
+        retries,
+        &retry_key,
+        &flight_key,
+        subject,
+        hash_text,
+        mode,
+        walk,
+    )
+    .await
     else {
         info!(
             subject,
@@ -278,72 +289,105 @@ async fn fetch_bytes_with_cooldown_mode(
     }
 }
 
+/// Queue only bounded diagnostic labels; never retain an arbitrarily large
+/// formatted error behind a pending fetch. This does not truncate user content.
+fn bounded_fetch_log_text(value: impl Display, limit: usize) -> String {
+    use std::fmt::Write;
+    struct LimitedText {
+        value: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for LimitedText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let remaining = self.limit - self.value.len();
+            if text.len() <= remaining {
+                self.value.push_str(text);
+                return Ok(());
+            }
+            let mut end = remaining;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.value.push_str(&text[..end]);
+            Err(std::fmt::Error)
+        }
+    }
+    let mut text = LimitedText {
+        value: String::with_capacity(limit),
+        limit,
+    };
+    let _ = write!(&mut text, "{value}");
+    text.value
+}
+
 /// 同じ対象の走査を 1 本にまとめ、結果を全呼び出しへ配る(#1207 AC-6)。
 ///
 /// 走査は呼び出し側の future から切り離した task で最後まで実行する。呼び出し側が外側の
 /// timeout や cancel で待つのをやめても、クールダウンと peer 単位の成否は必ず記録される。
 /// 戻り値が `None` のときはクールダウン中で、走査を行っていない。
+#[allow(clippy::too_many_arguments)]
 async fn run_single_flight<F>(
+    admission: &Arc<NetworkWorkRuntime>,
     retries: &Arc<Mutex<RemoteFetchRetryState>>,
     retry_key: &str,
     flight_key: &str,
     subject: &str,
     hash_text: &str,
+    mode: FetchMode,
     walk: F,
 ) -> Option<SharedRemoteFetchResult>
 where
     F: Future<Output = Result<Option<Vec<u8>>>> + Send + 'static,
 {
-    let (begin, permits) = {
-        let mut state = retries.lock().await;
-        (
-            state.begin(retry_key, flight_key, Instant::now()),
-            state.walk_permits(),
-        )
+    let identity = FetchIdentity {
+        service: Arc::as_ptr(retries) as usize,
+        key: flight_key.to_owned(),
     };
-    let mut receiver = match begin {
-        RemoteFetchBegin::CoolingDown => return None,
-        RemoteFetchBegin::Join(receiver) => receiver,
-        RemoteFetchBegin::Lead(sender) => {
-            let receiver = sender.subscribe();
-            let retries = Arc::clone(retries);
-            let retry_key = retry_key.to_owned();
-            let flight_key = flight_key.to_owned();
-            let subject = subject.to_owned();
-            let hash_text = hash_text.to_owned();
-            tokio::spawn(async move {
-                let result = match permits.acquire().await {
-                    Ok(_permit) => match within_remote_fetch_budget(walk).await {
-                        Some(result) => result,
-                        None => {
-                            warn!(
-                                subject = %subject,
-                                hash = %hash_text,
-                                timeout_ms = REMOTE_FETCH_TOTAL_TIMEOUT.as_millis(),
-                                "remote fetch exhausted the total attempt budget"
-                            );
-                            Ok(None)
-                        }
-                    },
-                    Err(_) => Ok(None),
-                };
-                retries.lock().await.finish(
-                    &retry_key,
-                    &flight_key,
-                    matches!(&result, Ok(Some(_))),
-                    Instant::now(),
-                );
-                let _ = sender.send(Some(
-                    result.map(|bytes| bytes.map(Arc::new)).map_err(Arc::new),
-                ));
-            });
-            receiver
+    // Hold the retry guard through synchronous admission. Completion records
+    // cooldown before retiring the identity, so it cannot race a new attempt.
+    let retry_state = retries.lock().await;
+    let cooling_down = retry_state.is_cooling_down(retry_key, Instant::now());
+    let persistence = if mode == FetchMode::Store {
+        WorkPersistence::Store
+    } else {
+        WorkPersistence::Ephemeral
+    };
+    let byte_limit = match mode {
+        FetchMode::EphemeralBounded(limit) => limit,
+        _ => u64::MAX,
+    };
+    let completion_retries = retries.clone();
+    let retry_key = retry_key.to_owned();
+    let completion_key = flight_key.to_owned();
+    let finished = Box::new(move |success| {
+        Box::pin(async move {
+            completion_retries.lock().await.finish(
+                &retry_key,
+                &completion_key,
+                success,
+                Instant::now(),
+            );
+        }) as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
+    });
+    let admitted = admission.submit_fetch(
+        FetchRequest {
+            identity,
+            object: *iroh_blobs::Hash::new(flight_key.as_bytes()).as_bytes(),
+            persistence,
+            byte_limit,
+            cooling_down,
+        },
+        Box::pin(walk),
+        finished,
+    );
+    drop(retry_state);
+    match admitted {
+        Ok(waiter) => Some(waiter.result().await),
+        Err(crate::NetworkAdmissionError::CoolingDown) => None,
+        Err(error) => {
+            info!(subject, hash = %hash_text, %error, "remote fetch not admitted");
+            Some(Err(Arc::new(error.into())))
         }
-    };
-    match receiver.wait_for(Option::is_some).await {
-        Ok(result) => result.clone(),
-        // 走査 task が結果を流さずに終わった(異常終了)。取得できなかったものとして扱う。
-        Err(_) => Some(Ok(None)),
     }
 }
 
@@ -583,339 +627,4 @@ async fn fetch_bytes_from_remote(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn display_admission_wait_is_included_in_total_budget() {
-        let node = IrohDocsNode::memory().await.unwrap();
-        let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
-        let retries = Mutex::new(RemoteFetchRetryState::default());
-        let permits = retries.lock().await.walk_permits();
-        let occupied = permits
-            .acquire_many_owned(kukuri_transport::REMOTE_FETCH_MAX_CONCURRENT_WALKS as u32)
-            .await
-            .unwrap();
-        tokio::time::pause();
-        let prepared = timeout(
-            REMOTE_FETCH_TOTAL_TIMEOUT + Duration::from_secs(1),
-            prepare_display_fetch(&node, &peers, &retries, iroh_blobs::Hash::new(b"waiting")),
-        )
-        .await;
-        tokio::time::resume();
-        drop(occupied);
-        node.shutdown().await.unwrap();
-        assert!(
-            matches!(prepared, Ok(Err(_))),
-            "display admission must expire within its own budget, before an outer caller timeout"
-        );
-    }
-
-    #[tokio::test]
-    async fn display_admission_is_shared_across_services_using_one_node() {
-        let node = IrohDocsNode::memory().await.unwrap();
-        let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
-        let mut prepared = Vec::new();
-        for _ in 0..kukuri_transport::work_admission::WorkLimits::default().running {
-            // Different services have different legacy retry ledgers. Their
-            // combined display work must nevertheless share the node budget.
-            let retries = Mutex::new(RemoteFetchRetryState::default());
-            prepared.push(
-                prepare_display_fetch(
-                    &node,
-                    &peers,
-                    &retries,
-                    iroh_blobs::Hash::new(b"shared-node"),
-                )
-                .await
-                .unwrap(),
-            );
-        }
-        let retries = Mutex::new(RemoteFetchRetryState::default());
-        tokio::time::pause();
-        let next = timeout(
-            REMOTE_FETCH_TOTAL_TIMEOUT + Duration::from_secs(1),
-            prepare_display_fetch(&node, &peers, &retries, iroh_blobs::Hash::new(b"next")),
-        )
-        .await;
-        tokio::time::resume();
-        assert!(
-            matches!(next, Ok(Err(_))),
-            "per-service ledgers must not multiply display slots"
-        );
-        drop(prepared);
-        let next = prepare_display_fetch(
-            &node,
-            &peers,
-            &retries,
-            iroh_blobs::Hash::new(b"new-demand"),
-        )
-        .await
-        .unwrap();
-        drop(next);
-        node.shutdown().await.unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn total_budget_cancels_a_fetch_that_never_completes() {
-        let result = within_remote_fetch_budget(async {
-            tokio::time::sleep(REMOTE_FETCH_TOTAL_TIMEOUT + Duration::from_secs(1)).await;
-            1_u8
-        })
-        .await;
-        assert_eq!(result, None);
-    }
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use kukuri_transport::REMOTE_FETCH_MAX_CONCURRENT_WALKS;
-
-    fn retries() -> Arc<Mutex<RemoteFetchRetryState>> {
-        Arc::new(Mutex::new(RemoteFetchRetryState::default()))
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn display_fetch_does_not_continue_io_after_caller_timeout() {
-        let writes = Arc::new(AtomicUsize::new(0));
-        let after = writes.clone();
-        let walk = async move {
-            tokio::time::sleep(Duration::from_secs(6)).await;
-            after.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(vec![1_u8]))
-        };
-        let result = timeout(Duration::from_secs(1), run_display_fetch(walk)).await;
-        assert!(result.is_err());
-        tokio::time::advance(Duration::from_secs(10)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            writes.load(Ordering::SeqCst),
-            0,
-            "a closed display must not cause later I/O"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancelled_display_waiter_never_starts_a_later_walk() {
-        let permits = Arc::new(tokio::sync::Semaphore::new(0));
-        let started = Arc::new(AtomicUsize::new(0));
-        let waiting = {
-            let permits = permits.clone();
-            let started = started.clone();
-            run_display_fetch(async move {
-                let _permit = permits.acquire().await?;
-                started.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(vec![1]))
-            })
-        };
-        assert!(timeout(Duration::from_secs(1), waiting).await.is_err());
-        permits.add_permits(1);
-        tokio::time::advance(REMOTE_FETCH_TOTAL_TIMEOUT).await;
-        tokio::task::yield_now().await;
-        assert_eq!(started.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn displayed_transfer_can_finish_after_the_old_projection_timeout() {
-        let bytes = run_display_fetch(async {
-            tokio::time::sleep(Duration::from_secs(6)).await;
-            Ok(Some(vec![1]))
-        })
-        .await
-        .unwrap();
-        assert_eq!(bytes, Some(vec![1]));
-    }
-
-    /// 応答しない peer を模した走査。開始回数だけを数え、総予算まで完了しない。
-    fn stalled_walk(
-        started: &Arc<AtomicUsize>,
-    ) -> impl Future<Output = Result<Option<Vec<u8>>>> + Send + 'static {
-        let started = Arc::clone(started);
-        async move {
-            started.fetch_add(1, Ordering::SeqCst);
-            std::future::pending::<()>().await;
-            Ok(None)
-        }
-    }
-
-    // #1207 TR-10: 呼び出し側が外側の timeout で待つのをやめても、失敗のクールダウンが残る。
-    #[tokio::test(start_paused = true)]
-    async fn dropped_caller_still_records_the_failure_cooldown() {
-        let retries = retries();
-        let started = Arc::new(AtomicUsize::new(0));
-
-        let abandoned = timeout(
-            Duration::from_secs(2),
-            run_single_flight(
-                &retries,
-                "hash-a",
-                "store:hash-a",
-                "blob",
-                "hash-a",
-                stalled_walk(&started),
-            ),
-        )
-        .await;
-        assert!(
-            abandoned.is_err(),
-            "the caller gives up before the walk ends"
-        );
-
-        // 走査の総予算が尽きるまで進める。走査 task は呼び出し側と無関係に終わる。
-        tokio::time::sleep(REMOTE_FETCH_TOTAL_TIMEOUT).await;
-        tokio::task::yield_now().await;
-        assert_eq!(retries.lock().await.in_flight_len(), 0);
-
-        let next = run_single_flight(
-            &retries,
-            "hash-a",
-            "store:hash-a",
-            "blob",
-            "hash-a",
-            stalled_walk(&started),
-        )
-        .await;
-        assert!(next.is_none(), "the next call must be inside the cooldown");
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-    }
-
-    // #1207 TR-10 / TR-11: 待つのをやめた直後の再要求は、実行中の走査へ合流し新しい走査を始めない。
-    #[tokio::test(start_paused = true)]
-    async fn repeated_callers_join_the_walk_in_flight() {
-        let retries = retries();
-        let started = Arc::new(AtomicUsize::new(0));
-
-        for _ in 0..5 {
-            let attempt = timeout(
-                Duration::from_secs(3),
-                run_single_flight(
-                    &retries,
-                    "hash-a",
-                    "store:hash-a",
-                    "blob",
-                    "hash-a",
-                    stalled_walk(&started),
-                ),
-            )
-            .await;
-            assert!(attempt.is_err());
-        }
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-        assert_eq!(retries.lock().await.in_flight_len(), 1);
-    }
-
-    // #1207 TR-11: 合流した全呼び出しが同じ結果を受け取り、成功後は予約もクールダウンも残らない。
-    #[tokio::test(start_paused = true)]
-    async fn joined_callers_share_one_result() {
-        let retries = retries();
-        let started = Arc::new(AtomicUsize::new(0));
-        let walk = |started: &Arc<AtomicUsize>| {
-            let started = Arc::clone(started);
-            async move {
-                started.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                Ok(Some(vec![1_u8, 2, 3]))
-            }
-        };
-
-        let (first, second) = tokio::join!(
-            run_single_flight(
-                &retries,
-                "hash-a",
-                "store:hash-a",
-                "blob",
-                "hash-a",
-                walk(&started)
-            ),
-            run_single_flight(
-                &retries,
-                "hash-a",
-                "store:hash-a",
-                "blob",
-                "hash-a",
-                walk(&started)
-            ),
-        );
-        for result in [first, second] {
-            let bytes = result.expect("not cooling down").expect("walk succeeded");
-            assert_eq!(bytes.as_deref(), Some(&vec![1_u8, 2, 3]));
-        }
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-        let state = retries.lock().await;
-        assert_eq!(state.in_flight_len(), 0);
-        assert_eq!(state.cooldown_len(), 0);
-    }
-
-    // #1207 INVAR-2: 永続取得と一時取得は合流しない(一時取得の bytes を保存経路へ混ぜない)。
-    #[tokio::test(start_paused = true)]
-    async fn store_and_ephemeral_walks_do_not_join() {
-        let retries = retries();
-        let started = Arc::new(AtomicUsize::new(0));
-        for flight_key in ["store:hash-a", "ephemeral:hash-a"] {
-            let attempt = timeout(
-                Duration::from_secs(1),
-                run_single_flight(
-                    &retries,
-                    "hash-a",
-                    flight_key,
-                    "blob",
-                    "hash-a",
-                    stalled_walk(&started),
-                ),
-            )
-            .await;
-            assert!(attempt.is_err());
-        }
-        assert_eq!(started.load(Ordering::SeqCst), 2);
-    }
-
-    // #1207 INVAR-3: 同時に動く走査は上限までで、超過分は先行の終了を待つ。
-    #[tokio::test(start_paused = true)]
-    async fn concurrent_walks_are_bounded() {
-        let retries = retries();
-        let started = Arc::new(AtomicUsize::new(0));
-        let total = REMOTE_FETCH_MAX_CONCURRENT_WALKS + 3;
-        for index in 0..total {
-            let key = format!("hash-{index}");
-            let flight_key = format!("store:{key}");
-            let attempt = timeout(
-                Duration::from_millis(10),
-                run_single_flight(
-                    &retries,
-                    &key,
-                    &flight_key,
-                    "blob",
-                    &key,
-                    stalled_walk(&started),
-                ),
-            )
-            .await;
-            assert!(attempt.is_err());
-        }
-        assert_eq!(
-            started.load(Ordering::SeqCst),
-            REMOTE_FETCH_MAX_CONCURRENT_WALKS
-        );
-
-        tokio::time::sleep(REMOTE_FETCH_TOTAL_TIMEOUT).await;
-        tokio::task::yield_now().await;
-        assert_eq!(started.load(Ordering::SeqCst), total);
-    }
-
-    // 合流した側にも、大きさ超過を同じ型で返す(CN scan が型で判定する)。
-    #[tokio::test(start_paused = true)]
-    async fn shared_error_keeps_the_too_large_type() {
-        let retries = retries();
-        let result = run_single_flight(
-            &retries,
-            "bounded:8:hash-a",
-            "bounded:8:hash-a",
-            "blob",
-            "hash-a",
-            async { Err(BlobTooLarge { limit: 8 }.into()) },
-        )
-        .await
-        .expect("not cooling down");
-        let error = result.expect_err("walk failed");
-        assert!(error.downcast_ref::<BlobTooLarge>().is_some());
-    }
-}
+mod tests;

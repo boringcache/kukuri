@@ -432,6 +432,11 @@ impl NetworkWorkOwner {
         self.metadata_bytes -= entry.metadata_bytes;
     }
 
+    /// Whether a reservation still occupies capacity (including stopping work).
+    pub fn contains(&self, id: WorkId) -> bool {
+        self.entries.contains_key(&id)
+    }
+
     /// Diagnostic snapshot over the bounded live request set, never saved history.
     pub fn usage(&self) -> WorkUsage {
         WorkUsage {

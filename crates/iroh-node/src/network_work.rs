@@ -1,6 +1,5 @@
-//! First production adapter for ADR 0055: caller-owned display fetches.
-//! Admission never spawns a task. Existing ordinary-fetch permits remain in
-//! force while other protocols migrate to the shared account owner.
+//! Shared fetch admission for one node: caller-owned display work and bounded,
+//! independently owned ordinary fetches. Only admitted running work gets a task.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -12,26 +11,33 @@ use kukuri_transport::work_admission::{
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
+mod fetch;
+pub(crate) use fetch::{FetchIdentity, FetchRequest};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DisplayAdmissionError {
+pub enum NetworkAdmissionError {
     Deferred,
     Expired,
     Closed,
+    CoolingDown,
+    ConflictingRequest,
 }
 
-impl std::fmt::Display for DisplayAdmissionError {
+impl std::fmt::Display for NetworkAdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "display fetch admission: {self:?}")
+        write!(f, "network work admission: {self:?}")
     }
 }
 
-impl std::error::Error for DisplayAdmissionError {}
+impl std::error::Error for NetworkAdmissionError {}
 
 struct State {
     policy: NetworkWorkOwner,
     scopes: BTreeMap<WorkId, WorkScope>,
     ready: BTreeSet<WorkId>,
     cancelled: BTreeSet<WorkId>,
+    fetches: BTreeMap<WorkId, fetch::FetchEntry>,
+    identities: BTreeMap<FetchIdentity, WorkId>,
     closed: bool,
 }
 
@@ -50,18 +56,19 @@ impl State {
     }
 }
 
-pub(crate) struct DisplayWorkAdmission {
+pub(crate) struct NetworkWorkRuntime {
     state: Mutex<State>,
-    changed: Notify,
+    changed: Arc<Notify>,
+    driver: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
-impl Default for DisplayWorkAdmission {
+impl Default for NetworkWorkRuntime {
     fn default() -> Self {
         Self::new(WorkLimits::default())
     }
 }
 
-impl DisplayWorkAdmission {
+impl NetworkWorkRuntime {
     fn new(limits: WorkLimits) -> Self {
         Self {
             state: Mutex::new(State {
@@ -69,9 +76,12 @@ impl DisplayWorkAdmission {
                 scopes: BTreeMap::new(),
                 ready: BTreeSet::new(),
                 cancelled: BTreeSet::new(),
+                fetches: BTreeMap::new(),
+                identities: BTreeMap::new(),
                 closed: false,
             }),
-            changed: Notify::new(),
+            changed: Arc::new(Notify::new()),
+            driver: Mutex::new(None),
         }
     }
 
@@ -79,19 +89,19 @@ impl DisplayWorkAdmission {
         self: &Arc<Self>,
         hash: [u8; 32],
         deadline: Instant,
-    ) -> Result<DisplayWorkLease, DisplayAdmissionError> {
+    ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
         let lease = {
             let mut state = self.state.lock().expect("display admission poisoned");
             if state.closed {
-                return Err(DisplayAdmissionError::Closed);
+                return Err(NetworkAdmissionError::Closed);
             }
             if deadline <= Instant::now() {
-                return Err(DisplayAdmissionError::Expired);
+                return Err(NetworkAdmissionError::Expired);
             }
             let scope = state
                 .policy
                 .register_scope()
-                .ok_or(DisplayAdmissionError::Deferred)?;
+                .ok_or(NetworkAdmissionError::Deferred)?;
             // Each display consumer owns its cancellation boundary. Display
             // fetches never join a normal or another scope's stored fetch.
             let key = WorkKey {
@@ -108,7 +118,7 @@ impl DisplayWorkAdmission {
                 WorkAdmission::Admitted(waiter) => waiter,
                 _ => {
                     state.policy.revoke_scope(scope);
-                    return Err(DisplayAdmissionError::Deferred);
+                    return Err(NetworkAdmissionError::Deferred);
                 }
             };
             state.scopes.insert(waiter.work_id(), scope);
@@ -130,10 +140,10 @@ impl DisplayWorkAdmission {
                 let mut state = self.state.lock().expect("display admission poisoned");
                 state.advance();
                 if state.closed {
-                    return Err(DisplayAdmissionError::Closed);
+                    return Err(NetworkAdmissionError::Closed);
                 }
                 if deadline <= Instant::now() {
-                    return Err(DisplayAdmissionError::Expired);
+                    return Err(NetworkAdmissionError::Expired);
                 }
                 if state.ready.remove(&lease.waiter.work_id()) {
                     return Ok(lease);
@@ -141,7 +151,7 @@ impl DisplayWorkAdmission {
             }
             timeout_at(deadline, notified)
                 .await
-                .map_err(|_| DisplayAdmissionError::Expired)?;
+                .map_err(|_| NetworkAdmissionError::Expired)?;
         }
     }
 
@@ -182,8 +192,21 @@ impl DisplayWorkAdmission {
     }
 }
 
+impl Drop for NetworkWorkRuntime {
+    fn drop(&mut self) {
+        if let Some(driver) = self
+            .driver
+            .get_mut()
+            .expect("network driver poisoned")
+            .take()
+        {
+            driver.abort();
+        }
+    }
+}
+
 pub(crate) struct DisplayWorkLease {
-    owner: Arc<DisplayWorkAdmission>,
+    owner: Arc<NetworkWorkRuntime>,
     scope: WorkScope,
     waiter: WorkWaiter,
     deadline: Instant,

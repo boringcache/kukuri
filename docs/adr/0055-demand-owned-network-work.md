@@ -327,7 +327,7 @@ LocalOnlyはこのnetwork受付へ登録せず、既存local readに返す。
 通常取得は待機者が消えても結果を所有する。queued需要の消失はI/Oを起動せず除去する。
 executorは`start_next`の結果だけを実行し、取消を停止/awaitしてから`complete`する。
 `Publish`は世代と期限の判定だけであり、scope/内容/保存先の既存guardを省略する許可ではない。
-この部品のproduction組込み、protocol別予算の合算、実QUIC停止との結合は未完了。
+表示/通常取得へのproduction接続は下記adapterで行う。docs/gossipのprotocol別予算、SDK内部の取得、peer選択の統合は未完了。
 
 ## gossip adapterで再利用する公開API
 
@@ -338,13 +338,24 @@ D9のI/O所有は`iroh_gossip::proto::topic::State`と公開`topic::Message`を�
 実証ではnative peerと双方向配送し、未完結headerの読込みもfuture取消でQUIC closeできた。
 複数topic/peer・timer・台帳・worker予算のproduction統合は未完了で、この実証だけでD9全体を完了にしない。
 
-## 表示用取得の最初の本番adapter
+## 表示・通常取得の本番adapter
 
-`IrohDocsNode`は`DisplayWorkAdmission`を所有し、remote表示取得を`NetworkWorkOwner`で受付する。
-この段階は64個の独立した表示lease、8個の準備/実行枠をnode全体で共有し、異なるserviceのretry台帳でも枠を増やさない。
-既存の通常walk Semaphoreを併用し、移行途中に通常取得との従来上限を増やさない。通常fetch/docs/gossipの統合は未完了。
-`prepare_display_fetch`の開始から待機・取得・結果の判定まで同じ30秒deadlineを使う。
-成功時には旧walk枠も取得済みで、app-apiの表示取得回数を待機だけで消費しない。
-受付満杯/期限切れ/終了は`DisplayAdmissionError`で区別し、準備後の取消はbytesを返さない。
-node終了は受付を先に閉じ、callerが破棄したqueued leaseを後から起動しない。
-取得bytesは従来通り一時取得で、保存時のapp-api scope/token判定を省略しない。
+`IrohDocsNode`は`NetworkWorkRuntime`を所有し、明示的なremote表示/通常取得を同じ`NetworkWorkOwner`で受付する。
+このadapterの初期値は64scope・8準備/実行枠・1flight64waiters。表示はconsumerごと、通常取得はservice/retry台帳とflight keyごとにscopeを持つ。
+通常取得の合流は従来の境界を維持し、LocalOnly/表示/一時/保存/異なるbyte limitを新しく合流させない。scope認証の代替ではない。
+待機中は有限queueへfutureを保持し、実行枠を得たものだけを1つのdriverが起動する。通常取得と表示の合計が8を超えない。
+既存walk Semaphoreは表示の準備で併用するが、通常取得taskの待機には使わない。
+
+最初の受付から待機・取得・完了判定まで同じ30秒deadlineを使い、合流で期限を延長しない。
+開始済みの通常取得は待機者が消えても結果とcooldownを記録する。実行枠を待つqueueの最後の需要が消えれば、後からI/Oを起動しない。
+表示はcaller futureの破棄で止める。node終了は受付を閉じ、queue/実行を取消し、結果を返さない。
+完了callbackは受付lock外で実行し、retry結果を記録してからflightを退役する。queue futureのDropもlock外で行う。
+取得bytesの既存scope/token/内容検証と保存先のguardはapp-api等のcallerが維持する。
+
+失敗cooldownは従来の3秒・service別keyを維持し、1,024件・key256byteに制限する。
+期限索引で回収し、満杯なら期限の近い記録から捨てる。一時cacheであり、未送信outboxや試行回数の永続記録ではない。
+queueに保持する診断ラベルはsubject128byte/error4,096byte、hash/flight keyは固定hash等の短い識別子だけ。
+本文・添付をmetadataとしてqueueへコピーしない。通常取得のworkerには既存のper-service成否記録callbackを持たせる。
+
+native docsの自動downloader、gossip、peer台帳、意味上のscope世代/需要理由の全caller接続は未完了。
+このadapterを通る取得の合計上限を、SDK内部を含む全通信の上限達成と読み替えない。

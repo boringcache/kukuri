@@ -191,3 +191,24 @@ D9の実装前提として、公開`proto::topic::State`へ入出力を渡し、
 全体とapp-api slow/実scenarioはPR作成後にCIを使う。受付9件/gossip実証2件の既存結果は#1309（merge `81dcff79`、独立監査PASS、15/15 CI、10path一致）として再利用する。
 
 node終了入口の取消を追加後の`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes`は1件成功（0.11秒）。再現/取消/別node/複数serviceの証跡は上記の結果を採用し、無関係なsuiteを再実行しない。
+
+## P3の通常取得統合: 実装する有限範囲
+
+表示と通常取得の受付を同じnode所有台帳へ統合する。既存の`run_single_flight`は予約後にspawnし、そのtaskがSemaphoreを待つ。新しい通常取得は有限queueへfutureを保持し、共通実行枠を得たものだけ起動する。合流は従来のservice/retry台帳・flight key単位を維持し、private/公開や一時/保存を新しく混ぜない。
+
+- FETCH-1（NW-1/2/3）: 表示＋通常取得をnode全体8実行に制限。queue/metadata/waiterは上限内、待機込み期限で、満杯時に待機taskをspawnしない。
+- FETCH-2（既存#1207/NW-4）: 同じ通常取得は1回だけ実行し結果を共有。呼出元cancel後も開始済みworkの結果・失敗cooldownを所有し、queuedの最後の待機者cancelは後からI/Oを開始しない。
+- FETCH-3（NW-7）: node終了で待機/実行/結果を停止し、panic・期限切れ・取消でも台帳と枠を回収。別nodeは維持。
+- FETCH-4（NW-2/3、D8）: cooldown台帳を期限索引と1,024件上限へ移し、全件retainを除く。停止・回復・保存方針を台帳の整理で変更しない。
+
+対象はiroh-nodeの共通runtime/remote_fetch、transportのretry台帳、関連tests。既存のlocal fast pathとapp-api保存guardは維持。全protocolのscope/peer選択・docs/gossipの常時同期廃止は別の未完了作業であり、今回のnode単位取得枠統合へ混同しない。
+
+通常取得のqueueは`NetworkWorkRuntime`へ統合した。表示adapterを移動/拡張し、既存の合流・通常caller取消後の結果所有を維持する。最初の受付から30秒、64scope/1flight64waiters/表示＋通常8実行。callbackがretry結果を記録してからidentityを退役し、その間は新要求も同じ結果へ合流する。retry guardの読取りから同期的な受付までguardを保持し、完了との競合でcooldownを迂回しない。
+
+修正前の`concurrent_walks_are_bounded`は、待機中に取消された3件が後から開始し11回となってFAIL（新しいNW-4の期待は開始済み8回だけ）。この条件を明示的に更新した後、既存remote_fetch12件が成功した。開始済み通常取得のcaller取消後のcooldown/結果共有は既存testを維持した。失敗cacheも10,240件が残るFAILを確認後、期限索引と上限1,024件へ修正し、関連transport4件が成功。
+
+runtimeの表示＋通常の容量共有、waiter上限と合流期限、panic完了、queued future破棄時のNode Dropによる再入、node終了の8件が成功。queue futureを受付lock内でdropするとNode::dropのcloseで同じlockへ再入し得るため、退役したentryをlock外へ返してから破棄する。診断ラベルも保持bytesを制限し、本文/添付の有効サイズを縮めない。
+
+増えたremote_fetchのtest moduleは同名の別ファイルへ移し、test名とscopeを保持した。1,000行のratchetをbaseline増加で回避せず、関連testの分離だけを行う。通常取得のlane/意味上のprivate世代やSDK内部の取得全体の統合は残作業であり、今回の受付・成否cacheの有限化に含めない。
+
+最終の局所検証: remote_fetch12件、共通runtime8件、blob-serviceの実取得/一時取得/取消等7件、transport retry4件が成功。追加のUTF-8診断ラベル上限1件と、cooldown key byte上限を含む容量test1件も成功。変更3crateのall-targets clippy、rustfmt、diff、サイズ検査成功。全体とapp-api slow/実scenarioはPR/CIへ委譲する。
