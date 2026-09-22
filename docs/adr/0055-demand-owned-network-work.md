@@ -311,3 +311,29 @@ P2の技術残件とinventoryの未分類を解消してから設計をAccepted�
 | 必須contract / scenario | NW-1〜10、2端末のpublic/private/DM、CN認証mixed state、移行中断、10倍回数比較 |
 
 詳細な入口とsensitive sinkは [通信作業inventory](../architecture/network-work-inventory.md) を参照。
+
+## 受付状態機械の実装境界
+
+`transport::work_admission::NetworkWorkOwner`は§2/3の受付と停止指示を実装するI/Oなしの部品。
+scope登録時にowner固有・再登録固有のtokenを発行し、account/private世代の変更時に失効させる。
+意味上の認証・capability検証をtoken発行の前に行う責務はapp-api/runtimeに残る。
+request keyはscope token、protocol、完全な対象のdigest、mode、persistence、byte limit、deadline、lane。
+異なるdeadlineを合流させず、合流で試行時間を延長しない。同じkeyでもmetadataが違えば拒否する。
+LocalOnlyはこのnetwork受付へ登録せず、既存local readに返す。
+
+初期実装は64 scope・256要求・64waiters/要求・4MiB metadata payload・8実行を制御する。
+固定サイズkey/索引/waiterの管理領域は件数上限で別に有界にし、payload予算を総RSSと表現しない。
+表示の最終waiter離脱、失効、期限切れは取消指示を出し、I/O終了のackまで実行枠とpayload予算を保持する。
+通常取得は待機者が消えても結果を所有する。queued需要の消失はI/Oを起動せず除去する。
+executorは`start_next`の結果だけを実行し、取消を停止/awaitしてから`complete`する。
+`Publish`は世代と期限の判定だけであり、scope/内容/保存先の既存guardを省略する許可ではない。
+この部品のproduction組込み、protocol別予算の合算、実QUIC停止との結合は未完了。
+
+## gossip adapterで再利用する公開API
+
+D9のI/O所有は`iroh_gossip::proto::topic::State`と公開`topic::Message`を使う。
+選択した接続への書込み、各topicのtimer、受信読み込みと取消をownerが管理し、native Gossip actorと二重に動かさない。
+既存wireはtopic IDを含むstream headerの後に、u32 big-endian length付きpostcard topic Messageを流す。
+上位`proto::State`のtopic付きMessageをそのままwireへ書かない。
+実証ではnative peerと双方向配送し、未完結headerの読込みもfuture取消でQUIC closeできた。
+複数topic/peer・timer・台帳・worker予算のproduction統合は未完了で、この実証だけでD9全体を完了にしない。

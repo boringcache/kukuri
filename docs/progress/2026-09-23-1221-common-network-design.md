@@ -142,6 +142,37 @@ active peerの無条件切断を認めなかった。iroh 1.0.3、gossip 0.101.0
 
 全体はPR/CIで確認する。固定headの独立監査とmerge照合を終えるまでは、この段階を完了としない。
 
+## P2/P3の受付管理: 実装する有限範囲
+
+基準 `cc58b367`。NW-1〜4/7、NET-AC-2の受付部分として、`transport::work_admission`にI/Oを持たない状態機械を置く。現在のRemoteFetchRetryState/remote_fetch::run_single_flightは、permit取得前にtaskと台帳を増やす。この入口を共通ownerへ移す前に、受付・実行選択・取消の契約を固定する。
+
+- ADMIT-1: active scope 64、要求256、待機者64/要求、metadata payload計4MiB、実行8を同時に制限し、満杯は型付きDeferred/Deniedで返す。受付はspawnしない。
+- ADMIT-2: 同じscope世代/object/protocol/mode/persistence/byte limit/deadlineだけ合流する。同一要求の更新はI/O選択を増やさない。
+- ADMIT-3: 4:2:1のlane巡回、待機時間込みdeadline、期限切れのI/O開始0。deadline索引で回収し、履歴全件のsort/retainをしない。
+- ADMIT-4: 最終表示待機者の取消・scope失効は実行停止要求を出す。通常取得の待機者取消は実行を保持する。停止完了まで実行枠を解放せず、遅い完了の保存許可を返さない。
+- ADMIT-5: scopeの再登録・別ownerのtokenで旧要求を再利用しない。稼働対象の逆引きだけを処理し、登録/取消履歴が10倍でも台帳が増えない。
+
+入口はscope登録/失効、要求受付/待機解除、実行選択、完了通知。sinkはこの有限なメモリ台帳と停止指示だけで、network/storeへの直接I/Oはない。権限の意味上の検証は呼出元の責務で、発行済みscope tokenの現在性を全状態遷移で確認する。実運用のI/O adapter・旧取得経路の撤去は後続であり、この状態機械単独でNET完了とはしない。
+
+検証は上記の境界値、停止→遅延完了、再登録、10倍履歴、lane巡回の関連unit testsとtransport clippyをローカル実行する。全体はPR/CI、固定headの独立監査で確認する。
+
+受付の関連unit testsは9件成功（`cargo test -p kukuri-transport --lib work_admission`）。transport all-targets clippyは、初回のunwrap診断4件を不変条件付きexpectへ修正した後に成功。実行していない全体suiteはPR/CIへ委譲する。これは純粋な状態機械の契約であり、停止指示から実QUICを止める結合はまだ含まない。
+
+SDK退役資源の修正はPR #1308、merge `9dc3f051c928cfabe5ca709adb715663cf394303`で統合済み。固定head独立監査PASS、15/15 CI成功、対象16pathの一致を確認した。
+
+## P2実証: gossipの公開topic状態機械と所有付きI/O
+
+D9の実装前提として、公開`proto::topic::State`へ入出力を渡し、既存native Gossipと実QUICで双方向に配送するcontractを追加した。net::utilは非公開だが、topic単位のMessageとStateは公開されている。wireはtopic IDだけのpostcard stream headerと、u32 big-endian lengthで区切ったpostcard topic Message。protocol/membership本体は複製しない。
+
+- GOSSIP-1（NET-AC-3/D9）: owner側から選択した1接続だけを使い、native peerとのjoinと双方向配送が成功する。`public_gossip_state_roundtrips_with_native_peer_on_owned_connection`。
+- GOSSIP-2（NET-AC-2(e)/NW-4）: 相手がlength headerの半分だけを送りstreamを閉じなくても、所有futureの取消でQUICが終了する。endpoint全体は継続。`owned_gossip_read_cancellation_closes_even_an_incomplete_header`。
+
+初回は上位`proto::State`が返すtopic付きMessageをそのままwireへ送り、10秒で失敗した。native wireはstream headerでtopicを束縛し、その後は`topic::Message`だけを送る。公開`topic::State`へ変更し、応答を処理してからjoin完了を待つように直した後、双方向testは1件0.09秒で成功。取消testは初回に1件成功した。失敗した実証をSDK非互換の根拠には使わない。
+
+追加はtestと既存lock内の3packageのdev依存参照だけ。productionにはnative Gossipを維持する。topic数・timer・I/O workerの予算、逆引き、同時dial、全transport callerへの組込みは未完了。timerを動かさない短いwire往復を、長時間の資源上限の証明にしない。
+
+公開APIの選択は、docsが`SyncHandle`+`net`、gossipが`proto::topic::State`+所有I/O。irohの`EndpointHooks::before_connect/after_handshake`と`RouterBuilder::incoming_filter`も公開され、送信前拒否・handshake後照合・受信前選別へ利用できる。hook単独には失敗/取消した接続試行を精算するAPIがないため、接続futureの所有を省略しない。SDK全体のforkやwireの独自変更を前提にせず、この構成でadapterを作る。
+
 ## 共通受信経路の前提修正: DM ACKの会話境界
 
 N11の保存sinkを逆引きしたところ、`handle_direct_message_hint`はACKの署名・sender・recipientを確認する一方、`dm_id`をその二者から導出した会話IDと照合せず、任意の会話の送信状態更新とoutbox削除へ進んでいた。新しいaccount受信routeへ再利用する前に、D10/NW-8の保護outbox維持に必要なExisting-gapとして修正する。新しい通知種別・配送保証は追加しない。
