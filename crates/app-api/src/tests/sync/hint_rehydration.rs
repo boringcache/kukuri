@@ -493,11 +493,16 @@ async fn topic_session_hints_retry_until_manifest_blob_is_available() {
 
     assert_eq!(hydrated, 1);
     assert!(
-        LiveGameProjectionStore::list_topic_live_sessions(remote_store.as_ref(), topic.as_str())
-            .await
-            .expect("list remote live sessions")
-            .iter()
-            .any(|session| session.session_id == session_id),
+        LiveGameProjectionStore::list_channel_live_sessions(
+            remote_store.as_ref(),
+            topic.as_str(),
+            "public",
+            100,
+        )
+        .await
+        .expect("list remote live sessions")
+        .iter()
+        .any(|session| session.session_id == session_id),
         "expected live session projection after retry"
     );
 }

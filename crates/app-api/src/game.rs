@@ -16,47 +16,45 @@ impl AppService {
     ) -> Result<Vec<GameRoomView>> {
         self.ensure_scope_subscriptions(topic_id, &scope).await?;
         let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
-        let allowed = BTreeSet::from([self.allowed_channel_id_for_scope(topic_id, &scope).await?]);
-        let mut rows = filter_channel_rows(
-            self.services
-                .projection_store
-                .list_topic_game_rooms(topic_id)
-                .await?,
-            &allowed,
-            |row| row.channel_id.as_str(),
+        let channel_id = self.allowed_channel_id_for_scope(topic_id, &scope).await?;
+        let allowed = BTreeSet::from([channel_id.clone()]);
+        let projection_store = Arc::clone(&self.services.projection_store);
+        let topic_key = topic_id.to_string();
+        let channel_key = channel_id.clone();
+        let hidden_author_pubkeys = Arc::new(hidden_author_pubkeys);
+        let rows = load_projection_rows_with_one_refresh(
+            move || {
+                let projection_store = Arc::clone(&projection_store);
+                let topic_key = topic_key.clone();
+                let channel_key = channel_key.clone();
+                let hidden_author_pubkeys = Arc::clone(&hidden_author_pubkeys);
+                async move {
+                    Ok(projection_store
+                        .list_channel_game_rooms(
+                            topic_key.as_str(),
+                            channel_key.as_str(),
+                            LIVE_GAME_LIST_LIMIT,
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
+                        .filter(|row| {
+                            row.room_kind != GameRoomKind::MetaverseRoom
+                                || row.metaverse.as_ref().is_some_and(|state| {
+                                    state.instance_status == DomeInstanceStatusV1::Active
+                                })
+                        })
+                        .collect())
+                }
+            },
+            |rows| rows.is_empty(),
+            || async {
+                // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
+                self.catch_up_scope_sessions(topic_id, &scope).await?;
+                Ok(())
+            },
         )
-        .into_iter()
-        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-        .filter(|row| {
-            row.room_kind != GameRoomKind::MetaverseRoom
-                || row
-                    .metaverse
-                    .as_ref()
-                    .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-        })
-        .collect::<Vec<_>>();
-        if rows.is_empty() {
-            // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
-            self.catch_up_scope_sessions(topic_id, &scope).await?;
-            rows = filter_channel_rows(
-                self.services
-                    .projection_store
-                    .list_topic_game_rooms(topic_id)
-                    .await?,
-                &allowed,
-                |row| row.channel_id.as_str(),
-            )
-            .into_iter()
-            .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-            .filter(|row| {
-                row.room_kind != GameRoomKind::MetaverseRoom
-                    || row
-                        .metaverse
-                        .as_ref()
-                        .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-            })
-            .collect();
-        }
+        .await?;
         let mut items = Vec::with_capacity(rows.len());
         for mut row in rows {
             let dome_hosting = if let Some(metaverse) = row.metaverse.as_ref() {

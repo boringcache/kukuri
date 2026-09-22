@@ -3,25 +3,46 @@ use super::*;
 #[async_trait]
 impl LiveGameProjectionStore for MemoryStore {
     async fn upsert_live_session_cache(&self, row: LiveSessionProjectionRow) -> Result<()> {
-        self.live_session_rows
-            .write()
-            .await
-            .insert(row.session_id.clone(), row);
+        let mut index = self.live_session_index.write().await;
+        let mut rows = self.live_session_rows.write().await;
+        if let Some(previous) = rows.get(row.session_id.as_str()) {
+            remove_projection_index_entry(
+                &mut index,
+                previous.topic_id.as_str(),
+                previous.channel_id.as_str(),
+                previous.started_at,
+                previous.session_id.as_str(),
+            );
+        }
+        insert_projection_index_entry(
+            &mut index,
+            row.topic_id.as_str(),
+            row.channel_id.as_str(),
+            row.started_at,
+            row.session_id.as_str(),
+        );
+        rows.insert(row.session_id.clone(), row);
         Ok(())
     }
 
-    async fn list_topic_live_sessions(
+    async fn list_channel_live_sessions(
         &self,
         topic_id: &str,
+        channel_id: &str,
+        limit: usize,
     ) -> Result<Vec<LiveSessionProjectionRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let presence = self.live_presence.read().await;
-        let mut items = self
-            .live_session_rows
-            .read()
-            .await
-            .values()
-            .filter(|row| row.topic_id == topic_id)
-            .cloned()
+        let index = self.live_session_index.read().await;
+        let rows = self.live_session_rows.read().await;
+        let scope = (topic_id.to_string(), channel_id.to_string());
+        let mut items = index
+            .get(&scope)
+            .into_iter()
+            .flat_map(|entries| entries.iter().take(limit))
+            .filter_map(|(_, Reverse(session_id))| rows.get(session_id).cloned())
             .collect::<Vec<_>>();
         for row in &mut items {
             row.viewer_count = if row.status == LiveSessionStatus::Ended {
@@ -41,39 +62,96 @@ impl LiveGameProjectionStore for MemoryStore {
                     .count()
             };
         }
-        items.sort_by(|left, right| {
-            right
-                .started_at
-                .cmp(&left.started_at)
-                .then_with(|| right.session_id.cmp(&left.session_id))
-        });
         Ok(items)
+    }
+
+    async fn get_live_session(
+        &self,
+        topic_id: &str,
+        session_id: &str,
+    ) -> Result<Option<LiveSessionProjectionRow>> {
+        let presence = self.live_presence.read().await;
+        let mut row = self
+            .live_session_rows
+            .read()
+            .await
+            .get(session_id)
+            .filter(|row| row.topic_id == topic_id)
+            .cloned();
+        if let Some(row) = row.as_mut() {
+            row.viewer_count = if row.status == LiveSessionStatus::Ended {
+                0
+            } else {
+                presence
+                    .iter()
+                    .filter(
+                        |((presence_topic, presence_channel, presence_session, _), _)| {
+                            presence_topic == &row.topic_id
+                                && presence_channel == &row.channel_id
+                                && presence_session == &row.session_id
+                        },
+                    )
+                    .count()
+            };
+        }
+        Ok(row)
     }
 
     async fn upsert_game_room_cache(&self, row: GameRoomProjectionRow) -> Result<()> {
-        self.game_room_rows
-            .write()
-            .await
-            .insert(row.room_id.clone(), row);
+        let mut index = self.game_room_index.write().await;
+        let mut rows = self.game_room_rows.write().await;
+        if let Some(previous) = rows.get(row.room_id.as_str()) {
+            remove_projection_index_entry(
+                &mut index,
+                previous.topic_id.as_str(),
+                previous.channel_id.as_str(),
+                previous.updated_at,
+                previous.room_id.as_str(),
+            );
+        }
+        insert_projection_index_entry(
+            &mut index,
+            row.topic_id.as_str(),
+            row.channel_id.as_str(),
+            row.updated_at,
+            row.room_id.as_str(),
+        );
+        rows.insert(row.room_id.clone(), row);
         Ok(())
     }
 
-    async fn list_topic_game_rooms(&self, topic_id: &str) -> Result<Vec<GameRoomProjectionRow>> {
-        let mut items = self
+    async fn list_channel_game_rooms(
+        &self,
+        topic_id: &str,
+        channel_id: &str,
+        limit: usize,
+    ) -> Result<Vec<GameRoomProjectionRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let index = self.game_room_index.read().await;
+        let rows = self.game_room_rows.read().await;
+        let scope = (topic_id.to_string(), channel_id.to_string());
+        Ok(index
+            .get(&scope)
+            .into_iter()
+            .flat_map(|entries| entries.iter().take(limit))
+            .filter_map(|(_, Reverse(room_id))| rows.get(room_id).cloned())
+            .collect())
+    }
+
+    async fn get_game_room(
+        &self,
+        topic_id: &str,
+        room_id: &str,
+    ) -> Result<Option<GameRoomProjectionRow>> {
+        Ok(self
             .game_room_rows
             .read()
             .await
-            .values()
+            .get(room_id)
             .filter(|row| row.topic_id == topic_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| right.room_id.cmp(&left.room_id))
-        });
-        Ok(items)
+            .cloned())
     }
 
     async fn upsert_dome_connection_projection(
@@ -156,5 +234,35 @@ impl LiveGameProjectionStore for MemoryStore {
             .await
             .retain(|(presence_topic, _, _, _), _| presence_topic != topic_id);
         Ok(())
+    }
+}
+
+fn insert_projection_index_entry(
+    index: &mut ProjectionIndex,
+    topic_id: &str,
+    channel_id: &str,
+    timestamp: i64,
+    id: &str,
+) {
+    index
+        .entry((topic_id.to_string(), channel_id.to_string()))
+        .or_default()
+        .insert((Reverse(timestamp), Reverse(id.to_string())));
+}
+
+fn remove_projection_index_entry(
+    index: &mut ProjectionIndex,
+    topic_id: &str,
+    channel_id: &str,
+    timestamp: i64,
+    id: &str,
+) {
+    let scope = (topic_id.to_string(), channel_id.to_string());
+    let remove_scope = index.get_mut(&scope).is_some_and(|entries| {
+        entries.remove(&(Reverse(timestamp), Reverse(id.to_string())));
+        entries.is_empty()
+    });
+    if remove_scope {
+        index.remove(&scope);
     }
 }

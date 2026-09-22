@@ -231,6 +231,10 @@ async fn instance_lookup_reads_a_constant_number_of_docs_records() {
     let mut state: serde_json::Value =
         serde_json::from_slice(&state_record.value).expect("decode Instance state");
 
+    // このtestが数えるのは同期的なInstance lookupだけ。createで起動した購読taskを止め、
+    // 並行するsession catch-upの読み出しを同じcounterへ混ぜない。
+    app.shutdown().await;
+
     docs.reset_records_returned();
     docs.clear_queries().await;
     let context = SpatialContextV1::Topic {
@@ -275,11 +279,9 @@ async fn owner_can_delete_without_derived_game_manifest() {
     let f = fixture().await;
     let row = f
         .store
-        .list_topic_game_rooms(TOPIC)
+        .get_game_room(TOPIC, f.dome_id.as_str())
         .await
         .unwrap()
-        .into_iter()
-        .find(|r| r.room_id == f.dome_id)
         .unwrap();
     *f.blobs.held_hash.lock().await = Some(row.manifest_blob_hash);
     let mut handles = f.app.services.clone();
@@ -436,7 +438,7 @@ async fn assert_pending_then_available(f: &Fixture) {
     // Pending is a read result, not removal of the canonical/projection record.
     assert_eq!(
         f.store
-            .list_topic_game_rooms(TOPIC)
+            .list_channel_game_rooms(TOPIC, "public", 100)
             .await
             .expect("stored rooms")
             .len(),
@@ -621,11 +623,9 @@ async fn current_instance_preset_controls_readiness_even_with_an_old_cache_row()
     let f = fixture().await;
     let old_row = f
         .store
-        .list_topic_game_rooms(TOPIC)
+        .get_game_room(TOPIC, f.dome_id.as_str())
         .await
         .expect("rows")
-        .into_iter()
-        .find(|row| row.room_id == f.dome_id)
         .expect("Dome row");
     let mut customization = old_row
         .metaverse

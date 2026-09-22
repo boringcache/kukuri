@@ -90,6 +90,7 @@ V-2 は Issue #1248 で削除し、V-1 は #1239 の AC-6（#1277）で背景の
 | Q-1 | `crates/store/src/sqlite/projections.rs` のタイムライン・thread の cursor 条件（`created_at < ? OR (created_at = ? AND object_id < ?)`） | OR 形のため、深いページほど索引の読み飛ばしが増える（遡った深さに比例） | T5b-2（解消済み。cursor の条件を行の値の比較にし、cursor の有無で SQL を分けた。thread は root を 1 行引きして、返信を索引の範囲で読む。query plan の test あり） |
 | Q-2 | `projection_support.rs` `filtered_timeline_page` / `filtered_thread_page` | 非表示の著者の行を除いて `limit` 件集まるまで、上限なくページを読み続ける。`limit` が 20 未満のときと非表示の著者があるときは、返す `next_cursor` が行を飛ばす | T5b-2（解消済み。読むページ数の上限 4。`next_cursor` は最後に返した行の位置） |
 | Q-3 | `timeline.rs` `list_profile_timeline` | author の全投稿・全 repost をロードしてソートしてからページを切る。`next_cursor` がページの次の行の位置で、次のページがその行を飛ばす | T6-2（解消済み。`indexes/profile/` の索引を cursor から読み、`next_cursor` は最後に返した行の位置。非表示の著者の読み飛ばしは 4 ページまで） |
+| Q-4 | `live.rs` / `game.rs` の live session・game room 一覧 | topic の全 channel の行を上限なく読み、app-api で 1 channel に絞る。対象 channel 内も履歴総数ぶん読む | #1292（解消済み。channel 別の複合索引範囲から最大100行。初回・追いつき後とも同じ上限。ScoreGameの既存cache比較はroom idの単一行取得） |
 
 ## 観察（本 Issue では変えない）
 
@@ -110,7 +111,7 @@ V-2 は Issue #1248 で削除し、V-1 は #1239 の AC-6（#1277）で背景の
 
 全件走査の入口（S-1〜S-10）と prefix の全件読み（P-1〜P-11、P-15）は、Non-goal（P-12〜P-14）を除いてすべて解消した。
 複数の private channel をまたぐページの取得（許可されない channel の行を読み飛ばす）は、#1280 で API・CLI から閉じ（`TimelineScope::AllJoined` の削除）、store から削除した。
-設計上残る、総件数に比例する読み出しは無い。T6 で入れた自分の replica の背景の仕事（自分の follow・block をすべて読む `sweep_own_author_edges` と、
+設計上残る、総件数に比例する読み出しは無い。projection 側で後から確認された Q-4 も #1292 で解消した。T6 で入れた自分の replica の背景の仕事（自分の follow・block をすべて読む `sweep_own_author_edges` と、
 プロフィールの索引の補完 `backfill_own_profile_index`）は、利用者が必要としない全件の読み出しなので外した（AGENTS.md: ユースケース上ユーザーが必要としない
 限り同期・復旧はしない。ADR 0052 §6、ADR 0053 §6）。取りこぼし・同期の区切りの後の author の追いつきは、自分を指す follow・block の key だけを読む。
 replica と projection の件数を 1,000 / 10,000 / 100,000 にしても、次の操作が docs から読む record と key の数と、projection の読み書きで

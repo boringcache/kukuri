@@ -221,8 +221,18 @@ impl ObjectProjectionStore for MemoryStore {
                 guard.insert(row.object_id.clone(), row);
             }
         }
-        self.live_session_rows.write().await.clear();
-        self.game_room_rows.write().await.clear();
+        {
+            let mut index = self.live_session_index.write().await;
+            let mut rows = self.live_session_rows.write().await;
+            index.clear();
+            rows.clear();
+        }
+        {
+            let mut index = self.game_room_index.write().await;
+            let mut rows = self.game_room_rows.write().await;
+            index.clear();
+            rows.clear();
+        }
         self.live_presence.write().await.clear();
         self.reaction_projection_rows.write().await.clear();
         self.content_observation_rows

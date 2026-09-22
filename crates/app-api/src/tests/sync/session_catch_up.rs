@@ -180,7 +180,7 @@ async fn subscription_start_projects_the_sessions_of_the_replica() {
     let projection_store: &dyn ProjectionStore = pair.viewer_store.as_ref();
     timeout(Duration::from_secs(10), async {
         while !projection_store
-            .list_topic_game_rooms(topic)
+            .list_channel_game_rooms(topic, "public", 100)
             .await
             .expect("rooms")
             .iter()
@@ -398,7 +398,7 @@ async fn catch_up_with_rooms(rooms: usize) -> (usize, Vec<String>, Vec<String>) 
     let returned = docs_sync.records_returned();
     let projection_store: &dyn ProjectionStore = pair.viewer_store.as_ref();
     let projected = projection_store
-        .list_topic_game_rooms(topic.as_str())
+        .list_channel_game_rooms(topic.as_str(), "public", 100)
         .await
         .expect("rooms")
         .into_iter()
@@ -560,7 +560,7 @@ async fn foreign_keys_after_the_game_prefix_do_not_hide_new_rooms() {
     let projection_store: &dyn ProjectionStore = pair.viewer_store.as_ref();
     assert!(
         projection_store
-            .list_topic_game_rooms(topic)
+            .list_channel_game_rooms(topic, "public", 100)
             .await
             .expect("rooms")
             .iter()

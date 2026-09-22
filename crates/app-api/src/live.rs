@@ -17,44 +17,50 @@ impl AppService {
             .projection_store
             .clear_expired_live_presence(Utc::now().timestamp_millis())
             .await?;
-        let allowed = BTreeSet::from([self.allowed_channel_id_for_scope(topic_id, &scope).await?]);
-        let mut rows = filter_channel_rows(
-            self.services
-                .projection_store
-                .list_topic_live_sessions(topic_id)
-                .await?,
-            &allowed,
-            |row| row.channel_id.as_str(),
-        )
-        .into_iter()
-        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-        .collect::<Vec<_>>();
-        let needs_refresh = rows
-            .iter()
-            .any(|row| row.status == LiveSessionStatus::Live && row.viewer_count == 0);
-        if rows.is_empty() || needs_refresh {
-            self.maybe_restart_scope_subscription(topic_id, &scope)
-                .await;
-            self.maybe_restart_scope_replica_sync(topic_id, &scope)
-                .await;
-            // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
-            self.catch_up_scope_sessions(topic_id, &scope).await?;
-            self.services
-                .projection_store
-                .clear_expired_live_presence(Utc::now().timestamp_millis())
-                .await?;
-            rows = filter_channel_rows(
+        let channel_id = self.allowed_channel_id_for_scope(topic_id, &scope).await?;
+        let projection_store = Arc::clone(&self.services.projection_store);
+        let topic_key = topic_id.to_string();
+        let channel_key = channel_id.clone();
+        let hidden_author_pubkeys = Arc::new(hidden_author_pubkeys);
+        let rows = load_projection_rows_with_one_refresh(
+            move || {
+                let projection_store = Arc::clone(&projection_store);
+                let topic_key = topic_key.clone();
+                let channel_key = channel_key.clone();
+                let hidden_author_pubkeys = Arc::clone(&hidden_author_pubkeys);
+                async move {
+                    Ok(projection_store
+                        .list_channel_live_sessions(
+                            topic_key.as_str(),
+                            channel_key.as_str(),
+                            LIVE_GAME_LIST_LIMIT,
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
+                        .collect())
+                }
+            },
+            |rows| {
+                rows.is_empty()
+                    || rows
+                        .iter()
+                        .any(|row| row.status == LiveSessionStatus::Live && row.viewer_count == 0)
+            },
+            || async {
+                self.maybe_restart_scope_subscription(topic_id, &scope)
+                    .await;
+                self.maybe_restart_scope_replica_sync(topic_id, &scope)
+                    .await;
+                // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
+                self.catch_up_scope_sessions(topic_id, &scope).await?;
                 self.services
                     .projection_store
-                    .list_topic_live_sessions(topic_id)
-                    .await?,
-                &allowed,
-                |row| row.channel_id.as_str(),
-            )
-            .into_iter()
-            .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-            .collect();
-        }
+                    .clear_expired_live_presence(Utc::now().timestamp_millis())
+                    .await
+            },
+        )
+        .await?;
         self.cleanup_ended_live_presence_tasks(&rows).await;
         let joined_sessions = self.subscription_registry.live_presence_tasks.lock().await;
         let mut items = Vec::with_capacity(rows.len());
@@ -232,15 +238,29 @@ impl AppService {
             .await?;
         let hint_transport = Arc::clone(&self.services.hint_transport);
         let projection_store = Arc::clone(&self.services.projection_store);
+        let live_presence_tasks = Arc::clone(&self.subscription_registry.live_presence_tasks);
         let hint_topic = channel_hint_topic_for(topic_id, state.channel_id.as_ref());
         let topic_key = topic_id.to_string();
         let channel_key_for_task = channel_key.clone();
         let session_key = session_id.to_string();
+        let task_key_for_task = task_key.clone();
         let author = Pubkey::from(self.current_author_pubkey());
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
+                if matches!(
+                    projection_store
+                        .get_live_session(topic_key.as_str(), session_key.as_str())
+                        .await,
+                    Ok(Some(row)) if row.status == LiveSessionStatus::Ended
+                ) {
+                    live_presence_tasks
+                        .lock()
+                        .await
+                        .remove(task_key_for_task.as_str());
+                    return;
+                }
                 let now = Utc::now().timestamp_millis();
                 let _ = projection_store
                     .upsert_live_presence(

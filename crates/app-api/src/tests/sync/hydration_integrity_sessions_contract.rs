@@ -566,9 +566,14 @@ async fn forged_metaverse_room_is_not_listed_as_the_victims_dome() {
         .await
         .expect("hydrate");
     }
-    let rows = LiveGameProjectionStore::list_topic_game_rooms(store.as_ref(), topic.as_str())
-        .await
-        .expect("rows");
+    let rows = LiveGameProjectionStore::list_channel_game_rooms(
+        store.as_ref(),
+        topic.as_str(),
+        "public",
+        100,
+    )
+    .await
+    .expect("rows");
     assert!(
         rows.iter()
             .all(|row| row.room_id != "dome-000000000000000000000000"),

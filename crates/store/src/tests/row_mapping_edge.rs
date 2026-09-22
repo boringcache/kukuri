@@ -204,7 +204,7 @@ async fn game_room_status_legacy_aliases_map_to_current_variants() {
     .await
     .expect("insert legacy finished");
 
-    let rooms = LiveGameProjectionStore::list_topic_game_rooms(&store, topic_id)
+    let rooms = LiveGameProjectionStore::list_channel_game_rooms(&store, topic_id, "public", 100)
         .await
         .expect("list game rooms");
 
@@ -260,7 +260,7 @@ async fn game_room_kind_empty_string_maps_to_score_game() {
         .await
         .expect("insert empty room_kind");
 
-    let rooms = LiveGameProjectionStore::list_topic_game_rooms(&store, topic_id)
+    let rooms = LiveGameProjectionStore::list_channel_game_rooms(&store, topic_id, "public", 100)
         .await
         .expect("list game rooms");
 
@@ -424,7 +424,7 @@ async fn bookmarked_post_blank_root_and_reply_map_to_none() {
     assert_eq!(rows[1].reply_to_object_id, None);
 }
 
-/// ケース 6a: 未知の status 値('nonsense')が残った行は list_topic_game_rooms が Err になる
+/// ケース 6a: 未知の status 値('nonsense')が残った行は list_channel_game_rooms が Err になる
 /// (row_mapping.rs parse_game_status の bail)。
 #[tokio::test]
 async fn game_room_unknown_status_fails_listing() {
@@ -441,13 +441,13 @@ async fn game_room_unknown_status_fails_listing() {
     .await
     .expect("insert unknown status");
 
-    let err = LiveGameProjectionStore::list_topic_game_rooms(&store, topic_id)
+    let err = LiveGameProjectionStore::list_channel_game_rooms(&store, topic_id, "public", 100)
         .await
         .expect_err("unknown status must fail");
     assert_eq!(err.to_string(), "unknown game room status: nonsense");
 }
 
-/// ケース 6b: 未知の room_kind 値('vr_world')が残った行も list_topic_game_rooms が Err になる
+/// ケース 6b: 未知の room_kind 値('vr_world')が残った行も list_channel_game_rooms が Err になる
 /// (row_mapping.rs parse_game_room_kind の bail)。
 #[tokio::test]
 async fn game_room_unknown_room_kind_fails_listing() {
@@ -457,7 +457,7 @@ async fn game_room_unknown_room_kind_fails_listing() {
         .await
         .expect("insert unknown room_kind");
 
-    let err = LiveGameProjectionStore::list_topic_game_rooms(&store, topic_id)
+    let err = LiveGameProjectionStore::list_channel_game_rooms(&store, topic_id, "public", 100)
         .await
         .expect_err("unknown room_kind must fail");
     assert_eq!(err.to_string(), "unknown game room kind: vr_world");

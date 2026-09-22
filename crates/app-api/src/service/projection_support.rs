@@ -1,8 +1,40 @@
 use super::*;
+use std::future::Future;
 
 /// 非表示の著者の行を読み飛ばすために、1 回の取得で読む projection のページ数の上限(ADR 0052 §5)。
 /// 非表示の著者の投稿が続く範囲でも、1 回の取得が読む行数を定数で抑える。
 pub(crate) const HIDDEN_AUTHOR_SKIP_PAGES: usize = 4;
+/// live / game 一覧1回で読むprojection行の上限。catch-up後の再取得も同じ上限を使う(#1292)。
+pub(crate) const LIVE_GAME_LIST_LIMIT: usize = 100;
+
+/// projection 一覧を1回読み、必要な場合だけrefresh後にもう1回読む。
+/// 一覧のSQL呼出回数を1回または2回に固定し、refresh失敗時は再取得しない(#1292)。
+pub(crate) async fn load_projection_rows_with_one_refresh<
+    T,
+    Load,
+    LoadFuture,
+    NeedsRefresh,
+    Refresh,
+    RefreshFuture,
+>(
+    mut load: Load,
+    needs_refresh: NeedsRefresh,
+    refresh: Refresh,
+) -> Result<Vec<T>>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: Future<Output = Result<Vec<T>>>,
+    NeedsRefresh: FnOnce(&[T]) -> bool,
+    Refresh: FnOnce() -> RefreshFuture,
+    RefreshFuture: Future<Output = Result<()>>,
+{
+    let rows = load().await?;
+    if !needs_refresh(rows.as_slice()) {
+        return Ok(rows);
+    }
+    refresh().await?;
+    load().await
+}
 
 enum VisibleRows {
     /// `limit` 件に届いた、または行が尽きた。値は、返すページの `next_cursor`。
@@ -121,16 +153,6 @@ pub(crate) async fn filtered_thread_page(
         items,
         next_cursor: current_cursor,
     })
-}
-
-pub(crate) fn filter_channel_rows<T>(
-    rows: Vec<T>,
-    allowed_channels: &BTreeSet<String>,
-    channel_id: impl Fn(&T) -> &str,
-) -> Vec<T> {
-    rows.into_iter()
-        .filter(|row| allowed_channels.contains(channel_id(row)))
-        .collect()
 }
 
 pub(crate) fn object_projection_row_is_hidden(
@@ -333,4 +355,63 @@ pub(crate) fn active_private_channel_participants(
         .filter(|participant| participant.epoch_id == epoch_id && participant.left_at.is_none())
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod bounded_list_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn projection_list_calls_the_store_once_or_twice_only() {
+        for needs_refresh in [false, true] {
+            let loads = Arc::new(AtomicUsize::new(0));
+            let refreshes = Arc::new(AtomicUsize::new(0));
+            let rows = load_projection_rows_with_one_refresh(
+                {
+                    let loads = Arc::clone(&loads);
+                    move || {
+                        let value = loads.fetch_add(1, Ordering::SeqCst) + 1;
+                        async move { Ok(vec![value]) }
+                    }
+                },
+                |_| needs_refresh,
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move || async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("bounded projection list");
+
+            let expected_loads = if needs_refresh { 2 } else { 1 };
+            assert_eq!(loads.load(Ordering::SeqCst), expected_loads);
+            assert_eq!(refreshes.load(Ordering::SeqCst), expected_loads - 1);
+            assert_eq!(rows, vec![expected_loads]);
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_list_does_not_read_again_when_refresh_fails() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let error = load_projection_rows_with_one_refresh(
+            {
+                let loads = Arc::clone(&loads);
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(vec![1_usize]) }
+                }
+            },
+            |_| true,
+            || async { anyhow::bail!("refresh failed") },
+        )
+        .await
+        .expect_err("refresh failure");
+
+        assert_eq!(error.to_string(), "refresh failed");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
 }

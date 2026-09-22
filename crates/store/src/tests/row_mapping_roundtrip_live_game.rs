@@ -164,9 +164,10 @@ async fn live_session_roundtrip_preserves_all_columns_and_computes_viewer_count(
     .await
     .expect("presence viewer-5");
 
-    let listed = LiveGameProjectionStore::list_topic_live_sessions(&store, LIVE_TOPIC)
-        .await
-        .expect("list live sessions");
+    let listed =
+        LiveGameProjectionStore::list_channel_live_sessions(&store, LIVE_TOPIC, "ch:live", 100)
+            .await
+            .expect("list live sessions");
 
     // put 時の viewer_count=99 は破棄され、COUNT(=2)が返る。
     let mut expected_max = live_session_max();
@@ -174,9 +175,12 @@ async fn live_session_roundtrip_preserves_all_columns_and_computes_viewer_count(
     // None で put した ended_at は None のまま読み出される
     // (WP-B16 で NULL decode quirk を解消)。
     // started_at DESC, session_id DESC の順序ごと全列固定。
+    assert_eq!(listed, vec![expected_max, live_session_ended()]);
     assert_eq!(
-        listed,
-        vec![expected_max, live_session_min(), live_session_ended()]
+        LiveGameProjectionStore::list_channel_live_sessions(&store, LIVE_TOPIC, "public", 100,)
+            .await
+            .expect("list public live sessions"),
+        vec![live_session_min()]
     );
 }
 
@@ -336,9 +340,15 @@ async fn game_room_roundtrip_preserves_all_columns() {
     // (副キー room_id DESC の tie-break はここでは未行使 —
     // T6 の pagination テストと T8 の backend_parity が担保)。
     assert_eq!(
-        LiveGameProjectionStore::list_topic_game_rooms(&store, GAME_TOPIC)
+        LiveGameProjectionStore::list_channel_game_rooms(&store, GAME_TOPIC, "ch:game", 100,)
             .await
             .expect("list game rooms"),
-        vec![max, min]
+        vec![max]
+    );
+    assert_eq!(
+        LiveGameProjectionStore::list_channel_game_rooms(&store, GAME_TOPIC, "public", 100,)
+            .await
+            .expect("list public game rooms"),
+        vec![min]
     );
 }

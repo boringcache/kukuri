@@ -41,7 +41,7 @@ mod bookmarks;
 mod connection;
 mod direct_messages;
 mod envelopes;
-mod live_game;
+pub(crate) mod live_game;
 mod notifications;
 mod observations;
 pub(crate) mod projections;
