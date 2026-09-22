@@ -137,6 +137,7 @@ table game_room_cache
   column cid=14 name=channel_id type=TEXT notnull=1 default=Some("'public'") pk=0
   column cid=15 name=room_kind type=TEXT notnull=1 default=Some("'score_game'") pk=0
   column cid=16 name=metaverse_json type=TEXT notnull=0 default=None pk=0
+  column cid=17 name=score_revision type=INTEGER notnull=0 default=None pk=0
 table live_presence_cache
   column cid=0 name=topic_id type=TEXT notnull=1 default=None pk=1
   column cid=1 name=session_id type=TEXT notnull=1 default=None pk=2
@@ -160,6 +161,7 @@ table live_session_cache
   column cid=12 name=derived_at type=INTEGER notnull=1 default=None pk=0
   column cid=13 name=projection_version type=INTEGER notnull=1 default=None pk=0
   column cid=14 name=channel_id type=TEXT notnull=1 default=Some("'public'") pk=0
+  column cid=15 name=revision type=INTEGER notnull=1 default=Some("0") pk=0
 table muted_authors
   column cid=0 name=author_pubkey type=TEXT notnull=0 default=None pk=1
   column cid=1 name=muted_at type=INTEGER notnull=1 default=None pk=0

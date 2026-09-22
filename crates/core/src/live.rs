@@ -22,6 +22,8 @@ pub enum LiveSessionStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSessionManifestBlobV1 {
     pub session_id: String,
+    /// Owner-signed monotonic revision. The first persisted state is 1.
+    pub revision: i64,
     pub topic_id: TopicId,
     #[serde(default)]
     pub channel_id: Option<ChannelId>,

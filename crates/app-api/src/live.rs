@@ -132,6 +132,7 @@ impl AppService {
         let topic = TopicId::new(topic_id);
         let manifest = LiveSessionManifestBlobV1 {
             session_id: session_id.clone(),
+            revision: 1,
             topic_id: topic.clone(),
             channel_id: channel_id.clone(),
             owner_pubkey: Pubkey::from(self.current_author_pubkey()),
@@ -181,6 +182,10 @@ impl AppService {
             return Ok(());
         }
         let now = Utc::now().timestamp_millis();
+        manifest.revision = manifest
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("live session revision overflow"))?;
         manifest.status = LiveSessionStatus::Ended;
         manifest.ended_at = Some(now);
         let state = self

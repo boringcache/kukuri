@@ -36,6 +36,8 @@ pub(crate) enum SessionRejection {
     IdNotBoundToOwner,
     /// state・manifest blob が、署名された manifest と合わない。
     ManifestMismatch,
+    /// owner の署名対象となる単調増加 revision が無い、または不正。
+    InvalidRevision,
     /// manifest が申告する topic・channel が、読んだ replica と合わない。
     ScopeMismatch,
 }
@@ -50,6 +52,7 @@ impl SessionRejection {
             Self::SignerIsNotOwner => "the manifest was not signed by the session owner",
             Self::IdNotBoundToOwner => "the session id is not bound to its owner",
             Self::ManifestMismatch => "the state or manifest blob differs from the signed manifest",
+            Self::InvalidRevision => "the signed session revision is missing or invalid",
             Self::ScopeMismatch => "the session does not belong to the replica it was read from",
         }
     }
@@ -149,6 +152,9 @@ impl VerifiedLiveSession {
         if *signer != manifest.owner_pubkey {
             return Err(SessionRejection::SignerIsNotOwner);
         }
+        if manifest.revision < 1 {
+            return Err(SessionRejection::InvalidRevision);
+        }
         if !id_is_bound_to_owner(manifest.session_id.as_str(), &manifest.owner_pubkey) {
             return Err(SessionRejection::IdNotBoundToOwner);
         }
@@ -177,6 +183,10 @@ impl VerifiedLiveSession {
 
     pub(crate) fn manifest(&self) -> &LiveSessionManifestBlobV1 {
         &self.manifest
+    }
+
+    pub(crate) fn revision(&self) -> i64 {
+        self.manifest.revision
     }
 
     pub(crate) fn topic_id(&self) -> &str {
@@ -272,7 +282,7 @@ pub(crate) async fn load_verified_live_session(
         .await?
             && newest
                 .as_ref()
-                .is_none_or(|current| verified.state.updated_at > current.state.updated_at)
+                .is_none_or(|current| verified.revision() > current.revision())
         {
             newest = Some(verified);
         }
@@ -314,6 +324,9 @@ impl VerifiedGameRoom {
                 }
                 if !id_is_bound_to_owner(manifest.room_id.as_str(), &manifest.owner_pubkey) {
                     return Err(SessionRejection::IdNotBoundToOwner);
+                }
+                if manifest.score_revision.is_none_or(|revision| revision < 1) {
+                    return Err(SessionRejection::InvalidRevision);
                 }
             }
             GameRoomKind::MetaverseRoom => {
@@ -360,6 +373,10 @@ impl VerifiedGameRoom {
 
     pub(crate) fn manifest(&self) -> &GameRoomManifestBlobV1 {
         &self.manifest
+    }
+
+    pub(crate) fn score_revision(&self) -> Option<i64> {
+        self.manifest.score_revision
     }
 
     pub(crate) fn topic_id(&self) -> &str {
@@ -480,7 +497,12 @@ pub(crate) async fn load_verified_game_room(
         .await?
             && newest
                 .as_ref()
-                .is_none_or(|current| verified.state.updated_at > current.state.updated_at)
+                .is_none_or(|current| match verified.manifest.room_kind {
+                    GameRoomKind::ScoreGame => verified.score_revision() > current.score_revision(),
+                    GameRoomKind::MetaverseRoom => {
+                        verified.state.updated_at > current.state.updated_at
+                    }
+                })
         {
             newest = Some(verified);
         }

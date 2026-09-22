@@ -286,6 +286,13 @@ impl Fixture {
                 .unwrap(),
         )
         .unwrap();
+        manifest.score_revision = Some(
+            manifest
+                .score_revision
+                .expect("ScoreGame revision")
+                .checked_add(1)
+                .expect("ScoreGame revision overflow"),
+        );
         manifest.scores[0].score = score;
         manifest.status = GameRoomStatus::Running;
         manifest.phase_label = Some("round 1".into());

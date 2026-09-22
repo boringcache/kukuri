@@ -146,6 +146,7 @@ pub struct BookmarkedPostRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSessionProjectionRow {
     pub session_id: String,
+    pub revision: i64,
     pub topic_id: String,
     pub channel_id: String,
     pub host_pubkey: String,
@@ -166,6 +167,7 @@ pub struct LiveSessionProjectionRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameRoomProjectionRow {
     pub room_id: String,
+    pub score_revision: Option<i64>,
     pub topic_id: String,
     pub channel_id: String,
     pub host_pubkey: String,

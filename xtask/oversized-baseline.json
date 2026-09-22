@@ -17,6 +17,10 @@
       "path": "crates/app-api/src/dome_hosting.rs"
     },
     {
+      "lines": 1206,
+      "path": "crates/app-api/src/tests/sync/hydration_integrity_sessions_contract.rs"
+    },
+    {
       "lines": 1191,
       "path": "crates/metaverse-host/src/lib.rs"
     },
