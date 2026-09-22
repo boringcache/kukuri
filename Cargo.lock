@@ -3649,6 +3649,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-docs",
  "iroh-gossip",
+ "kukuri-core",
  "kukuri-transport",
  "serde",
  "serde_json",

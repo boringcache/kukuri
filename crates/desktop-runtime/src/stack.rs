@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use kukuri_blob_service::{BlobService, BlobStatus, IrohBlobService, StoredBlob};
-use kukuri_core::{BlobHash, GossipHint, ReplicaId, TopicId};
+use kukuri_core::{BlobHash, GossipHint, KukuriKeys, ReplicaId, TopicId};
 use kukuri_docs_sync::{
     DocEventStream, DocFetchPolicy, DocKeyPage, DocKeyQuery, DocOp, DocQuery, DocRecord, DocsSync,
     IrohDocsSync, ReplicaNoticeStream,
@@ -208,6 +208,8 @@ pub(crate) struct SharedIrohStack {
     pub(crate) dht_options: DhtDiscoveryOptions,
     /// アカウントの署名鍵から導出した docs author の種(ADR 0053)。stack を作り直すたびに設定し直す。
     docs_author_seed: Mutex<Option<kukuri_core::DocsAuthorSeed>>,
+    /// 再構築するendpointでも同じaccountだけを広告する。stack/account寿命に限定する。
+    receive_binding_keys: Mutex<Option<Arc<KukuriKeys>>>,
     /// `current` の stack が shutdown 済みか。作り直しが古い stack の shutdown の後で失敗すると、shutdown 済みの stack が残る。
     /// その stack の docs actor への要求は、返事が来ないまま時間切れになりうるので、健全性の確認をせず、作り直しが要るとみなす。
     current_shut_down: AtomicBool,
@@ -287,6 +289,7 @@ impl SharedIrohStack {
             network_config,
             dht_options,
             docs_author_seed: Mutex::new(None),
+            receive_binding_keys: Mutex::new(None),
             current_shut_down: AtomicBool::new(false),
             #[cfg(test)]
             rebuild_before_shutdown_gate: Mutex::new(None),
@@ -309,6 +312,18 @@ impl SharedIrohStack {
         let id = docs_sync.use_account_docs_author(&seed).await?;
         *self.docs_author_seed.lock().await = Some(seed);
         Ok(id)
+    }
+
+    pub(crate) async fn use_account_receive_binding(&self, keys: Arc<KukuriKeys>) -> Result<()> {
+        let current = self.current.lock().await;
+        current
+            .as_ref()
+            .context("missing active iroh stack")?
+            .node
+            .install_receive_binding(keys.clone())
+            .await?;
+        *self.receive_binding_keys.lock().await = Some(keys);
+        Ok(())
     }
 
     pub(crate) async fn rebuild(
@@ -363,6 +378,9 @@ impl SharedIrohStack {
         // 差し替える前に設定する。設定の無い stack が、端末ごとの docs author で書くことが無いようにする。
         if let Some(seed) = self.docs_author_seed.lock().await.as_ref() {
             next.docs_sync.use_account_docs_author(seed).await?;
+        }
+        if let Some(keys) = self.receive_binding_keys.lock().await.as_ref() {
+            next.node.install_receive_binding(keys.clone()).await?;
         }
         next.blob_service
             .restore_peer_state(blob_peer_state)
@@ -590,6 +608,8 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time::{Duration, timeout};
 
+    mod account_docs_author;
+
     // #1152 / ADR 0046 §6.2: desktop が実際に使う `ReloadableBlobService` 越しでも、
     // ephemeral 取得は remote の bytes をローカルへ保存せず、状態確認は remote から取得しない。
     // 既定実装へ落ちる method があると、黙って永続化する `fetch_blob` に戻る。
@@ -801,65 +821,6 @@ mod tests {
             .await
             .expect("stack b shutdown timeout")
             .expect("stack b shutdown");
-    }
-
-    // #1258 TR-1: 起動時に設定した docs author は、stack を作り直しても同じで、`ReloadableDocsSync` 越しに
-    // 照会と「docs author と key の組」の読み出しが内側へ届く。
-    #[tokio::test]
-    async fn account_docs_author_survives_a_stack_rebuild() {
-        let dir = tempdir().expect("tempdir");
-        let discovery_config = DiscoveryConfig::static_peer_default();
-        let stack = SharedIrohStack::new(
-            &dir.path().join("stack-docs-author"),
-            TransportNetworkConfig::loopback(),
-            &discovery_config,
-            &[],
-            DhtDiscoveryOptions::disabled(),
-            TransportRelayConfig::default(),
-        )
-        .await
-        .expect("stack");
-        assert_eq!(
-            stack.docs_sync.local_docs_author().await.expect("before"),
-            None
-        );
-        let keys = kukuri_core::generate_keys();
-        let id = stack
-            .use_account_docs_author(keys.derive_docs_author_seed())
-            .await
-            .expect("use the account docs author");
-        let replica = kukuri_docs_sync::topic_replica_id("kukuri:topic:stack-docs-author");
-        let write = |key: &'static str| {
-            stack.docs_sync.apply_doc_op(
-                &replica,
-                DocOp::SetBytes {
-                    key: key.into(),
-                    value: key.as_bytes().to_vec(),
-                },
-            )
-        };
-        write("objects/before/envelope").await.expect("write");
-
-        stack
-            .rebuild(&discovery_config, &[], TransportRelayConfig::default())
-            .await
-            .expect("rebuild");
-        assert_eq!(
-            stack.docs_sync.local_docs_author().await.expect("after"),
-            Some(id.clone()),
-            "a rebuilt stack must keep writing as the account docs author"
-        );
-        write("objects/after/envelope").await.expect("write");
-        for key in ["objects/before/envelope", "objects/after/envelope"] {
-            let record = stack
-                .docs_sync
-                .query_replica_by_author(&replica, id.as_str(), key, DocFetchPolicy::LocalOnly)
-                .await
-                .expect("read by docs author")
-                .expect("record");
-            assert_eq!(record.docs_author.as_deref(), Some(id.as_str()));
-        }
-        stack.shutdown_checked().await.expect("shutdown");
     }
 
     /// `ReloadableBlobService` 越しの `unpin_blob` が内側の `IrohBlobService` まで届き、

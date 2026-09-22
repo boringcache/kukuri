@@ -114,6 +114,18 @@ irohのmapped address表は `mapped_addrs.rs::AddrMap` の正引き/逆引きHas
 この3行は§4.1の限定実装範囲。署名bindingを取り交わすだけでは、account routeのgossip配信、
 private capsule、旧DM outboxの移行を達成したとは扱わない。
 
+### P3の本番binding登録（account route配送は未接続）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N53 | `IrohDocsNode::spawn` → Routerの`ReceiveBindingSlot` → QUIC binding応答 | node生成時は鍵なしで即拒否。2要求・2秒・1byte request・1,024byte応答。要求時にのみ300秒binding署名 | `receive_binding_slot_rejects_until_account_is_installed_and_signs_at_request_time` |
+| N54 | runtime identity load → `SharedIrohStack::use_account_receive_binding` → node slot導入 | docs author設定後、同一accountのみ。別account導入失敗でも元の鍵を保持。未導入時は外部応答0 | `desktop_runtime_installs_binding_for_loaded_account`、`account_binding_is_live_only_after_identity_load_and_survives_stack_rebuild`、slotの別account test |
+| N55 | stack rebuild / node shutdown → 新slot再導入 / 旧slot停止 | 切替前に新nodeへ同じ鍵を導入。旧nodeは停止開始で新要求を拒否、既存要求の終了を待ち鍵を解除 | 同じ実node rebuild test、slot clear test |
+
+N53〜55は公開accountと接続endpointの対応だけを提供する。recipientのscope/DM mutual/private能力、
+gossip offerと出典の照合、旧listenerの撤去やoutbox輸送先変更はまだ行わない。slotの署名鍵は
+account runtime/node寿命内に保持し、binding応答に秘密値・参照本文を含めない。
+
 ### 追加した暗号化参照（P2実証、I/O未接続）
 
 | ID | 入口 → helper → sink | guard / 上限 | 対応contract |

@@ -182,8 +182,10 @@ reply > quote_repost > repost > followed > mentionの優先度、既読状態、
 ### 4.1 endpoint bindingのwire契約
 
 P2の実現性確認として `core::ReceiveEndpointBindingV1` と
-`transport::ReceiveBindingProtocol` を実装する。account runtimeへの常時登録はP3で行い、
-bindingの追加だけで通知/DM受信経路を置換しない。
+`transport::ReceiveBindingProtocol` を実装した。P3ではnodeのRouterへ空の
+`ReceiveBindingSlot`を登録し、account鍵のload後にだけ有効化する。要求時に短命bindingを署名し、
+更新timerを持たない。stack再構築では同じaccount鍵を新nodeへ先に導入し、旧nodeの停止開始時に
+新規要求を拒否する。bindingの登録だけで通知/DM受信経路を置換しない。
 
 - routeは `receive::v1::<hex>`。hexはBLAKE3の
   `b"kukuri:account-receive-route:v1\0" || accountの32byte公開鍵` の小文字hex。
@@ -201,8 +203,9 @@ bindingの追加だけで通知/DM受信経路を置換しない。
 - clientはownerの選択候補1件へ接続し、受付時からのdeadline内で照合する。内部retryを持たない。
   照合先はwire中のendpoint IDの自己比較ではなく、QUICが認証した `Connection::remote_id()`。
   結果・失敗・caller取消のいずれでもこの短期接続を閉じる。
-- bindingの更新は同一account/endpointの新しい発行時刻だけ。account切替/endpoint再構築は
-  runtimeの世代切替でhandlerごと置換する。未知accountのlistenerを旧accountのhandlerへ混ぜない。
+- 固定bindingを交換するproof handlerの更新は同一account/endpointの新しい発行時刻だけ。
+  本番slotは要求時署名で失効を避け、同一nodeへの別account導入を拒否する。account切替/endpoint再構築は
+  runtimeの世代切替でslotごと置換する。未知accountのlistenerを旧accountのslotへ混ぜない。
 
 この交換が確認するのはaccountとendpointの対応であり、投稿scope・private能力・通知条件は
 後続の受信guardで別に確認する。外部送信は公開bindingだけで、秘密鍵・private参照・通知本文は含めない。

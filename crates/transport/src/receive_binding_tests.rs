@@ -56,6 +56,73 @@ async fn receive_binding_exchange_uses_authenticated_endpoint_without_cn() {
 }
 
 #[tokio::test]
+async fn receive_binding_slot_rejects_until_account_is_installed_and_signs_at_request_time() {
+    let sender = endpoint().await;
+    let receiver = endpoint().await;
+    let keys = Arc::new(KukuriKeys::generate());
+    let slot = ReceiveBindingSlot::new(receiver.id());
+    let router = Router::builder(receiver.clone())
+        .accept(RECEIVE_BINDING_ALPN, slot.clone())
+        .spawn();
+
+    assert!(
+        fetch_receive_endpoint_binding(
+            &sender,
+            receiver.addr(),
+            &keys.public_key(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .is_err(),
+        "an unbound node must not assert an account route"
+    );
+
+    slot.install(keys.clone()).await.unwrap();
+    let verified = fetch_receive_endpoint_binding(
+        &sender,
+        receiver.addr(),
+        &keys.public_key(),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.endpoint_id(), receiver.id().to_string());
+    assert_eq!(verified.account(), &keys.public_key());
+    assert!(verified.expires_at_ms() > chrono::Utc::now().timestamp_millis());
+
+    assert!(
+        slot.install(Arc::new(KukuriKeys::generate()))
+            .await
+            .is_err()
+    );
+    assert!(
+        fetch_receive_endpoint_binding(
+            &sender,
+            receiver.addr(),
+            &keys.public_key(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .is_ok(),
+        "a rejected account replacement must preserve the active route"
+    );
+    slot.clear().await;
+    assert!(
+        fetch_receive_endpoint_binding(
+            &sender,
+            receiver.addr(),
+            &keys.public_key(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .is_err(),
+        "shutdown must stop advertising the account"
+    );
+    router.shutdown().await.unwrap();
+    sender.close().await;
+}
+
+#[tokio::test]
 async fn receive_binding_replacement_cannot_switch_account_or_endpoint() {
     let endpoint = endpoint().await;
     let keys = KukuriKeys::generate();
