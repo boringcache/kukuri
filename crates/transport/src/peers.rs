@@ -21,6 +21,9 @@ use tokio::sync::{Mutex, Semaphore, watch};
 // 元実装(docs-sync / blob-service)と同じ tokio の Instant を使う(テストでの時間制御と互換)。
 use tokio::time::Instant;
 
+mod health;
+pub use health::{BlobPeerAttempt, BlobPeerHealth, MAX_BLOB_PEER_RECORDS};
+
 use crate::config::SeedPeer;
 use crate::tickets::relay_assisted_endpoint_addr;
 
@@ -36,6 +39,7 @@ const PEER_CONNECTION_STATE_TTL: Duration = Duration::from_secs(300);
 const PEER_FETCH_SUCCESS_TTL: Duration = Duration::from_secs(600);
 const PEER_FETCH_REQUEST_LIMIT: u64 = 16;
 const PEER_FETCH_REQUEST_WINDOW: Duration = Duration::from_secs(1);
+const RECENT_PEER_FETCH_WINDOW: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PeerConnectionStatus {
@@ -53,6 +57,7 @@ pub enum PeerFetchFailure {
     TransferFailed,
     TransferTimeout,
     NotFound,
+    Rejected,
     Cancelled,
 }
 
@@ -62,6 +67,8 @@ pub struct PeerStateSnapshot {
     pub connection_status: PeerConnectionStatus,
     pub fetch_successes: u64,
     pub fetch_failures: u64,
+    pub fetch_misses: u64,
+    pub fetch_rejections: u64,
     pub consecutive_fetch_failures: u32,
     pub smoothed_fetch_latency_ms: Option<u64>,
 }
@@ -73,6 +80,8 @@ struct PeerRuntimeRecord {
     connection_observed_at: Option<Instant>,
     fetch_successes: u64,
     fetch_failures: u64,
+    fetch_misses: u64,
+    fetch_rejections: u64,
     consecutive_fetch_failures: u32,
     smoothed_fetch_latency_ms: Option<u64>,
     last_success_at: Option<Instant>,
@@ -97,6 +106,8 @@ impl PeerRuntimeRecord {
             connection_status: self.connection_status_at(now),
             fetch_successes: self.fetch_successes,
             fetch_failures: self.fetch_failures,
+            fetch_misses: self.fetch_misses,
+            fetch_rejections: self.fetch_rejections,
             consecutive_fetch_failures: self.consecutive_fetch_failures,
             smoothed_fetch_latency_ms: self.smoothed_fetch_latency_ms,
         }
@@ -326,22 +337,40 @@ pub struct PeerAddrBook {
     learned_peers: Mutex<BTreeMap<String, EndpointAddr>>,
     seed_peers: Mutex<BTreeMap<String, EndpointAddr>>,
     imported_peers: Mutex<BTreeMap<String, EndpointAddr>>,
-    peer_states: Mutex<BTreeMap<String, PeerRuntimeRecord>>,
-    connection_generation: AtomicU64,
-    request_rates: RequestRateLedger,
+    health: Arc<BlobPeerHealth>,
+    fetch_cursor: Mutex<[Option<String>; 3]>,
+    recent_peers: Mutex<VecDeque<RecentPeer>>,
+    #[cfg(test)]
+    sampled_peer_count: std::sync::atomic::AtomicUsize,
+}
+
+struct RecentPeer {
+    id: String,
+    expires_at: Instant,
+    imported: bool,
 }
 
 impl PeerAddrBook {
     pub fn new(endpoint: Endpoint, discovery: Arc<MemoryLookup>) -> Self {
+        Self::with_fetch_health(endpoint, discovery, Arc::new(BlobPeerHealth::default()))
+    }
+
+    pub fn with_fetch_health(
+        endpoint: Endpoint,
+        discovery: Arc<MemoryLookup>,
+        health: Arc<BlobPeerHealth>,
+    ) -> Self {
         Self {
             endpoint,
             discovery,
             learned_peers: Mutex::new(BTreeMap::new()),
             seed_peers: Mutex::new(BTreeMap::new()),
             imported_peers: Mutex::new(BTreeMap::new()),
-            peer_states: Mutex::new(BTreeMap::new()),
-            connection_generation: AtomicU64::new(0),
-            request_rates: RequestRateLedger::default(),
+            health,
+            fetch_cursor: Mutex::new([None, None, None]),
+            recent_peers: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            sampled_peer_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -367,43 +396,69 @@ impl PeerAddrBook {
         peers
     }
 
-    /// Prefer currently connected and recently successful peers. A peer in backoff remains in the
-    /// list as a recovery probe, but is tried after healthy or unknown peers.
+    /// Sample a moving, bounded window before ranking. Source precedence for
+    /// every sampled identity remains learned -> seed -> imported.
     pub async fn ranked_peers(&self) -> Vec<EndpointAddr> {
-        let mut peers = self.merged_peers().await;
-        let states = self.peer_states.lock().await;
-        let now = Instant::now();
-        peers.sort_by_key(|peer| {
-            let state = states.get(&peer.id.to_string());
-            let backing_off = state
-                .and_then(|state| state.retry_after)
-                .is_some_and(|retry_after| retry_after > now);
-            let connection_rank = match state.map(|state| state.connection_status_at(now)) {
-                Some(PeerConnectionStatus::Connected) => 0,
-                Some(PeerConnectionStatus::Connecting) => 1,
-                Some(PeerConnectionStatus::Unknown) | None => 2,
-                Some(PeerConnectionStatus::Disconnected) => 3,
-            };
-            let recent_success = state
-                .and_then(|state| state.last_success_at)
-                .is_some_and(|at| now.duration_since(at) <= PEER_FETCH_SUCCESS_TTL);
-            let success_rank = usize::from(!recent_success);
-            let failures = state
-                .filter(|_| backing_off)
-                .map(|state| state.consecutive_fetch_failures)
-                .unwrap_or_default();
-            let latency = state
-                .and_then(|state| state.smoothed_fetch_latency_ms)
-                .unwrap_or(u64::MAX);
+        let preferred = self.health.preferred().await;
+        let (recent, newest_import) = {
+            let mut recent = self.recent_peers.lock().await;
+            let now = Instant::now();
+            recent.retain(|peer| peer.expires_at > now);
             (
-                backing_off,
-                connection_rank,
-                success_rank,
-                failures,
-                latency,
+                recent
+                    .iter()
+                    .map(|peer| peer.id.clone())
+                    .collect::<Vec<_>>(),
+                recent
+                    .iter()
+                    .find(|peer| peer.imported)
+                    .map(|peer| peer.id.clone()),
             )
-        });
+        };
+        let mut peers = {
+            let mut cursors = self.fetch_cursor.lock().await;
+            let learned = self.learned_peers.lock().await;
+            let seeds = self.seed_peers.lock().await;
+            let imported = self.imported_peers.lock().await;
+            let mut sampled = Vec::new();
+            for (index, source) in [&*learned, &*seeds, &*imported].into_iter().enumerate() {
+                sampled.extend(fetch_source_window(source, &mut cursors[index]));
+            }
+            #[cfg(test)]
+            self.sampled_peer_count
+                .store(sampled.len(), Ordering::Relaxed);
+            let ids = preferred
+                .into_iter()
+                .map(|peer| peer.to_string())
+                .chain(recent)
+                .chain(sampled);
+            let mut seen = BTreeSet::new();
+            ids.filter(|id| seen.insert(id.clone()))
+                .filter_map(|id| {
+                    learned
+                        .get(&id)
+                        .or_else(|| seeds.get(&id))
+                        .or_else(|| imported.get(&id))
+                        .cloned()
+                })
+                .take(12)
+                .collect::<Vec<_>>()
+        };
+        self.health.rank(&mut peers).await;
+        if let Some(imported) = newest_import
+            && let Some(position) = peers
+                .iter()
+                .position(|peer| peer.id.to_string() == imported)
+            && position >= 4
+        {
+            peers.swap(3, position);
+        }
+        peers.truncate(4);
         peers
+    }
+
+    pub async fn begin_fetch_attempt(&self, peer: EndpointId) -> Option<BlobPeerAttempt> {
+        self.health.begin(peer).await
     }
 
     pub async fn record_connection_state(
@@ -412,80 +467,31 @@ impl PeerAddrBook {
         generation: u64,
         status: PeerConnectionStatus,
     ) {
-        let mut states = self.peer_states.lock().await;
-        let state = states.entry(peer.to_string()).or_default();
-        if generation < state.connection_generation {
-            return;
-        }
-        state.connection_generation = generation;
-        state.connection_status = status;
-        state.connection_observed_at = Some(Instant::now());
+        self.health.connection(peer, generation, status).await;
     }
 
     pub async fn begin_connection_attempt(&self, peer: EndpointId) -> u64 {
-        let generation = self.connection_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.record_connection_state(peer, generation, PeerConnectionStatus::Connecting)
-            .await;
-        generation
+        self.health
+            .begin(peer)
+            .await
+            .map(|attempt| attempt.generation())
+            .unwrap_or_default()
     }
 
     pub async fn record_peer_fetch_request(&self, peer: EndpointId) -> RequestRateDecision {
-        self.request_rates
-            .check_and_record(
-                RequestRateSubject::PeerEndpoint(peer.to_string()),
-                RequestRateClass::P2pRequest,
-                1,
-                RequestRatePolicy {
-                    limit: PEER_FETCH_REQUEST_LIMIT,
-                    window: PEER_FETCH_REQUEST_WINDOW,
-                },
-                Instant::now(),
-            )
-            .await
+        self.health.record_request(peer).await
     }
 
     pub async fn record_fetch_success(&self, peer: EndpointId, latency: Duration) {
-        let mut states = self.peer_states.lock().await;
-        let state = states.entry(peer.to_string()).or_default();
-        state.fetch_successes = state.fetch_successes.saturating_add(1);
-        state.consecutive_fetch_failures = 0;
-        state.retry_after = None;
-        state.last_success_at = Some(Instant::now());
-        state.connection_status = PeerConnectionStatus::Connected;
-        state.connection_observed_at = state.last_success_at;
-        let latency_ms = u64::try_from(latency.as_millis()).unwrap_or(u64::MAX);
-        state.smoothed_fetch_latency_ms = Some(match state.smoothed_fetch_latency_ms {
-            Some(previous) => previous.saturating_mul(3).saturating_add(latency_ms) / 4,
-            None => latency_ms,
-        });
+        self.health.success(peer, latency).await;
     }
 
     pub async fn record_fetch_failure(&self, peer: EndpointId, failure: PeerFetchFailure) {
-        let mut states = self.peer_states.lock().await;
-        let state = states.entry(peer.to_string()).or_default();
-        state.fetch_failures = state.fetch_failures.saturating_add(1);
-        state.consecutive_fetch_failures = state.consecutive_fetch_failures.saturating_add(1);
-        if matches!(
-            failure,
-            PeerFetchFailure::ConnectFailed | PeerFetchFailure::ConnectTimeout
-        ) {
-            state.connection_status = PeerConnectionStatus::Disconnected;
-        }
-        if !matches!(failure, PeerFetchFailure::Cancelled) {
-            let exponent = state.consecutive_fetch_failures.saturating_sub(1).min(5);
-            let delay = PEER_FETCH_BACKOFF_BASE
-                .saturating_mul(2u32.saturating_pow(exponent))
-                .min(PEER_FETCH_BACKOFF_MAX);
-            state.retry_after = Some(Instant::now() + delay);
-        }
+        self.health.failure(peer, failure).await;
     }
 
     pub async fn peer_state_snapshot(&self, peer: EndpointId) -> Option<PeerStateSnapshot> {
-        self.peer_states
-            .lock()
-            .await
-            .get(&peer.to_string())
-            .map(|state| state.snapshot(Instant::now()))
+        self.health.snapshot(peer).await
     }
 
     /// learned 台帳へ挿入し、台帳に変化があったかを返す(同値なら false)。
@@ -494,20 +500,38 @@ impl PeerAddrBook {
             self.discovery.add_endpoint_info(endpoint_addr.clone());
         }
         let key = endpoint_addr.id.to_string();
-        let mut learned_peers = self.learned_peers.lock().await;
-        if learned_peers.get(key.as_str()) == Some(&endpoint_addr) {
-            return false;
-        }
-        learned_peers.insert(key, endpoint_addr);
-        true
+        let changed = {
+            let mut learned_peers = self.learned_peers.lock().await;
+            if learned_peers.get(key.as_str()) == Some(&endpoint_addr) {
+                false
+            } else {
+                learned_peers.insert(key.clone(), endpoint_addr);
+                true
+            }
+        };
+        self.note_recent_peer(key, false).await;
+        changed
     }
 
     pub async fn insert_imported_peer_addr(&self, endpoint_addr: EndpointAddr) {
         self.discovery.add_endpoint_info(endpoint_addr.clone());
+        let key = endpoint_addr.id.to_string();
         self.imported_peers
             .lock()
             .await
-            .insert(endpoint_addr.id.to_string(), endpoint_addr);
+            .insert(key.clone(), endpoint_addr);
+        self.note_recent_peer(key, true).await;
+    }
+
+    async fn note_recent_peer(&self, peer: String, imported: bool) {
+        let mut recent = self.recent_peers.lock().await;
+        recent.retain(|existing| existing.id != peer);
+        recent.push_front(RecentPeer {
+            id: peer,
+            expires_at: Instant::now() + RECENT_PEER_FETCH_WINDOW,
+            imported,
+        });
+        recent.truncate(4);
     }
 
     /// endpoint の remote_info と relay URL から learned ピアを記録し、
@@ -615,226 +639,35 @@ impl PeerAddrBook {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use iroh::endpoint::presets;
-
-    #[tokio::test]
-    async fn successful_peer_is_ranked_before_recently_timed_out_peer() {
-        let endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
-        let discovery = Arc::new(MemoryLookup::new());
-        let book = PeerAddrBook::new(endpoint, discovery);
-        let slow_endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
-        let fast_endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
-        let slow = slow_endpoint.id();
-        let fast = fast_endpoint.id();
-        book.set_seed_peers(
-            vec![
-                SeedPeer {
-                    endpoint_id: slow.to_string(),
-                    addr_hint: Some("192.0.2.1:4433".into()),
-                },
-                SeedPeer {
-                    endpoint_id: fast.to_string(),
-                    addr_hint: Some("192.0.2.2:4433".into()),
-                },
-            ],
-            &[],
-        )
-        .await
-        .unwrap();
-
-        book.record_fetch_failure(slow, PeerFetchFailure::TransferTimeout)
-            .await;
-        book.record_fetch_success(fast, Duration::from_millis(12))
-            .await;
-
-        let ranked = book.ranked_peers().await;
-        assert_eq!(ranked.first().map(|peer| peer.id), Some(fast));
-        assert_eq!(ranked.last().map(|peer| peer.id), Some(slow));
-    }
-
-    #[tokio::test]
-    async fn stale_disconnect_does_not_replace_newer_connection_generation() {
-        let endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
-        let discovery = Arc::new(MemoryLookup::new());
-        let book = PeerAddrBook::new(endpoint, discovery);
-        let peer_endpoint = Endpoint::builder(presets::Minimal).bind().await.unwrap();
-        let peer = peer_endpoint.id();
-
-        book.record_connection_state(peer, 2, PeerConnectionStatus::Connected)
-            .await;
-        book.record_connection_state(peer, 1, PeerConnectionStatus::Disconnected)
-            .await;
-
-        let snapshot = book.peer_state_snapshot(peer).await.unwrap();
-        assert_eq!(snapshot.connection_generation, 2);
-        assert_eq!(snapshot.connection_status, PeerConnectionStatus::Connected);
-    }
-
-    #[test]
-    fn stale_connection_observation_expires_to_unknown() {
-        let now = Instant::now();
-        let state = PeerRuntimeRecord {
-            connection_generation: 7,
-            connection_status: PeerConnectionStatus::Connected,
-            connection_observed_at: Some(now),
-            ..PeerRuntimeRecord::default()
-        };
-        assert_eq!(
-            state
-                .snapshot(now + PEER_CONNECTION_STATE_TTL + Duration::from_secs(1))
-                .connection_status,
-            PeerConnectionStatus::Unknown
+fn fetch_source_window(
+    source: &BTreeMap<String, EndpointAddr>,
+    cursor: &mut Option<String>,
+) -> Vec<String> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let mut keys = Vec::with_capacity(4);
+    if let Some(after) = cursor.as_ref() {
+        keys.extend(
+            source
+                .range((Excluded(after.clone()), Unbounded))
+                .take(4)
+                .map(|(key, _)| key.clone()),
         );
-    }
-
-    #[tokio::test]
-    async fn request_frequency_keeps_http_peer_and_relay_subjects_separate() {
-        let ledger = RequestRateLedger::default();
-        let now = Instant::now();
-        let policy = RequestRatePolicy {
-            limit: 1,
-            window: Duration::from_secs(10),
-        };
-        assert_eq!(
-            ledger
-                .check_and_record(
-                    RequestRateSubject::HttpIp("192.0.2.1".into()),
-                    RequestRateClass::HttpRequest,
-                    1,
-                    policy,
-                    now,
-                )
-                .await,
-            RequestRateDecision::Allowed
-        );
-        assert!(matches!(
-            ledger
-                .check_and_record(
-                    RequestRateSubject::HttpIp("192.0.2.1".into()),
-                    RequestRateClass::HttpRequest,
-                    1,
-                    policy,
-                    now,
-                )
-                .await,
-            RequestRateDecision::Limited { .. }
-        ));
-        assert_eq!(
-            ledger
-                .check_and_record(
-                    RequestRateSubject::PeerEndpoint("192.0.2.1".into()),
-                    RequestRateClass::P2pRequest,
-                    1,
-                    policy,
-                    now,
-                )
-                .await,
-            RequestRateDecision::Allowed
-        );
-        assert_eq!(
-            ledger
-                .check_and_record(
-                    RequestRateSubject::RelayClient("192.0.2.1".into()),
-                    RequestRateClass::RelayIngressBytes,
-                    1,
-                    policy,
-                    now,
-                )
-                .await,
-            RequestRateDecision::Allowed
-        );
-    }
-
-    // かつて docs-sync / blob-service に同名で重複していたテストの単一版(WP-H2)。
-    // #1207: 実行中の同じ対象は並行させず、先行する走査へ合流させる契約に変えた。
-    #[test]
-    fn remote_fetch_retry_state_joins_active_fetches_and_cools_down_failures() {
-        let now = Instant::now();
-        let mut state = RemoteFetchRetryState::default();
-
-        let RemoteFetchBegin::Lead(_sender) = state.begin("hash-a", "store:hash-a", now) else {
-            panic!("first caller must lead");
-        };
-        assert!(matches!(
-            state.begin("hash-a", "store:hash-a", now),
-            RemoteFetchBegin::Join(_)
-        ));
-        // 保存先が違う取得は合流しない。
-        let RemoteFetchBegin::Lead(_ephemeral) = state.begin("hash-a", "ephemeral:hash-a", now)
-        else {
-            panic!("a different flight key must not join");
-        };
-        state.finish("hash-a", "ephemeral:hash-a", false, now);
-
-        state.finish("hash-a", "store:hash-a", false, now);
-        assert_eq!(state.in_flight_len(), 0);
-        assert!(matches!(
-            state.begin("hash-a", "store:hash-a", now + Duration::from_secs(1)),
-            RemoteFetchBegin::CoolingDown
-        ));
-        let RemoteFetchBegin::Lead(_retry) =
-            state.begin("hash-a", "store:hash-a", now + REMOTE_FETCH_RETRY_COOLDOWN)
-        else {
-            panic!("cooldown expiry must allow a new attempt");
-        };
-
-        state.finish(
-            "hash-a",
-            "store:hash-a",
-            true,
-            now + REMOTE_FETCH_RETRY_COOLDOWN,
-        );
-        assert_eq!(state.cooldown_len(), 0);
-    }
-
-    #[test]
-    fn remote_fetch_retry_state_does_not_join_an_abandoned_reservation() {
-        let now = Instant::now();
-        let mut state = RemoteFetchRetryState::default();
-        let RemoteFetchBegin::Lead(sender) = state.begin("hash-a", "store:hash-a", now) else {
-            panic!("first caller must lead");
-        };
-        drop(sender);
-        assert!(matches!(
-            state.begin("hash-a", "store:hash-a", now),
-            RemoteFetchBegin::Lead(_)
-        ));
-    }
-
-    #[test]
-    fn remote_fetch_retry_state_prunes_expired_cooldowns() {
-        let now = Instant::now();
-        let mut state = RemoteFetchRetryState::default();
-        for index in 0..4 {
-            let key = format!("hash-{index}");
-            let _ = state.begin(&key, &key, now);
-            state.finish(&key, &key, false, now);
+        if keys.len() < 4 {
+            keys.extend(
+                source
+                    .range(..=after.clone())
+                    .take(4 - keys.len())
+                    .map(|(key, _)| key.clone()),
+            );
         }
-        assert_eq!(state.cooldown_len(), 4);
-        let later = now + REMOTE_FETCH_RETRY_COOLDOWN + Duration::from_secs(1);
-        let _ = state.begin("hash-z", "hash-z", later);
-        state.finish("hash-z", "hash-z", false, later);
-        assert_eq!(state.cooldown_len(), 1);
+    } else {
+        keys.extend(source.keys().take(4).cloned());
     }
-
-    #[test]
-    fn remote_fetch_failure_history_has_a_fixed_capacity() {
-        let now = Instant::now();
-        let mut state = RemoteFetchRetryState::default();
-        for index in 0..10_240 {
-            let key = format!("hash-{index:05}");
-            state.finish(&key, &key, false, now);
-        }
-        assert_eq!(state.cooldown_len(), 1_024);
-        assert!(state.is_cooling_down("hash-10239", now));
-        state.finish("fresh", "fresh", true, now + REMOTE_FETCH_RETRY_COOLDOWN);
-        assert_eq!(state.cooldown_len(), 0);
-        let oversized = "x".repeat(REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES + 1);
-        state.finish(&oversized, &oversized, false, now);
-        assert_eq!(state.cooldown_len(), 0);
-        assert!(state.retry_deadlines.is_empty());
+    if let Some(last) = keys.last() {
+        *cursor = Some(last.clone());
     }
+    keys
 }
+
+#[cfg(test)]
+mod tests;

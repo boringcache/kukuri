@@ -69,7 +69,11 @@ struct AccountDocsAuthor {
 
 impl IrohDocsSync {
     pub fn new(node: Arc<IrohDocsNode>) -> Self {
-        let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
+        let peers = Arc::new(PeerAddrBook::with_fetch_health(
+            node.endpoint().clone(),
+            node.discovery(),
+            node.fetch_peer_health(),
+        ));
         Self {
             node,
             replicas: Arc::new(Mutex::new(HashMap::new())),

@@ -201,3 +201,13 @@ N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstack
 | N49 | `RemoteFetchRetryState::finish/is_cooling_down` → retry_after/期限索引 | 3秒cache、1,024件、key256byte、容量時は近い期限から回収。全件retainなし。未送信outboxは対象外 | FETCH-4、`remote_fetch_failure_history_has_a_fixed_capacity`（修正前10,240件FAIL）、既存cooldown tests |
 
 通常helperの全callerは `rg -n 'fetch_bytes_.*cooldown|run_single_flight|submit_fetch' crates`。runtimeのsubmit callerはremote_fetchだけで、ほかはtests。旧`RemoteFetchBegin::begin`の予約APIは互換/tests向けに残るが、productionの通常取得は使用しない。表示の既存walk permitは追加制約として残す。SDK内部の自動downloader/peer走査・全protocolのscope世代接続はU08等の残作業。
+
+## blob peer healthとbounded fetch候補（P3）
+
+| ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N50 | node生成 → docs/blobの独立`PeerAddrBook` → node共有`BlobPeerHealth` | 観測/要求頻度だけ共有。source台帳の変更bool・docs reapplyは維持。healthだけで別bookのpeerを取得先に追加しない | PEER-2、source book独立/共有health・request quota tests |
+| N51 | remote blobのhash → `ranked_peers`のsource別cursorとrecent/success → 4peerのconnect候補 | source各4 ID、recent4/success2、address materialize最大12、選択最大4。新manual ticketも選択。`connect_candidates`のdirect/relay順は既存 | PEER-4、100/1,000履歴の読取り数・fresh ticketの連続取得・foreign health除外 |
+| N52 | QUIC connect / blob転送 → 型付き欠損・stream応答・local故障 → health/cache | blob ALPNだけ。health/rate各1,024件、稼働attempt pinと世代照合、request window満杯は延期。型付き欠損/ERR_INTERNAL(3)/local errorを接続不良へ混ぜない | PEER-1/3、実Iroh欠損3mode・local store故障、2,048履歴/1,024 pin/rate tests |
+
+N50〜52のsensitive sinkは選択された既存`PeerAddrBook`内のendpointへのblob hash送信と一時観測cache。新候補はsource台帳に存在するIDへ限定し、scope/capabilityの検証をhealthや直近成功で代替しない。旧`merged_peers`と`available_peer_ids`、source snapshot、SDK内部のaddress/watch集合はなお全件経路であり、P3残作業とする。
