@@ -42,22 +42,46 @@ pub async fn prepare_display_fetch(
     retries: &Mutex<RemoteFetchRetryState>,
     hash: iroh_blobs::Hash,
 ) -> Result<DisplayBlobFetch> {
-    let permits = retries.lock().await.walk_permits();
-    let permit = permits.acquire_owned().await?;
+    let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
+    let lease = node
+        .display_work
+        .acquire(*hash.as_bytes(), deadline)
+        .await?;
+    // Keep the legacy shared-walk bound during staged migration. Successful
+    // preparation still means both permits are held before app-api spends an
+    // attempt; queueing alone must not consume its display retry budget.
+    let permit = tokio::select! {
+        biased;
+        _ = lease.cancelled() => return Err(if Instant::now() >= deadline {
+            crate::DisplayAdmissionError::Expired
+        } else {
+            crate::DisplayAdmissionError::Closed
+        }.into()),
+        permit = tokio::time::timeout_at(deadline, async {
+            let permits = retries.lock().await.walk_permits();
+            permits.acquire_owned().await
+        }) => permit.map_err(|_| crate::DisplayAdmissionError::Expired)??,
+    };
     let node = node.clone();
     let peers = peers.clone();
     Ok(Box::pin(async move {
         let _permit = permit;
-        run_display_fetch(fetch_bytes_from_remote(
+        let hash_text = hash.to_string();
+        let walk = run_display_fetch(fetch_bytes_from_remote(
             &node,
             &peers,
             "displayed session",
-            &hash.to_string(),
+            &hash_text,
             hash,
             "local manifest unavailable",
             FetchMode::Ephemeral,
-        ))
-        .await
+        ));
+        let result = tokio::select! {
+            biased;
+            _ = lease.cancelled() => Ok(None),
+            result = tokio::time::timeout_at(deadline, walk) => result.unwrap_or(Ok(None)),
+        };
+        if lease.finish() { result } else { Ok(None) }
     }))
 }
 
@@ -561,6 +585,76 @@ async fn fetch_bytes_from_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn display_admission_wait_is_included_in_total_budget() {
+        let node = IrohDocsNode::memory().await.unwrap();
+        let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
+        let retries = Mutex::new(RemoteFetchRetryState::default());
+        let permits = retries.lock().await.walk_permits();
+        let occupied = permits
+            .acquire_many_owned(kukuri_transport::REMOTE_FETCH_MAX_CONCURRENT_WALKS as u32)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let prepared = timeout(
+            REMOTE_FETCH_TOTAL_TIMEOUT + Duration::from_secs(1),
+            prepare_display_fetch(&node, &peers, &retries, iroh_blobs::Hash::new(b"waiting")),
+        )
+        .await;
+        tokio::time::resume();
+        drop(occupied);
+        node.shutdown().await.unwrap();
+        assert!(
+            matches!(prepared, Ok(Err(_))),
+            "display admission must expire within its own budget, before an outer caller timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_admission_is_shared_across_services_using_one_node() {
+        let node = IrohDocsNode::memory().await.unwrap();
+        let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
+        let mut prepared = Vec::new();
+        for _ in 0..kukuri_transport::work_admission::WorkLimits::default().running {
+            // Different services have different legacy retry ledgers. Their
+            // combined display work must nevertheless share the node budget.
+            let retries = Mutex::new(RemoteFetchRetryState::default());
+            prepared.push(
+                prepare_display_fetch(
+                    &node,
+                    &peers,
+                    &retries,
+                    iroh_blobs::Hash::new(b"shared-node"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let retries = Mutex::new(RemoteFetchRetryState::default());
+        tokio::time::pause();
+        let next = timeout(
+            REMOTE_FETCH_TOTAL_TIMEOUT + Duration::from_secs(1),
+            prepare_display_fetch(&node, &peers, &retries, iroh_blobs::Hash::new(b"next")),
+        )
+        .await;
+        tokio::time::resume();
+        assert!(
+            matches!(next, Ok(Err(_))),
+            "per-service ledgers must not multiply display slots"
+        );
+        drop(prepared);
+        let next = prepare_display_fetch(
+            &node,
+            &peers,
+            &retries,
+            iroh_blobs::Hash::new(b"new-demand"),
+        )
+        .await
+        .unwrap();
+        drop(next);
+        node.shutdown().await.unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn total_budget_cancels_a_fetch_that_never_completes() {

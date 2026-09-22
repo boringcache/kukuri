@@ -181,3 +181,13 @@ N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 
 ## N11のACK保存sink（共通route前の保護）
 
 `spawn_direct_message_subscription`の受信 → topic照合 → `handle_direct_message_hint` → ACK署名/sender/recipient/導出dm_id一致 → `set_direct_message_acked_at/remove_direct_message_outbox`。このhelperのproduction callerは上記subscriptionだけ。新routeへの再利用時もこの会話境界を迂回しない。ACK-1/2のtestは他会話のoutbox・本文・送信状態が不変で、正しい相手のACKだけ削除することを確認する。修正前は会話ID照合がなく、正しい署名を持つ別相手のACKでoutboxが削除される失敗を再現した。
+
+## 表示用取得の本番接続（P3）
+
+| ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N44 | app-api `SessionProjectionRegistry::schedule` → BlobService trait / stack proxy → `IrohBlobService::prepare_display_fetch` → `remote_fetch::prepare_display_fetch` → `DisplayWorkAdmission::acquire` | LocalOnlyの既存fast pathは別。remoteだけnode共通64lease/8枠、deadlineは受付から30秒、待機spawnなし、hash32byte。既存walk枠も準備成功前に取得 | DISPLAY-1/4、`display_admission_wait_is_included_in_total_budget`（修正前FAIL）、`display_admission_is_shared_across_services_using_one_node` |
+| N45 | 準備済み表示future → `lease.cancelled`と実fetchのselect → 検証済み一時bytes返却 | deadline/closeを優先、finishで世代/期限判定。caller dropでleaseと取得future/旧permitを解放。app-api保存前のscope/token guardを維持 | DISPLAY-2/3、既存caller取消と新node終了の実QUIC tests、adapter queue/close tests |
+| N46 | node `shutdown/shutdown_owned/Drop` → `DisplayWorkAdmission::close` → active scope失効と通知 | 受付を先に閉じ、queued/準備済み/実行中を取消。停止応答までは枠を保持し別nodeは独立。nodeの既存Router/endpoint停止は維持 | DISPLAY-3、`node_shutdown_cancels_display_fetch_without_returning_or_caching_bytes` / `display_node_close_does_not_stop_another_nodes_work` |
+
+N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstackのproxyを含む。remote helperへのproduction callerはIrohBlobServiceだけ。新台帳に秘密値/本文を保持せず、bytesの保存sinkは従来の`cache_and_project_displayed_manifest`でscope/tokenを再確認する。通常fetch・docs・gossipはこのadapterへ未移行なので、全networkの合計8枠達成とは扱わない。
