@@ -370,6 +370,13 @@ impl RemoteOnlyBlobService {
 
 #[async_trait]
 impl BlobService for RemoteOnlyBlobService {
+    async fn fetch_local_blob(
+        &self,
+        _hash: &kukuri_core::BlobHash,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(data, mime).await
     }
@@ -510,6 +517,7 @@ async fn community_index_resolution_shows_the_body_of_an_unprojected_post() {
     let response = fixture
         .app
         .resolve_community_index_posts(vec![CommunityIndexPostResolveInput {
+            source_replica_id: None,
             key: "entry".into(),
             topic: fixture.topic.as_str().to_string(),
             object_id: fixture.object.object_id.as_str().to_string(),
