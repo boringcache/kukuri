@@ -231,6 +231,10 @@ async fn instance_lookup_reads_a_constant_number_of_docs_records() {
     let mut state: serde_json::Value =
         serde_json::from_slice(&state_record.value).expect("decode Instance state");
 
+    // このtestが数えるのは同期的なInstance lookupだけ。createで起動した購読taskを止め、
+    // 並行するsession catch-upの読み出しを同じcounterへ混ぜない。
+    app.shutdown().await;
+
     docs.reset_records_returned();
     docs.clear_queries().await;
     let context = SpatialContextV1::Topic {

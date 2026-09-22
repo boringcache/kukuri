@@ -49,13 +49,14 @@ SEARCH live_session_cache USING COVERING INDEX idx_live_session_cache_topic_star
   - live、Dome listing、game projection freshness、session catch-up、session integrity、hint rehydration
   - 一覧窓外の終了live heartbeat停止
   - 一覧store呼出回数は通常1回、refresh時2回、refresh失敗時は再取得なし
-- `cargo xtask rust-test` — PASS（最終delta後は1,329 passed、5 skipped）
+- `cargo xtask rust-test` — PASS（最新main取込・最終delta後は1,352 passed、5 skipped）
 - `cargo xtask scenario desktop_smoke_live_session_persist` — PASS（8 steps）
 - `cargo xtask scenario desktop_smoke_game_room_persist` — PASS（7 steps）
 - `cargo xtask check` — PASS
   - 初回はfrontend依存未導入のためeslintを起動できず失敗した。
   - `npx pnpm@10.16.1 install --dir apps/desktop`後に再実行し、fmt、clippy、Tauri check、frontend lint・typecheckが成功した。
 - `git diff --check` — PASS
+- 最新mainの取込後、CIで `instance_lookup_reads_a_constant_number_of_docs_records` が失敗した。同期lookupのcounterへcreate時に起動したsession catch-upの読み出しが並行して混ざるtest競合で、製品のlookup結果や上限の失敗ではなかった。計測前に購読taskを停止して同期lookupだけを測るようにし、単独10回連続と全suiteで成功した。
 
 PR head、独立監査、CI、merge後tree確認はIssueとPRへ記録する。
 
