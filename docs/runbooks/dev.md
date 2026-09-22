@@ -83,6 +83,11 @@ cargo xtask desktop-visual-test
 [現行inventory](../architecture/network-work-inventory.md)を参照する。
 設計案はProposedであり、現行経路の移行済みを意味しない。
 
+irohのmapped address回収を変更・更新するときは
+`python tools/check_iroh_resource_contract.py`（Python 3.13）で固定SHAの回収contractを確認する。
+Cargoの共有source cacheを変更せず、`target/upstream-contracts`内の一時checkoutへtestだけを追加する。
+`--revision <40桁SHA>`で変更前を再現できる。PR/nightlyのRust jobでも同じcontractを実行する。
+
 CI は課金対象の計算資源で動く。実装しながら CI へ push して確かめる進め方は費用が大きいので行わない。実装中の確認はローカルで済ませ、CI は PR を作った後の最終確認だけに使う。
 
 - 変更 path に対応する validation は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選び、ローカルで実行してから commit する。

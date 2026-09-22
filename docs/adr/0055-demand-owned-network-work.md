@@ -83,17 +83,25 @@ UIには保存済み内容と取得待ち/取得不能を返し、空の結果�
 - `peer -> 使用中lease` と `scope -> resource` の逆引きを持つ。peerの追加・削除・アドレス変更は
   そのpeerを利用する有界な対象だけへ適用し、全登録topic/replicaを再走査しない。
 - gossipの追加は現行 `join_peers` を利用する。削除APIがない場合は**影響するtopicだけ**を
-  ownerが停止・再joinする。docsも個別peerを外せない場合は影響するDocだけをleave/startする。
-  この置換で旧peerへの内部再試行が止まることは実Iroh contractで証明する必要がある。
-  pin済みiroh-docsの `engine/live.rs::start_sync` は引数に保存済みsync peerを追加するため、
-  **現行APIのleave/startだけでは選択先限定を実現できない**。指定peerだけを使う開始操作と
-  gossipで学習したneighborの同期受付を制御する最小API修正が必要である。
-  この前提修正はP3の同期先統合に含め、別Issueの完了待ちに分割しない。
+  ownerが停止・再joinする。sender/receiverとそのcloneをownerが解放する。
+- docsは公開 `SyncHandle` と `net::connect_and_sync` / `net::handle_connection` を使い、
+  ownerが選んだpeerへの1回の同期futureと、namespace別の受信許可を管理する。
+  `Doc::start_sync`は保存peerを追加するため、この高水準APIのleave/startを選択先限定に流用しない。
+  P2の実Iroh contractで、保存済みpeerへの接続0、未許可namespaceの反映0、取消時の接続終了、
+  ローカル再open後のrecord保持を確認した。先行草案の「上流API修正が必須」は高水準APIだけに基づく
+  判断だったため、この公開APIを使う構成へ修正する。
+- storage actorと既存署名/同期wireを再利用し、native LiveActorの自動peer選択・gossip再同期・
+  eager downloadへ作業を二重登録しない。低水準のsubscriptionから既存ReplicaNoticeへの変換、
+  同期結果/必要blobの取得、close時のcancelとstoreの停止fenceは共通ownerのadapterが所有する。
+  local docs APIにnative同期を暗黙起動する入口を残さず、移行時に全callerを照合する。
+  この構成の本実装と、irohの内部address台帳の回収はP3の前提確認に含める。
 - 全稼働対象の作り直しを許すのはaccount切替/終了、endpoint再構築、明示的なnetwork設定変更で
   既存endpointを再利用できない場合だけ。対象は現在の有界なlease集合であり保存済み全履歴ではない。
 - observationはpeer・protocol・scope・endpoint世代を持つ。gossip neighbor成立、docs syncの観測、
   対象blobの検証済み転送をそれぞれの成功とする。seed適用の`Ok`、別protocolの接続、投稿がないことを
   回復判定に使わない。NotFoundと接続不能を区別し、休止対象のpeer 0は正常な休止である。
+  `remote_info`の`TransportAddrUsage::Active`は保持中のpath情報であり、QUIC接続の生存判定にも使わない。
+  接続終了はconnectionを保持しない`WeakConnectionHandle::closed`等の実際の終了観測を使う。
 - Direct P2P → Relay Supported P2P → Relay Fallbackの順を維持する。
   CNの認証/同意と接続の健康状態は別に保持し、あるnodeの成功で他nodeのgateを開かない。
 - queued要求の需要消失は削除、表示専用の最終需要消失はQUIC futureもcancelする。

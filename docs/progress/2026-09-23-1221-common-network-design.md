@@ -86,6 +86,62 @@ private manifestはさらにchannel/epoch別に暗号化する。DM frame・添�
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。
 
+この暗号化参照はPR #1307でmerge `cc58b367580f42c91b1097179d48f2040ffed799`へ統合済み。
+head `4d96499f`の独立監査PASS、全13CI成功、対象8pathの一致を確認した。
+
+## P2実証: 公開APIで同期futureを所有する
+
+`Doc::start_sync`の調査だけから上流API修正が必要と判断した草案を修正した。
+pin済みiroh-docsの公開`SyncHandle`と`net`のAPIで、storage actorと同期1回のfutureを分けられる。
+
+`cargo test -p kukuri-iroh-node --lib explicit_docs_sync` の実Iroh 2件が成功した。
+
+- 保存済みuseful peerがいても、指定したpeer以外への受信callbackは0回。
+- 指定peerの署名済みrecordが届き、除外peerだけにあるrecordは反映されない。
+- receiverのnamespace callbackで拒否した範囲はmetadata反映0。
+- 同期futureのabortで相手側のQUIC接続が終了する。
+- storage actorのsyncを無効化してclose後、ローカルだけで再openしても既存recordは残る。
+
+これは本番controllerの実装完了ではなく、NET-AC-2/3とD9のAPI実現性に対する証拠である。
+同期wireや署名、保存形式の独自コピー/変更はしていない。実装移行ではnative LiveActorへ
+同期を二重登録しないこと、ReplicaNoticeへの変換、全callerの停止fenceを固定する。
+irohのmapped address表の回収が解消したとは扱わず、別の残確認として保持する。
+
+## P2の前提修正: SDKの退役資源の回収
+
+上の残確認のうち、協調peerの退役後にも資源が残る2経路を修正する。
+根拠は [iroh #4447](https://github.com/n0-computer/iroh/pull/4447) と
+[gossip #162](https://github.com/n0-computer/iroh-gossip/pull/162)（#161を含む）。
+どちらも採用時点で未mergeであり、完全SHAへ固定する。
+
+| 条件 | 変更前 | 候補での確認 |
+| --- | --- | --- |
+| RESOURCE-1: 終了したpeerのmappingを回収し、active peerと再接続を保つ（NET-AC-2(f)、D9） | registry iroh `f2eb930d`で100退役＋1 activeが101件残り失敗 | `adf5b0e0`で履歴100/1,000とも64件、active mapping保持、relay逆引き回収、再接続mapping更新。既存のactor再起動競合testも成功 |
+| RESOURCE-2: 両topic lease終了後にQUICを終了する（NET-AC-2(e)、NET-TR-3） | registry相当gossip `2ce78afe`のweak close観測が12秒で失敗 | `c42f40a1`は約5秒でclose。endpoint全体を先に終了せず確認 |
+| RESOURCE-3: 別topicと同時dialを壊さず、pending joinのquit後に不要なretryをしない（NET-AC-3、NET-TR-2/3） | 新しい回帰条件として固定 | 別topic継続、pending join終了と新しい需要での再joinの2件成功 |
+| RESOURCE-4: 既存の停止・Direct P2P優先・relay回復を保つ（LIFE、NET-INVAR-1/2） | P1等の既存契約 | 選択peer/取消2件、docs lifecycle4件、到達不能home relay中のdirect接続1件、relay受信停止後の回復1件成功 |
+
+最初の試験は`remote_info`のpath使用状態を接続生存と取り違えていた。候補でもその値は残るため、
+その失敗を接続の証拠には使わず、connectionを保持しないweak close通知に直した。
+その同じtestで旧gossipの失敗と候補の成功を確認した。docs lifecycleの最初のfilterも0件だったため、
+成功件数へ含めず、`iroh_sync::lifecycle::tests`で4件の実行を確認した。
+
+独立レビューは元registry commitから候補までを確認し、新たな権限拡張、wire/永続形式の破壊、
+active peerの無条件切断を認めなかった。iroh 1.0.3、gossip 0.101.0、MSRV 1.91を維持する。
+一方、actor全体の上限、relay mapのretain走査、未完結stream/header、pending join容量は未達であり、
+この修正をD9/NET全体の完了へ拡張しない。元の利用者環境のCPU急増を再現・解決したとの扱いでもない。
+
+検証入口:
+
+- `python tools/check_iroh_resource_contract.py --revision f2eb930dda3779c6d852b72f3712aacd6e573ab1`: 変更前の失敗。
+- `python tools/check_iroh_resource_contract.py`: 固定candidateの回収contractとactor再起動競合の2件。
+- `cargo test -p kukuri-transport --lib connection_release`: lease終了、別topic継続、pending joinの3件。
+- `cargo test -p kukuri-iroh-node --lib explicit_docs_sync`: 2件。
+- `cargo test -p kukuri-docs-sync --lib iroh_sync::lifecycle::tests`: 4件。
+- `cargo tree --locked -i iroh --depth 1`をroot/Tauri両workspaceで確認。lock差分は5packageのsource/checksumのみ。
+
+全体はPR/CIで確認する。固定headの独立監査とmerge照合を終えるまでは、この段階を完了としない。
+
 ## P2/P3の受付管理: 実装する有限範囲
 
 基準 `cc58b367`。NW-1〜4/7、NET-AC-2の受付部分として、`transport::work_admission`にI/Oを持たない状態機械を置く。現在のRemoteFetchRetryState/remote_fetch::run_single_flightは、permit取得前にtaskと台帳を増やす。この入口を共通ownerへ移す前に、受付・実行選択・取消の契約を固定する。
@@ -101,3 +157,5 @@ core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行�
 検証は上記の境界値、停止→遅延完了、再登録、10倍履歴、lane巡回の関連unit testsとtransport clippyをローカル実行する。全体はPR/CI、固定headの独立監査で確認する。
 
 受付の関連unit testsは9件成功（`cargo test -p kukuri-transport --lib work_admission`）。transport all-targets clippyは、初回のunwrap診断4件を不変条件付きexpectへ修正した後に成功。実行していない全体suiteはPR/CIへ委譲する。これは純粋な状態機械の契約であり、停止指示から実QUICを止める結合はまだ含まない。
+
+SDK退役資源の修正はPR #1308、merge `9dc3f051c928cfabe5ca709adb715663cf394303`で統合済み。固定head独立監査PASS、15/15 CI成功、対象16pathの一致を確認した。
