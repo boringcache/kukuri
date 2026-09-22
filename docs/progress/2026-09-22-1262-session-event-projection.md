@@ -119,3 +119,21 @@ oversized baselineはこれら登録点の増加を明記して更新し、更�
 修正後のremote_fetch 10件、session_event_progress 14件、実QUIC取消testが成功。共通枠待機中の取消では予算を使わず、従来の5秒を超える取得もevent追加なしで反映・通知される。
 
 main fa9496a5（署名revision #1260、manifest hash検証 #1261を含む）を統合。live選択が未署名updated_atを使う競合をlive_session_selection_uses_signed_revisionの失敗（Live / Ended不一致）として再現し、署名revisionでの比較へ修正。同testとsession_manifest_fetch 8件が成功。修正後の全体検証とdelta監査を続ける。
+
+### delta独立監査の現在判定
+
+対象2583758770e87dc598b70e471a5151318174f493、Scope revision 2026-09-22-v2、区分C。別コンテキストで取得APIの全callerと保存sinkを追跡しPASS。inventory合計7/適合7/不適合0/未分類0、blocker 0。49fb601dのB-1は解消済み。
+
+監査者が対象headで生成済みのbinaryを直接実行し、session_event_progress14、remote_fetch10、local_status2（実QUIC取消を含む）、session_manifest_fetch8、hydration_integrity_sessions25、game_projection_freshness15が成功。署名revision/hashのmain統合も確認した。対象surface未変更のGUI/IPC/CLI・ContentReady・startup/catch-upは前回監査証跡を継承する。全体ローカル検証・CI・merge後tree比較は別条件として継続する。
+
+### 25837587のローカル最終検証
+
+- cargo xtask check成功（fmt/Clippy全target/Tauri compile/frontend lint/typecheck）。
+- rust-test: 1,385 passed / 5既存skip、doctest成功。
+- app-api-slow-test: 478 passed（RUST_TEST_THREADS=2、Friends+ skipなし）。
+- tauri-test: 77 passed。
+- main統合のUI delta: 4 files / 34 passed。変更のないUI surfaceは初回全体1,998件・browser374件・visual44件・Storybook成功の証跡を継承。
+- 最新runnerでe2e-smoke（投稿6step）、live永続化8step、game永続化7step、private_channel_invite_connectivity11stepが全成功。
+- oversized-files、ipc-types --check、git diff --check成功。
+
+この追記は検証記録のみで監査対象の実装surfaceを変更しない。CIとmerge後tree比較を残す。
