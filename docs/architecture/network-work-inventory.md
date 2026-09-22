@@ -178,6 +178,10 @@ N01/U03/U04/U07のadapter前提として、`iroh::tests::controlled_gossip`の2 
 
 このfixtureは1topic/1peerの短い往復でtimerを発火しない。production入口は増えず、timer容量・複数topicの共有接続・再試行・受信/送信workerの上限は残る。`EndpointHooks`は送信前拒否とhandshake後観測、`RouterBuilder::incoming_filter`は受信spawn前選別に使用可能だが、接続試行futureの失敗/cancel精算はownerが持つ。
 
+## N11のACK保存sink（共通route前の保護）
+
+`spawn_direct_message_subscription`の受信 → topic照合 → `handle_direct_message_hint` → ACK署名/sender/recipient/導出dm_id一致 → `set_direct_message_acked_at/remove_direct_message_outbox`。このhelperのproduction callerは上記subscriptionだけ。新routeへの再利用時もこの会話境界を迂回しない。ACK-1/2のtestは他会話のoutbox・本文・送信状態が不変で、正しい相手のACKだけ削除することを確認する。修正前は会話ID照合がなく、正しい署名を持つ別相手のACKでoutboxが削除される失敗を再現した。
+
 ## 表示用取得の本番接続（P3）
 
 | ID | 入口 → helper → sink | guard / 上限 / 停止 | 対応contract |
