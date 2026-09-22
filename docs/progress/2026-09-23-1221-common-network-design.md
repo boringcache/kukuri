@@ -85,3 +85,19 @@ private manifestはさらにchannel/epoch別に暗号化する。DM frame・添�
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。
+
+## P2/P3の受付管理: 実装する有限範囲
+
+基準 `cc58b367`。NW-1〜4/7、NET-AC-2の受付部分として、`transport::work_admission`にI/Oを持たない状態機械を置く。現在のRemoteFetchRetryState/remote_fetch::run_single_flightは、permit取得前にtaskと台帳を増やす。この入口を共通ownerへ移す前に、受付・実行選択・取消の契約を固定する。
+
+- ADMIT-1: active scope 64、要求256、待機者64/要求、metadata payload計4MiB、実行8を同時に制限し、満杯は型付きDeferred/Deniedで返す。受付はspawnしない。
+- ADMIT-2: 同じscope世代/object/protocol/mode/persistence/byte limit/deadlineだけ合流する。同一要求の更新はI/O選択を増やさない。
+- ADMIT-3: 4:2:1のlane巡回、待機時間込みdeadline、期限切れのI/O開始0。deadline索引で回収し、履歴全件のsort/retainをしない。
+- ADMIT-4: 最終表示待機者の取消・scope失効は実行停止要求を出す。通常取得の待機者取消は実行を保持する。停止完了まで実行枠を解放せず、遅い完了の保存許可を返さない。
+- ADMIT-5: scopeの再登録・別ownerのtokenで旧要求を再利用しない。稼働対象の逆引きだけを処理し、登録/取消履歴が10倍でも台帳が増えない。
+
+入口はscope登録/失効、要求受付/待機解除、実行選択、完了通知。sinkはこの有限なメモリ台帳と停止指示だけで、network/storeへの直接I/Oはない。権限の意味上の検証は呼出元の責務で、発行済みscope tokenの現在性を全状態遷移で確認する。実運用のI/O adapter・旧取得経路の撤去は後続であり、この状態機械単独でNET完了とはしない。
+
+検証は上記の境界値、停止→遅延完了、再登録、10倍履歴、lane巡回の関連unit testsとtransport clippyをローカル実行する。全体はPR/CI、固定headの独立監査で確認する。
+
+受付の関連unit testsは9件成功（`cargo test -p kukuri-transport --lib work_admission`）。transport all-targets clippyは、初回のunwrap診断4件を不変条件付きexpectへ修正した後に成功。実行していない全体suiteはPR/CIへ委譲する。これは純粋な状態機械の契約であり、停止指示から実QUICを止める結合はまだ含まない。

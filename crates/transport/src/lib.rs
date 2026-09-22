@@ -23,6 +23,7 @@ mod receive_binding;
 mod test_support;
 mod tickets;
 mod traits;
+pub mod work_admission;
 
 pub use config::*;
 pub use discovery::*;
