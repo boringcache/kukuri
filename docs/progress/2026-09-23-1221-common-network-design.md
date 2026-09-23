@@ -441,3 +441,22 @@ Postgres+Valkeyを使う既存CN APIのfresh candidateとprivacyの2件も、int
 healthyで、失敗は約500ms後。pin済みredis clientの既定response timeoutは500msで、
 局所の単独実行では3件とも成功していた。rendezvous専用接続のconnect/response timeoutを
 2秒に明示し、無制限待機や再試行taskを増やさず、負荷時の関連testを再確認する。
+
+## P3: N71の著者制御stateと短命binding（2026-09-23決定）
+
+ユーザー決定により、著者制御stateにはaccount署名付きendpoint locatorを置き、endpointまたは
+端末構成の変化時だけ差分更新する。最長5分の`ReceiveEndpointBindingV1`は著者replicaへ
+定期保存せず、実QUIC接続時に相手から取得してaccount/route/実endpoint identityと照合する。
+locatorは未認証候補であり、確認不能でも保護outboxを保持する。旧周期保存案は、異なる
+docs/blobを時間と失敗回数に比例して増やすため失効した（ADR 0055 §4）。
+
+| N71境界 | 実装前に固定するcontract |
+| --- | --- |
+| writer / 停止 | endpoint再生成、端末追加・削除・撤回だけが該当locatorを更新する。無変化の周期tick、再起動、無関係な投稿ではdocs書込み0。旧世代の完了が新しいlocatorを上書きしない |
+| reader / 署名 | 保護outbox等の対象account需要から、その著者制御stateだけを有界に読む。locatorのaccount/route署名を検証しても配送先と確定せず、実QUICの短命bindingを別に検証する。未解決は延期 |
+| 複数端末 / 公平性 | accountの総端末数を一度にmaterializeしない。固定の先頭N件に依存せず、有限窓とcursorで古い到達可能候補も再訪する。失効端末の候補を戻さない |
+| 保存 / 回収 | 更新・撤回で置き換えたlocator、docs blob、索引のownerと削除条件を明示する。回収を総blob走査や保護投稿・添付・outboxを巻き込む全体GCに委ねない。部分失敗・cancel・restartで有界に再開する |
+
+N71のwriter/reader・保存方式は未実装で、上表はPR headの実装・負例・独立監査に先立つ契約。
+現行の既知peer binding交換とN70のCN候補窓は維持し、旧pairwise受信taskや起動時全件走査を
+この設計決定だけで撤去した扱いにしない。
