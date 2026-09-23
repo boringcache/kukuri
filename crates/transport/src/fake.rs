@@ -28,7 +28,8 @@ use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapsho
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
     HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
-    ReceiveOfferSubscription, TopicPeerSnapshot, Transport, next_receive_offer_lease,
+    ReceiveOfferStop, ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
+    next_receive_offer_lease,
 };
 
 #[derive(Clone, Default)]
@@ -42,7 +43,7 @@ pub struct FakeNetwork {
 struct FakeOfferRoute {
     route: String,
     lease: ReceiveOfferLease,
-    stop: watch::Sender<bool>,
+    stop: watch::Sender<ReceiveOfferStop>,
 }
 
 #[derive(Clone)]
@@ -97,10 +98,14 @@ impl FakeTransport {
         &self,
         recipient: &Pubkey,
         expected: Option<ReceiveOfferLease>,
+        if_vacant: bool,
     ) -> Result<Option<ReceiveOfferSubscription>> {
         let route = receive_route_for_account(recipient)?;
         let sender = self.offer_sender(recipient).await?;
         let mut active = self.active_offer_route.lock().await;
+        if if_vacant && active.is_some() {
+            return Ok(None);
+        }
         if let Some(expected) = expected
             && !active
                 .as_ref()
@@ -109,9 +114,9 @@ impl FakeTransport {
             return Ok(None);
         }
         if let Some(old) = active.take() {
-            let _ = old.stop.send(true);
+            let _ = old.stop.send(ReceiveOfferStop::Superseded);
         }
-        let (stop, _) = watch::channel(false);
+        let (stop, _) = watch::channel(ReceiveOfferStop::Active);
         let lease = next_receive_offer_lease();
         *active = Some(FakeOfferRoute {
             route: route.as_str().to_string(),
@@ -122,7 +127,7 @@ impl FakeTransport {
             (sender.subscribe(), stop.subscribe()),
             |(mut receiver, mut stop)| async move {
                 loop {
-                    if *stop.borrow() {
+                    if *stop.borrow() != ReceiveOfferStop::Active {
                         return None;
                     }
                     tokio::select! {
@@ -373,7 +378,7 @@ impl HintTransport for FakeTransport {
         &self,
         recipient: &Pubkey,
     ) -> Result<ReceiveOfferSubscription> {
-        self.subscribe_receive_offers_impl(recipient, None)
+        self.subscribe_receive_offers_impl(recipient, None, false)
             .await?
             .ok_or_else(|| anyhow::anyhow!("account receive route was superseded"))
     }
@@ -383,7 +388,15 @@ impl HintTransport for FakeTransport {
         recipient: &Pubkey,
         expected: ReceiveOfferLease,
     ) -> Result<Option<ReceiveOfferSubscription>> {
-        self.subscribe_receive_offers_impl(recipient, Some(expected))
+        self.subscribe_receive_offers_impl(recipient, Some(expected), false)
+            .await
+    }
+
+    async fn subscribe_receive_offers_if_vacant(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        self.subscribe_receive_offers_impl(recipient, None, true)
             .await
     }
 
@@ -399,7 +412,7 @@ impl HintTransport for FakeTransport {
             .is_some_and(|current| current.route == route.as_str() && current.lease == lease)
         {
             let old = active.take().expect("matching offer route");
-            let _ = old.stop.send(true);
+            let _ = old.stop.send(ReceiveOfferStop::Closed);
         }
         Ok(())
     }

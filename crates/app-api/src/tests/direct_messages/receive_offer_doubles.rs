@@ -7,7 +7,8 @@ pub(super) struct ProbeOfferTransport {
     pub(super) subscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(super) unsubscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(super) stream_drops: Arc<AtomicUsize>,
-    pub(super) stop_senders: std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>>,
+    pub(super) stop_senders:
+        std::sync::Mutex<Vec<tokio::sync::watch::Sender<kukuri_transport::ReceiveOfferStop>>>,
 }
 
 struct CountedPendingOfferStream(Arc<AtomicUsize>);
@@ -51,7 +52,8 @@ impl HintTransport for ProbeOfferTransport {
             barrier.wait().await;
             barrier.wait().await;
         }
-        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let (stop, stopped) =
+            tokio::sync::watch::channel(kukuri_transport::ReceiveOfferStop::Active);
         self.stop_senders.lock().unwrap().push(stop);
         Ok((
             ReceiveOfferLease::fresh(),

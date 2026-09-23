@@ -68,6 +68,8 @@ impl IrohGossipTransport {
             .spawn();
 
         Self {
+            receive_offer_instance: NEXT_RECEIVE_OFFER_TRANSPORT_INSTANCE
+                .fetch_add(1, Ordering::Relaxed),
             endpoint,
             gossip,
             _router: Some(router),
@@ -120,6 +122,8 @@ impl IrohGossipTransport {
         let relay_urls = Arc::new(StdRwLock::new(relay_config.parsed_relay_urls()?));
         discovery.add_endpoint_info(endpoint.addr());
         Ok(Self {
+            receive_offer_instance: NEXT_RECEIVE_OFFER_TRANSPORT_INSTANCE
+                .fetch_add(1, Ordering::Relaxed),
             endpoint,
             gossip,
             _router: None,

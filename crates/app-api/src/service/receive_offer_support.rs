@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use kukuri_core::ReceiveOfferScopeV1;
-use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope};
+use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferStop};
 
 use super::direct_messages_delivery_support::DirectMessageHintServices;
 use super::*;
@@ -113,13 +113,15 @@ impl AppService {
             let mut stream = Some((stream, stop));
             let mut active_lease = lease;
             loop {
+                let mut stop_reason = ReceiveOfferStop::Active;
                 if let Some((active_stream, stop)) = stream.take() {
                     let active_services = services.clone();
                     let active_last_sync = Arc::clone(&last_sync);
                     let active_notification = Arc::clone(&notification_inserted);
-                    tokio::select! {
+                    let observed_stop = stop.clone();
+                    stop_reason = tokio::select! {
                         biased;
-                        _ = wait_receive_offer_stop(stop) => {}
+                        reason = wait_receive_offer_stop(stop) => reason,
                         _ = active_stream.for_each_concurrent(RECEIVE_OFFER_MAX_IN_FLIGHT, move |envelope| {
                                 let services = active_services.clone();
                                 let last_sync = Arc::clone(&active_last_sync);
@@ -136,8 +138,14 @@ impl AppService {
                                         }
                                     }
                                 }
-                            }) => {}
-                    }
+                            }) => *observed_stop.borrow(),
+                    };
+                }
+                if matches!(
+                    stop_reason,
+                    ReceiveOfferStop::Superseded | ReceiveOfferStop::Closed
+                ) {
+                    return;
                 }
                 if closed.load(Ordering::Acquire) {
                     return;
@@ -157,7 +165,40 @@ impl AppService {
                         active_lease = next_lease;
                         stream = Some((next, next_stop));
                     }
-                    Ok(None) => return,
+                    Ok(None) => {
+                        match services
+                            .hint_transport
+                            .receive_offer_transport_instance()
+                            .await
+                        {
+                            Ok(current_instance)
+                                if current_instance != active_lease.transport_instance() =>
+                            {
+                                match services
+                                    .hint_transport
+                                    .subscribe_receive_offers_if_vacant(&recipient)
+                                    .await
+                                {
+                                    Ok(Some((next_lease, next, next_stop))) => {
+                                        *lease_slot
+                                            .lock()
+                                            .expect("account receive lease poisoned") =
+                                            Some(next_lease);
+                                        active_lease = next_lease;
+                                        stream = Some((next, next_stop));
+                                    }
+                                    Ok(None) => return,
+                                    Err(error) => {
+                                        tracing::debug!(%error, "account receive route rebuild retry deferred");
+                                    }
+                                }
+                            }
+                            Ok(_) => return,
+                            Err(error) => {
+                                tracing::debug!(%error, "account receive transport identity unavailable");
+                            }
+                        }
+                    }
                     Err(error) => {
                         tracing::debug!(%error, "account receive route retry deferred");
                     }
@@ -218,15 +259,18 @@ impl AppService {
     }
 }
 
-async fn wait_receive_offer_stop(mut stop: tokio::sync::watch::Receiver<bool>) {
-    if *stop.borrow() {
-        return;
+async fn wait_receive_offer_stop(
+    mut stop: tokio::sync::watch::Receiver<ReceiveOfferStop>,
+) -> ReceiveOfferStop {
+    if *stop.borrow() != ReceiveOfferStop::Active {
+        return *stop.borrow();
     }
     while stop.changed().await.is_ok() {
-        if *stop.borrow() {
-            return;
+        if *stop.borrow() != ReceiveOfferStop::Active {
+            return *stop.borrow();
         }
     }
+    ReceiveOfferStop::TransportClosed
 }
 
 async fn receive_offer_dm_is_mutual(
