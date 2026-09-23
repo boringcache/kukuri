@@ -293,59 +293,82 @@ impl AppService {
         Ok(true)
     }
 
-    pub(crate) async fn flush_direct_message_outbox_for_peer(
+    pub(crate) async fn flush_direct_message_outbox_page_for_peer(
         services: &ServiceHandles,
         local_author_pubkey: &str,
         peer_pubkey: &str,
-    ) -> Result<usize> {
+        after: Option<&kukuri_store::DirectMessageOutboxCursor>,
+    ) -> Result<(usize, Option<kukuri_store::DirectMessageOutboxCursor>)> {
         let projection_store = services.projection_store.as_ref();
-        let hint_transport = services.hint_transport.as_ref();
         let transport = services.transport.as_ref();
         let keys = services.keys.as_ref();
         let relationship = projection_store
             .get_author_relationship(local_author_pubkey, peer_pubkey)
             .await?;
         if !relationship.as_ref().is_some_and(|value| value.mutual) {
-            return Ok(0);
+            return Ok((0, None));
         }
         let topic = derive_direct_message_topic(keys, &Pubkey::from(peer_pubkey))?;
         let peer_count = direct_message_topic_peer_count(transport, &topic).await?;
         let topic_has_connected_peer = peer_count > 0;
         let mut published = 0usize;
         let attempted_at = Utc::now().timestamp_millis();
-        for row in projection_store.list_direct_message_outbox().await? {
-            if row.peer_pubkey != peer_pubkey {
-                continue;
-            }
-            if topic_has_connected_peer {
-                projection_store
-                    .touch_direct_message_outbox_attempt(
-                        row.dm_id.as_str(),
-                        row.message_id.as_str(),
-                        attempted_at,
-                    )
-                    .await?;
-            }
-            let publish_result = hint_transport
-                .publish_hint(
+        let page = projection_store
+            .list_direct_message_outbox_for_peer_page(
+                peer_pubkey,
+                after,
+                kukuri_store::DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+            )
+            .await?;
+        for row in &page.items {
+            published += usize::from(
+                Self::publish_direct_message_outbox_row(
+                    services,
                     &topic,
-                    GossipHint::DirectMessageFrame {
-                        topic_id: topic.clone(),
-                        dm_id: row.dm_id.clone(),
-                        message_id: row.message_id.clone(),
-                        frame_hash: row.frame_blob_hash.clone(),
-                    },
+                    row,
+                    topic_has_connected_peer,
+                    attempted_at,
                 )
-                .await;
-            if let Err(error) = publish_result {
-                if topic_has_connected_peer {
-                    return Err(error);
-                }
-                continue;
-            }
-            published += 1;
+                .await?,
+            );
         }
-        Ok(published)
+        Ok((published, page.next_cursor))
+    }
+
+    async fn publish_direct_message_outbox_row(
+        services: &ServiceHandles,
+        topic: &TopicId,
+        row: &DirectMessageOutboxRow,
+        topic_has_connected_peer: bool,
+        attempted_at: i64,
+    ) -> Result<bool> {
+        if topic_has_connected_peer {
+            services
+                .projection_store
+                .touch_direct_message_outbox_attempt(
+                    row.dm_id.as_str(),
+                    row.message_id.as_str(),
+                    attempted_at,
+                )
+                .await?;
+        }
+        let result = services
+            .hint_transport
+            .publish_hint(
+                topic,
+                GossipHint::DirectMessageFrame {
+                    topic_id: topic.clone(),
+                    dm_id: row.dm_id.clone(),
+                    message_id: row.message_id.clone(),
+                    frame_hash: row.frame_blob_hash.clone(),
+                },
+            )
+            .await;
+        match result {
+            Ok(()) => Ok(true),
+            Err(error) if topic_has_connected_peer => Err(error),
+            Err(_) => Ok(false),
+        }
     }
 
     pub(crate) async fn direct_message_topic_peer_count(&self, peer_pubkey: &str) -> Result<usize> {
@@ -424,25 +447,43 @@ impl AppService {
                 acked_at: None,
             })
             .await?;
+        let outbox_row = DirectMessageOutboxRow {
+            dm_id: dm_id.clone(),
+            message_id: message_id.clone(),
+            peer_pubkey: peer_pubkey.to_string(),
+            frame_blob_hash: frame_blob.hash,
+            created_at,
+            last_attempt_at: None,
+        };
         self.services
             .projection_store
-            .put_direct_message_outbox(DirectMessageOutboxRow {
-                dm_id: dm_id.clone(),
-                message_id: message_id.clone(),
-                peer_pubkey: peer_pubkey.to_string(),
-                frame_blob_hash: frame_blob.hash,
-                created_at,
-                last_attempt_at: None,
-            })
+            .put_direct_message_outbox(outbox_row.clone())
             .await?;
         self.refresh_direct_message_conversation(peer_pubkey)
             .await?;
-        let _ = Self::flush_direct_message_outbox_for_peer(
-            &self.services,
-            self.current_author_pubkey().as_str(),
-            peer_pubkey,
-        )
-        .await?;
+        if self
+            .services
+            .projection_store
+            .get_author_relationship(self.current_author_pubkey().as_str(), peer_pubkey)
+            .await?
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            let topic = derive_direct_message_topic(
+                self.services.keys.as_ref(),
+                &Pubkey::from(peer_pubkey),
+            )?;
+            let connected =
+                direct_message_topic_peer_count(self.services.transport.as_ref(), &topic).await?
+                    > 0;
+            let _ = Self::publish_direct_message_outbox_row(
+                &self.services,
+                &topic,
+                &outbox_row,
+                connected,
+                Utc::now().timestamp_millis(),
+            )
+            .await?;
+        }
         Ok(message_id)
     }
 

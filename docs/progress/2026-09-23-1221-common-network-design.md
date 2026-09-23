@@ -94,6 +94,8 @@ account routeは通常topicの同期診断から分離し、既存topic数・接
 
 N03のwarmupで全peer分のtaskをspawnしてから2 permitを待つ経路を、1回4候補の巡回窓と同時2futureへ置換する。共有dial枠が満杯ならin-flight台帳へ追加せず次回の既存retryへ委ねる。履歴100/1,000で4候補、満杯時の待機0、既存ticket/seed更新後の実gossip接続を局所testで確認。N04のtopic全体/初回bootstrap/長命retryは別の残件であり、この変更のみでgossip owner統合を完了としない。
 
+N11のDM outbox再送は毎tickで全rowを読み、相手pubkeyをメモリ側でfilterしていた。N64ではpeer別64行の索引ページとcursorへ変更し、新規送信は保存した1rowを直接publishする。1000件の他peer履歴/130件の対象履歴でも1tickは最大64行、3tickで130行を巡回する。SQLite query planの索引利用、Memoryとの同順、同時刻・同message IDの異なる会話、削除/会話clear後の索引、既存DM delivery/restartを関連testで確認。起動/DM statusの全件outbox読みと旧pairwise routeは残る。
+
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。

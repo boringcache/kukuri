@@ -13,8 +13,9 @@ use sqlx::{Pool, QueryBuilder, Row, Sqlite};
 use crate::models::adult_media_hashes_for_row;
 use crate::models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
-    BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
+    BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+    DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
+    DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
     DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
     LiveSessionProjectionRow, MutedAuthorRow, NotificationRow, ObjectProjectionRow, Page,
     PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,

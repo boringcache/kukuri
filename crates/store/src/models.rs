@@ -262,6 +262,21 @@ pub struct DirectMessageOutboxRow {
     pub last_attempt_at: Option<i64>,
 }
 
+pub const DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectMessageOutboxCursor {
+    pub created_at: i64,
+    pub message_id: String,
+    pub dm_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectMessageOutboxPage {
+    pub items: Vec<DirectMessageOutboxRow>,
+    pub next_cursor: Option<DirectMessageOutboxCursor>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectMessageTombstoneRow {
     pub dm_id: String,

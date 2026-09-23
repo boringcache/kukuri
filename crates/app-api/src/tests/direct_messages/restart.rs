@@ -151,10 +151,11 @@ async fn dm_restart_resumes_pending_outbox_and_local_delete_prevents_duplicate_r
             last_error: None,
         }];
     }
-    let _published = AppService::flush_direct_message_outbox_for_peer(
+    let _published = AppService::flush_direct_message_outbox_page_for_peer(
         &reopened_app_a.services,
         a_pubkey.as_str(),
         b_pubkey.as_str(),
+        None,
     )
     .await
     .expect("flush queued direct message after restart");

@@ -24,7 +24,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N08 `spawn_subscription_task/ensure_joined_private_channel_subscriptions`、`service/private_channels_support.rs` | private参加/表示/restart。recovery tick 1秒 | audience/epoch確認、event/hint/復旧。channel退出で停止 | 全joined/各channelの周期/期限。P3/P4 | NW-3/7/9 |
 | N09 `ensure_author_subscriptions_for_rows/spawn_author_subscription`、`service/social_runtime_support.rs` | row表示、author操作、1秒catchup、bootstrap recovery | docs/hint receiverとbootstrap task。著者購読registry | 著者登録累積/各author周期。P3/P4 | NW-1/5、author署名/権限 |
 | N10 `rebuild_author_relationships/current_mutual_direct_message_peers/schedule_direct_message_reconcile`、`social_runtime_support.rs/social_helpers.rs` | social変更/startup/DM操作 | 全following/followerとFoF確認→DM reconcile | graph全体の列挙と全subscription差分。P3対象別索引 | NW-8、mutual未確認時拒否 |
-| N11 `reconcile_direct_message_subscriptions/spawn_direct_message_subscription/direct_message_topic_snapshot`、`service/direct_messages_subscription_support.rs` | mutual peer単位、2秒outbox tick | pairwise hints、outbox flush、全peers snapshot。registryで停止 | DM相手数×task/timer、outbox全件filter。P3受信route | NW-8/9、ACK/tombstone |
+| N11 `reconcile_direct_message_subscriptions/spawn_direct_message_subscription/direct_message_topic_snapshot`、`service/direct_messages_subscription_support.rs` | mutual peer単位、2秒outbox tick | pairwise hints、peer別outbox64行ページのcursorをtaskが保持。registryで停止 | 再送tickのoutbox全件filterはN64で撤去。DM相手数×task/timer、起動時/DM statusの全件読取りと全peers snapshotはP3残件 | NW-8/9、ACK/tombstone |
 | N12 `session_projection.rs`、`session_display.rs`、UI `SessionVisibility/useSessionDisplay` | 表示observer、window/columnの非表示 | 対象64/observer64、表示futureをcancel、保存前再guard | 既存の有界需要をP3へ接続。参加sessionの寿命とは別 | NW-4/7、既存session manifest tests |
 | N13 `run_community_node_session_maintenance_once/start_community_node_session_scheduler`、`cn-runtime/scheduler_support.rs` | runtime起動、15秒、設定node全体 | `MaintenanceTasks`がjobごとのfutureを所有、Skip、shutdown停止 | 所有は既存。node全体再列挙とstatusからselfheal。P3due索引 | NW-6、mixed認証/同意 |
 | N14 `maybe_self_heal_community_node_connectivity/repair_community_node_connectivity`、`cn-runtime/reconnect_support.rs` | sync status不健全、期限付きbackoff | reconnect成功でreset、seed/購読再適用へ連鎖 | 全active/全ready nodeへ波及。P3差分と観測 | NW-5/6/7 |
@@ -276,3 +276,11 @@ N61はprovider bindingを公開accountへ結ぶだけで、public source参加�
 | N62 | topic join/retry → `TopicWarmupCoordinator::warmup_peers_once` → gossip ALPN dial | peer履歴100/1,000でも4候補だけを巡回してclone。`for_each_concurrent(2)`はtaskをspawnせず、共有dial slot2件が満杯ならin-flight台帳を増やさず即時延期。既存direct優先とrelay fallbackはwarmup先のaddress構築を維持 | `warmup_samples_a_moving_four_peer_window_from_large_history`、`warmup_does_not_queue_peer_state_when_shared_dial_slots_are_full`、`transport_import_ticket_updates_existing_topic_subscription`、`transport_seed_update_updates_existing_topic_subscription` |
 
 N62はper-peer warmupの増幅だけを除く。`ensure_hint_topic`の初回bootstrap合成とtopic全体のretry task、`extend_active_topic_peers`の全topic更新、SDK内部のgossip viewはN04/U07のまま残る。D2の現在の受信対象を減らすために購読を切り捨てない。
+
+## DM保護outboxのpeer別再送ページ（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N64 | DM送信/相手別2秒tick → `DirectMessageStore::list_direct_message_outbox_for_peer_page` → 既存署名frame hashのpairwise hint | SQLiteの(peer,created_at,message_id,dm_id)索引を使い64行＋続き1行だけ読む。Memoryも同順索引を更新。tickごとにcursorを次ページへ進め、最終ページ後に先頭へ戻る。新規DMは保存した1rowを直接送信し、大きい旧outboxの先頭ページを待たせない。mutual、ACK、tombstoneと保護rowは従来どおり | `direct_message_outbox_peer_pages_ignore_other_peer_history`、`direct_message_outbox_peer_page_uses_the_sqlite_cursor_index`、`dm_outbox_retry_reads_only_one_peer_page_per_tick`、既存DM delivery/restart・migration roundtrip/backend parity |
+
+N64は再送tickと新規送信時のoutbox読取りだけを有限化する。`resume_direct_message_state`と`direct_message_status_view`はまだ全outboxを読み、DM peer/topicごとの常時taskと旧pairwise配送も残る。outboxは保護データであり、容量のために削除・成功扱いしない。新索引は端末内に留まり、外部送信は既存hintだけ。

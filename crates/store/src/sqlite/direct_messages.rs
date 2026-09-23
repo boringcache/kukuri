@@ -263,6 +263,68 @@ impl DirectMessageStore for SqliteStore {
         rows.into_iter().map(row_to_direct_message_outbox).collect()
     }
 
+    async fn list_direct_message_outbox_for_peer_page(
+        &self,
+        peer_pubkey: &str,
+        after: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox page limit"
+        );
+        let fetch_limit = (limit + 1) as i64;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE peer_pubkey = ?1
+                  AND (created_at, message_id, dm_id) > (?2, ?3, ?4)
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC
+                LIMIT ?5
+                "#,
+            )
+            .bind(peer_pubkey)
+            .bind(after.created_at)
+            .bind(after.message_id.as_str())
+            .bind(after.dm_id.as_str())
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE peer_pubkey = ?1
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC
+                LIMIT ?2
+                "#,
+            )
+            .bind(peer_pubkey)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = rows.len() > limit;
+        let items = rows
+            .into_iter()
+            .take(limit)
+            .map(row_to_direct_message_outbox)
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = if has_more {
+            items.last().map(|last| DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(DirectMessageOutboxPage { items, next_cursor })
+    }
+
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,
