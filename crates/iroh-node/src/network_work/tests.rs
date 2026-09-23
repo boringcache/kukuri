@@ -35,6 +35,25 @@ async fn queued_network_work_is_bounded_and_dropped_waiters_do_not_run() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn bounded_offer_blob_work_shares_the_display_slot_and_stops_on_close() {
+    let owner = owner();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let display = owner.acquire([1; 32], deadline).await.unwrap();
+    let mut offer = Box::pin(owner.acquire_bounded_blob([2; 32], 65_536, deadline));
+    assert!(futures_util::poll!(&mut offer).is_pending());
+    assert!(display.finish());
+    let offer = offer.await.unwrap();
+    assert_eq!(owner.state.lock().unwrap().policy.usage().running, 1);
+    owner.close();
+    offer.cancelled().await;
+    assert!(!offer.finish());
+    assert_eq!(
+        owner.state.lock().unwrap().policy.usage(),
+        Default::default()
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn display_admission_deadline_and_close_discard_prepared_results() {
     let owner = owner();
     let deadline = Instant::now() + Duration::from_secs(30);

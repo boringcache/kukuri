@@ -90,6 +90,42 @@ impl NetworkWorkRuntime {
         hash: [u8; 32],
         deadline: Instant,
     ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
+        self.acquire_blob_work(
+            hash,
+            u64::MAX,
+            WorkMode::Display,
+            WorkLane::Interactive,
+            deadline,
+        )
+        .await
+    }
+
+    /// A caller-owned bounded blob transfer shares the same running budget as
+    /// ordinary and display fetches without joining either fetch identity.
+    pub(crate) async fn acquire_bounded_blob(
+        self: &Arc<Self>,
+        hash: [u8; 32],
+        max_bytes: u64,
+        deadline: Instant,
+    ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
+        self.acquire_blob_work(
+            hash,
+            max_bytes,
+            WorkMode::Fetch,
+            WorkLane::Background,
+            deadline,
+        )
+        .await
+    }
+
+    async fn acquire_blob_work(
+        self: &Arc<Self>,
+        hash: [u8; 32],
+        byte_limit: u64,
+        mode: WorkMode,
+        lane: WorkLane,
+        deadline: Instant,
+    ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
         let lease = {
             let mut state = self.state.lock().expect("display admission poisoned");
             if state.closed {
@@ -108,11 +144,11 @@ impl NetworkWorkRuntime {
                 scope,
                 protocol: WorkProtocol::Blob,
                 object: hash,
-                mode: WorkMode::Display,
+                mode,
                 persistence: WorkPersistence::Ephemeral,
-                byte_limit: u64::MAX,
+                byte_limit,
                 deadline: deadline.into_std(),
-                lane: WorkLane::Interactive,
+                lane,
             };
             let waiter = match state.policy.admit(key, &hash, Instant::now().into_std()) {
                 WorkAdmission::Admitted(waiter) => waiter,

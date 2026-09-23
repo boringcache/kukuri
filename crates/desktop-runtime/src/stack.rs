@@ -8,6 +8,7 @@ use futures_util::TryStreamExt;
 use kukuri_blob_service::{BlobService, BlobStatus, IrohBlobService, StoredBlob};
 use kukuri_core::{
     BlobHash, GossipHint, KukuriKeys, Pubkey, ReplicaId, SealedReceiveOfferV1, TopicId,
+    VerifiedReceiveOffer,
 };
 use kukuri_docs_sync::{
     DocEventStream, DocFetchPolicy, DocKeyPage, DocKeyQuery, DocOp, DocQuery, DocRecord, DocsSync,
@@ -193,6 +194,9 @@ reloadable_service! {
         // #1152: trait の既定実装は永続化する `fetch_blob` へ委譲するため、必ず実体へ転送する
         // (成人向け表示 ON の取得は ephemeral で永続化しない。ADR 0046 §6.2)。
         async fn fetch_blob_ephemeral(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn fetch_verified_receive_offer_payload(
+            offer: &VerifiedReceiveOffer, provider: EndpointAddr,
+        ) -> Result<Vec<u8>>;
         async fn pin_blob(hash: &BlobHash) -> Result<()>;
         async fn unpin_blob(hash: &BlobHash) -> Result<()>;
         async fn blob_status(hash: &BlobHash) -> Result<BlobStatus>;
