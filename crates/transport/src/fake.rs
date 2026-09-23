@@ -39,6 +39,7 @@ pub struct FakeNetwork {
     topic_subscribers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
     known_peers: Arc<Mutex<BTreeSet<String>>>,
     verified_receive_providers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
+    receive_candidates: Arc<Mutex<HashMap<String, Vec<EndpointAddr>>>>,
 }
 
 impl FakeNetwork {
@@ -392,7 +393,40 @@ impl HintTransport for FakeTransport {
         recipient: &Pubkey,
     ) -> Result<Option<EndpointAddr>> {
         receive_route_for_account(recipient)?;
-        Ok(None)
+        let candidates = self
+            .network
+            .receive_candidates
+            .lock()
+            .await
+            .get(recipient.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let verified = self.network.verified_receive_providers.lock().await;
+        Ok(candidates.into_iter().find(|candidate| {
+            verified
+                .get(recipient.as_str())
+                .is_some_and(|ids| ids.contains(&candidate.id.to_string()))
+        }))
+    }
+
+    async fn offer_receive_candidates(
+        &self,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+    ) -> Result<()> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(candidates.len() <= 8, "too many fake receive candidates");
+        self.network
+            .receive_candidates
+            .lock()
+            .await
+            .insert(recipient.as_str().to_string(), candidates);
+        Ok(())
+    }
+
+    async fn clear_receive_candidates(&self) -> Result<()> {
+        self.network.receive_candidates.lock().await.clear();
+        Ok(())
     }
 
     async fn invalidate_receive_destination(

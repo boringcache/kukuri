@@ -115,6 +115,8 @@ reloadable_service! {
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
         async fn resolve_receive_destination(recipient: &Pubkey) -> Result<Option<EndpointAddr>>;
+        async fn offer_receive_candidates(recipient: &Pubkey, candidates: Vec<EndpointAddr>) -> Result<()>;
+        async fn clear_receive_candidates() -> Result<()>;
         async fn invalidate_receive_destination(recipient: &Pubkey, endpoint_id: &str) -> Result<()>;
         async fn verify_receive_provider(sender: &Pubkey, provider: EndpointAddr) -> Result<()>;
         async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferSubscription>;

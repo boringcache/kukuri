@@ -1,6 +1,34 @@
 use crate::service::*;
 
 impl AppService {
+    /// Account-specific CN discovery demand; never materialize every outbox
+    /// row or every mutual peer merely to choose a receive route candidate.
+    pub async fn pending_receive_destination_recipients(&self) -> Result<Vec<Pubkey>> {
+        let rows = self
+            .services
+            .projection_store
+            .list_due_direct_message_outbox(Utc::now().timestamp_millis(), 3, 1)
+            .await?;
+        let local = self.current_author_pubkey();
+        let mut unique = BTreeSet::new();
+        for row in rows {
+            let Ok(peer) = normalize_author_pubkey(&row.peer_pubkey) else {
+                continue;
+            };
+            if self
+                .services
+                .projection_store
+                .get_author_relationship(local.as_str(), peer.as_str())
+                .await?
+                .as_ref()
+                .is_some_and(|relationship| relationship.mutual)
+            {
+                unique.insert(Pubkey::from(peer));
+            }
+        }
+        Ok(unique.into_iter().collect())
+    }
+
     pub async fn resume_direct_message_state(&self) -> Result<()> {
         let mut peers = self
             .services

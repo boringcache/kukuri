@@ -1,6 +1,34 @@
 use super::*;
 
 impl DesktopRuntime {
+    async fn refresh_rendezvous_with_token(
+        &self,
+        base_url: &str,
+        access_token: &str,
+    ) -> std::result::Result<(), CommunityNodeRequestError> {
+        if let Err(error) = self
+            .refresh_account_receive_rendezvous_with_token(base_url, access_token)
+            .await
+        {
+            if matches!(
+                error,
+                CommunityNodeRequestError::AuthRequired
+                    | CommunityNodeRequestError::ConsentRequired
+            ) {
+                return Err(error);
+            }
+            if let Some(session) = self.community_node_sessions.lock().await.get_mut(base_url) {
+                session.rendezvous_refresh_deadline = Utc::now().timestamp().saturating_add(5);
+            }
+            debug!(
+                ?error,
+                "bounded account receive rendezvous refresh deferred"
+            );
+        }
+        self.refresh_topic_rendezvous_with_token(base_url, access_token)
+            .await
+    }
+
     pub(crate) async fn request_community_node_authentication_token(
         &self,
         base_url: &str,
@@ -411,9 +439,14 @@ impl DesktopRuntime {
             .await
             .map_err(CommunityNodeRequestError::Other)?;
         let private_topic_keys = self.app_service.private_channel_rendezvous_keys().await;
+        let account_receive_route = receive_route_for_account(&self.author_keys.public_key())
+            .map_err(CommunityNodeRequestError::Other)?;
         let mut topic_keys = std::collections::BTreeSet::new();
         let mut skipped_private_topics = 0usize;
         for topic in &snapshot.subscribed_topics {
+            if topic == account_receive_route.as_str() {
+                continue;
+            }
             let is_private_channel_hint = topic
                 .strip_prefix(HINT_TOPIC_PREFIX)
                 .is_some_and(|topic| topic.starts_with(PRIVATE_CHANNEL_TOPIC_PREFIX));
@@ -605,7 +638,7 @@ impl DesktopRuntime {
                 // rendezvous presence(サーバ TTL 45 秒)は heartbeat(実効約 60 秒毎)より
                 // 短命のため、heartbeat が not-due でも独立に refresh する(#572)。
                 if rendezvous_due_at <= now {
-                    self.refresh_topic_rendezvous_with_token(base_url.as_str(), access_token)
+                    self.refresh_rendezvous_with_token(base_url.as_str(), access_token)
                         .await?;
                     return Ok(());
                 }
@@ -629,7 +662,7 @@ impl DesktopRuntime {
                 .await
             {
                 Ok(node) => {
-                    self.refresh_topic_rendezvous_with_token(base_url.as_str(), access_token)
+                    self.refresh_rendezvous_with_token(base_url.as_str(), access_token)
                         .await?;
                     self.record_community_node_bootstrap_metadata_refresh(
                         base_url.as_str(),
@@ -716,7 +749,7 @@ impl DesktopRuntime {
                     .await
                 {
                     Ok(node) => {
-                        self.refresh_topic_rendezvous_with_token(base_url.as_str(), access_token)
+                        self.refresh_rendezvous_with_token(base_url.as_str(), access_token)
                             .await?;
                         self.record_community_node_bootstrap_metadata_refresh(
                             base_url.as_str(),

@@ -137,6 +137,22 @@ pub trait HintTransport: Send + Sync {
         anyhow::bail!("authenticated receive destination resolution is not supported")
     }
 
+    /// Feed bounded rendezvous addresses as untrusted candidates for this
+    /// account. Resolution still requires a live signed binding on QUIC.
+    async fn offer_receive_candidates(
+        &self,
+        _recipient: &Pubkey,
+        _candidates: Vec<EndpointAddr>,
+    ) -> Result<()> {
+        anyhow::bail!("account receive candidate feed is not supported")
+    }
+
+    /// Forget CN-derived addresses and any destination cached from them when
+    /// CN configuration or consent changes.
+    async fn clear_receive_candidates(&self) -> Result<()> {
+        anyhow::bail!("account receive candidate clear is not supported")
+    }
+
     async fn invalidate_receive_destination(
         &self,
         _recipient: &Pubkey,

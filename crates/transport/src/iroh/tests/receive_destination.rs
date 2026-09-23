@@ -100,6 +100,40 @@ fn destination_cursor_reaches_old_peer_during_new_inserts_and_deletes() {
 }
 
 #[test]
+fn rendezvous_window_does_not_starve_known_peer_cursor() {
+    let recipient = Pubkey::from("account-rendezvous");
+    let mut peers = BTreeMap::new();
+    for index in 0..1_000u32 {
+        let mut secret = [0u8; 32];
+        secret[..4].copy_from_slice(&index.to_le_bytes());
+        let id = SecretKey::from_bytes(&secret).public();
+        peers.insert(id.to_string(), EndpointAddr::new(id));
+    }
+    let cn = (1_000..1_008u32)
+        .map(|index| {
+            let mut secret = [0u8; 32];
+            secret[..4].copy_from_slice(&index.to_le_bytes());
+            EndpointAddr::new(SecretKey::from_bytes(&secret).public())
+        })
+        .collect::<Vec<_>>();
+    let mut state = DestinationWindow::default();
+    state.observe_rendezvous(&recipient, cn);
+    let mut observed_known = BTreeSet::new();
+    for _ in 0..500 {
+        let (candidates, _) =
+            state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
+        assert!(candidates.len() <= CANDIDATES_PER_LOOKUP);
+        observed_known.extend(
+            candidates
+                .into_iter()
+                .filter(|item| peers.contains_key(&item.id.to_string()))
+                .map(|item| item.id),
+        );
+    }
+    assert_eq!(observed_known.len(), 1_000);
+}
+
+#[test]
 fn cache_expires_and_invalidating_another_endpoint_preserves_current_binding() {
     let recipient = Pubkey::from("account-c");
     let id = SecretKey::from_bytes(&[8; 32]).public();
@@ -335,6 +369,77 @@ async fn saturated_probe_budget_defers_without_queuing() {
             .is_none()
     );
     drop(permits);
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let receiver = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let recipient = KukuriKeys::generate();
+    assert!(
+        SeedPeer {
+            endpoint_id: receiver.id().to_string(),
+            addr_hint: Some("example.invalid:4242".into()),
+        }
+        .to_endpoint_addr_with_relay_url_strings(&[])
+        .is_err(),
+        "untrusted CN address hints must not invoke hostname resolution"
+    );
+    let now = Utc::now().timestamp_millis();
+    let binding =
+        ReceiveEndpointBindingV1::sign(&recipient, &receiver.id().to_string(), now, now + 60_000)
+            .unwrap();
+    let router = Router::builder(receiver.clone())
+        .accept(
+            RECEIVE_BINDING_ALPN,
+            ReceiveBindingProtocol::new(receiver.id(), binding).unwrap(),
+        )
+        .spawn();
+    assert!(
+        transport
+            .offer_receive_candidates(&recipient.public_key(), vec![receiver.addr(); 9])
+            .await
+            .is_err()
+    );
+    transport
+        .offer_receive_candidates(&recipient.public_key(), vec![receiver.addr()])
+        .await
+        .unwrap();
+    assert!(transport.imported_peers.lock().await.is_empty());
+    assert!(
+        transport
+            .resolve_receive_destination(&KukuriKeys::generate().public_key())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        receiver.id()
+    );
+    transport.clear_receive_candidates().await.unwrap();
+    assert!(
+        transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .is_none(),
+        "CN consent removal must also clear a previously verified destination"
+    );
+    router.shutdown().await.unwrap();
     transport.shutdown().await;
     transport._router.take().unwrap().shutdown().await.unwrap();
 }

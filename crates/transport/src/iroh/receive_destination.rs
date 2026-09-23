@@ -13,6 +13,8 @@ const CANDIDATES_PER_LOOKUP: usize = 4;
 const MAX_SELECTION_STEPS: usize = 12;
 const BINDING_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CACHED_BINDING_MS: i64 = 10_000;
+const MAX_RENDEZVOUS_CANDIDATES: usize = 8;
+const RENDEZVOUS_CANDIDATE_TTL: Duration = Duration::from_secs(45);
 
 #[derive(Default)]
 pub(super) struct DestinationWindow {
@@ -26,6 +28,9 @@ struct DestinationEntry {
     source: usize,
     cursors: [Option<String>; 3],
     verified: Option<CachedDestination>,
+    rendezvous_candidates: Vec<EndpointAddr>,
+    rendezvous_cursor: usize,
+    rendezvous_expires_at: Option<Instant>,
 }
 
 struct CachedDestination {
@@ -57,6 +62,9 @@ impl DestinationWindow {
                 source: 0,
                 cursors: Default::default(),
                 verified: None,
+                rendezvous_candidates: Vec::new(),
+                rendezvous_cursor: 0,
+                rendezvous_expires_at: None,
             });
         entry.last_used = tick;
         entry
@@ -82,6 +90,19 @@ impl DestinationWindow {
         let entry = self.touch(recipient);
         let mut selected = Vec::with_capacity(CANDIDATES_PER_LOOKUP);
         let mut seen = BTreeSet::new();
+        if entry
+            .rendezvous_expires_at
+            .is_some_and(|expires_at| expires_at <= Instant::now())
+        {
+            entry.rendezvous_candidates.clear();
+            entry.rendezvous_expires_at = None;
+        }
+        for _ in 0..entry.rendezvous_candidates.len().min(2) {
+            let candidate = next_rendezvous_candidate(entry);
+            if seen.insert(candidate.id) {
+                selected.push(candidate);
+            }
+        }
         for _ in 0..MAX_SELECTION_STEPS {
             if selected.len() == CANDIDATES_PER_LOOKUP {
                 break;
@@ -94,7 +115,32 @@ impl DestinationWindow {
                 selected.push(candidate);
             }
         }
+        for _ in 0..entry.rendezvous_candidates.len().min(CANDIDATES_PER_LOOKUP) {
+            if selected.len() == CANDIDATES_PER_LOOKUP {
+                break;
+            }
+            let candidate = next_rendezvous_candidate(entry);
+            if seen.insert(candidate.id) {
+                selected.push(candidate);
+            }
+        }
         (selected, entry.revision)
+    }
+
+    fn observe_rendezvous(&mut self, recipient: &Pubkey, candidates: Vec<EndpointAddr>) {
+        let entry = self.touch(recipient);
+        entry.rendezvous_candidates = candidates;
+        entry.rendezvous_cursor %= entry.rendezvous_candidates.len().max(1);
+        entry.rendezvous_expires_at = Some(Instant::now() + RENDEZVOUS_CANDIDATE_TTL);
+    }
+
+    pub(super) fn clear_rendezvous(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.rendezvous_candidates.clear();
+            entry.rendezvous_expires_at = None;
+            entry.verified = None;
+            entry.revision = entry.revision.wrapping_add(1);
+        }
     }
 
     fn store_verified(
@@ -136,6 +182,12 @@ impl DestinationWindow {
     }
 }
 
+fn next_rendezvous_candidate(entry: &mut DestinationEntry) -> EndpointAddr {
+    let index = entry.rendezvous_cursor % entry.rendezvous_candidates.len();
+    entry.rendezvous_cursor = entry.rendezvous_cursor.wrapping_add(1);
+    entry.rendezvous_candidates[index].clone()
+}
+
 fn next_peer(
     peers: &BTreeMap<String, EndpointAddr>,
     cursor: &mut Option<String>,
@@ -150,6 +202,34 @@ fn next_peer(
 }
 
 impl IrohGossipTransport {
+    pub(super) async fn offer_receive_candidates_impl(
+        &self,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+    ) -> Result<()> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(
+            candidates.len() <= MAX_RENDEZVOUS_CANDIDATES,
+            "too many account receive candidates"
+        );
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        let mut unique = Vec::with_capacity(candidates.len());
+        let mut seen = BTreeSet::new();
+        for candidate in candidates {
+            if candidate.id != self.endpoint.id() && seen.insert(candidate.id) {
+                unique.push(candidate);
+            }
+        }
+        self.receive_destinations
+            .lock()
+            .await
+            .observe_rendezvous(recipient, unique);
+        Ok(())
+    }
+
     pub(super) async fn verify_receive_provider_impl(
         &self,
         sender: &Pubkey,

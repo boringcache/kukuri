@@ -186,6 +186,8 @@ pub(crate) struct MockRendezvousCommunityNodeState {
     pub(crate) bootstrap_hits: Arc<AtomicUsize>,
     pub(crate) rendezvous_hits: Arc<AtomicUsize>,
     pub(crate) rendezvous_requests: Arc<Mutex<Vec<kukuri_cn_protocol::TopicRendezvousHeartbeat>>>,
+    pub(crate) account_candidate: Option<(String, kukuri_cn_protocol::TopicRendezvousCandidate)>,
+    pub(crate) rendezvous_failure: Arc<AtomicBool>,
 }
 
 pub(crate) async fn mock_rendezvous_bootstrap_heartbeat(
@@ -218,19 +220,33 @@ pub(crate) async fn mock_rendezvous_bootstrap_nodes(
 pub(crate) async fn mock_rendezvous_topics_heartbeat(
     State(state): State<Arc<MockRendezvousCommunityNodeState>>,
     Json(request): Json<kukuri_cn_protocol::TopicRendezvousHeartbeat>,
-) -> Json<kukuri_cn_protocol::TopicRendezvousHeartbeatResponse> {
+) -> Result<Json<kukuri_cn_protocol::TopicRendezvousHeartbeatResponse>, StatusCode> {
     assert!(
         !request.refreshes.is_empty() || !request.joins.is_empty(),
         "rendezvous heartbeat without topics"
     );
     state.rendezvous_hits.fetch_add(1, Ordering::SeqCst);
-    state.rendezvous_requests.lock().await.push(request);
+    if state.rendezvous_failure.load(Ordering::SeqCst) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     // expires_in_seconds はクライアントのマージン(20 秒)より小さくし、deadline が
     // 毎 maintenance pass で即時 due になるようにする(wall-clock 待ちなしの決定的テスト用)。
-    Json(kukuri_cn_protocol::TopicRendezvousHeartbeatResponse {
+    let topics = state
+        .account_candidate
+        .as_ref()
+        .filter(|(key, _)| request.refreshes.contains(key))
+        .map(|(key, candidate)| {
+            vec![kukuri_cn_protocol::TopicRendezvousTopicResponse {
+                topic_key: key.clone(),
+                peers: vec![candidate.clone()],
+            }]
+        })
+        .unwrap_or_default();
+    state.rendezvous_requests.lock().await.push(request);
+    Ok(Json(kukuri_cn_protocol::TopicRendezvousHeartbeatResponse {
         expires_in_seconds: 5,
-        topics: Vec::new(),
-    })
+        topics,
+    }))
 }
 
 #[derive(Clone)]

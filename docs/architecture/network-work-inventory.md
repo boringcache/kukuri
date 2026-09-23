@@ -325,3 +325,11 @@ N67の既知peer窓はCN/著者制御stateからのaccount候補探索をまだ�
 | N69 | identity復元/関係再構築 → account単一ownerの2秒tick → `list_due_direct_message_outbox` → 最大4行のpairwise hint/account offer | 未試行3件と期限到来済み再試行1件を別indexから読む。各行の試行時刻を更新し、mutual/row現在性を再確認してから送信。旧pairwise hint・account offerは各2秒で取消し、遅いpeerが他laneを無期限に塞がない。送信失敗/失効でも保護row維持。新ownerは重複起動せず、shutdown/dropで実行中futureを取消。pairwise受信streamからtimerを除去 | `due_dm_outbox_lanes_keep_new_and_old_work_bounded`、`due_direct_message_outbox_uses_both_sqlite_lane_indexes`、`all_generations_have_paired_down`、`dm_due_owner_processes_bounded_new_and_retry_lanes`、`blocked_pairwise_publish_cannot_stop_other_peer_or_account_offer`、`account_dm_retry_owner_is_single_and_shutdown_cancels_active_lookup`、既存DM restart/mutual tests |
 
 N69は周期再送の総peer数依存だけを減らす。起動時の全conversation/outboxと全mutual graph読取り、旧pairwiseの相手別受信task、既知peer外の宛先発見は未移行。
+
+## Account受信宛先のCN候補窓（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N70 | CN sessionの期限到来/heartbeat/metadata refresh → `refresh_account_receive_rendezvous_with_token` → `pending_receive_destination_recipients`の未試行3＋再試行1行 → own routeと最大4件の送信先routeを別heartbeatで更新 → CN候補をaccount別窓へ渡す → `resolve_receive_destination`で実QUICの署名binding照合 | CNの既存auth・現行policy同意を使い、応答後に設定・同意・sessionを再確認。requestは最大5 route、responseは65,536byte/5 route/各8候補/各候補4 relay URL。peer提供のaddr_hintは数値IP:portのみでDNS同期解決しない。候補はaccount最大1,024・1account最大8・45秒期限、照合は既存の1試行4件/同時2件を維持。CN応答だけでaccountを確定しない。設定変更/同意失効時は候補と検証済みcacheを消し、未解決なら保護outboxを保持 | `account_candidate_demand_uses_only_bounded_mutual_due_rows`、`account_rendezvous_queries_one_due_recipient_without_public_topic_snapshot`、`untrusted_rendezvous_candidate_requires_live_account_binding`、`rendezvous_window_does_not_starve_known_peer_cursor`、既存CN session/rendezvous test |
+
+N70は既存の全購読topic snapshotから自account受信routeを除き、別の有界requestとして実装する。account照会の401/同意要求は既存session再認証・再同意へ返し、他の失敗は5秒以上待って再試行する。CN不使用時の署名済み著者制御stateからの個別候補取得、旧pairwise受信taskと起動時全件走査、既存CN topic refresh自体の総購読数依存は残件。CNの短期routeはserver TTLで退役するが、明示leaveを含む完全な差分登録への移行も残件。

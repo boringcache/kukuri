@@ -244,6 +244,20 @@ impl HintTransport for IrohGossipTransport {
         self.resolve_receive_destination_impl(recipient).await
     }
 
+    async fn offer_receive_candidates(
+        &self,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+    ) -> Result<()> {
+        self.offer_receive_candidates_impl(recipient, candidates)
+            .await
+    }
+
+    async fn clear_receive_candidates(&self) -> Result<()> {
+        self.receive_destinations.lock().await.clear_rendezvous();
+        Ok(())
+    }
+
     async fn invalidate_receive_destination(
         &self,
         recipient: &Pubkey,
