@@ -124,6 +124,18 @@ N67初回固定head `278d44d3` の独立監査は2blockerでFAIL。cache lock待
 
 局所結果: `cargo test -p kukuri-transport receive_destination --lib` 9件成功、`cargo check -p kukuri-desktop-runtime -p kukuri-transport`、変更2crateの`cargo clippy --all-targets -- -D warnings`、format、`cargo xtask oversized-files`成功。全体testはPR CIで確認する。
 
+N67はPR #1327の最終head `85597bbafe21df9c0070fb2c00fd277ed89d1383`で独立監査PASS・必須CI13/13後、merge `2f5488c6551a2c440a5581946e414bf2908b5a3b`へ統合済み。対象9pathのblob一致を確認した。これによりNET-AC-1/2/6は部分達成を進めたが、宛先候補は既知peerに限り、offerのアプリ送信・ACK移行はまだ未実装である。
+
+N68では保護DM outboxのpeer別64行ページで宛先を1回だけ照合し、既存message ID/暗号frame hashのままaccount routeへsealed manifest参照を追加送信する。画面操作直後はoutbox保存を優先して旧hintだけを送り、新宛先の照合は既存の背景再送で実行する。offer送信は1回2秒・account runtime同時4件で打ち切り、満杯なら待機列を作らず延期する。未解決・送信失敗時もoutboxを削除せず、署名ACKでだけ完了とする。受信側は検証済みprovider endpointへ同じ署名ACKをaccount routeで返し、送信側は既存のsender/recipient/conversation/message照合後にoutboxを解除する。旧pairwise routeはこの段階では維持する。同時に届く重複ACKの配達時刻は初回値を保つ。
+
+| N68入口・trigger | 外部/永続sink | guardと停止・重複契約 | 関連test |
+| --- | --- | --- | --- |
+| 相手別2秒outbox tick、1ページ最大64行 | 署名binding照合1回、manifest blob、sealed offer、一時gossip送信 | mutual・同一outbox rowをblob生成前とoffer送信前に再確認。未解決/失敗で保護rowを残し、新timer/taskは作らない | `dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_row`、`revoked_mutual_after_manifest_write_sends_no_account_dm_offer`、既存のpeerページ/継続挿入test |
+| account routeのDM frame受信と重複/削除済みframe | 既存frame取込、ACK manifest blob、provider endpointへのsealed ACK offer、旧pairwise ACK | providerは受信済みofferの署名参照とbinding照合後のendpoint。mutualを各await後に再確認し、ACK-of-ACKは送らない | `account_route_ingests_verified_mutual_dm_and_stops_on_shutdown`、実Iroh `real_account_route_fetches_bound_provider_manifest_and_reflects_dm` |
+| sender account routeのACK受信、旧routeの重複ACK | `acked_at`保存、保護outbox削除 | 署名と会話/相手/message一致のときだけ変更。Memory/SQLiteとも最初のACK時刻を保持 | `signed_account_route_ack_clears_only_matching_dm_outbox`、`signed_ack_for_another_conversation_cannot_remove_protected_outbox`、`direct_message_acked_at_keeps_first_signed_ack` |
+
+N68の局所再現: 送信offer不在、account ACK受信拒否、受信者からのaccount ACK未発行、重複ACK時刻上書きは変更前の関連testでFAIL。修正後、DM関連28件、SQLite ACK契約、実Iroh二端末でoutbox→offer→取込→ACK→outbox解除を確認。送信後の宛先cache失効、相互失効後のoffer 0、4枠満杯時の待機0と保護row維持も局所testで確認。変更crateのall-targets Clippy、format、`cargo xtask-lite oversized-files`も成功。新headの独立監査・PR CIまではNET-AC全体やD2切替完了としない。
+
 N66初回固定head `83d691cb` の独立監査は2blockerでFAIL。添付fetch中のmutual失効では旧実装がDM rowを拒否してもplaintext blobを1件保存した。失敗testを置き、各添付のfetch後・plaintext保存前にmutualを再確認して保存0とした。旧ownerのaccount名だけのroute解除は同一account新ownerを止め、旧実装のhandoff testがtimeoutでFAIL。transportのprocess一意leaseへunsubscribeを束縛し、旧leaseでは新streamを解除できないことを実IrohとFakeで確認した。shutdownをcancelしてもleaseをregistryへ残し、再度のshutdownで解除を完了するcontractも追加。新固定headの監査とCIまで解消判定しない。
 
 N66次固定headのdelta監査は、同account新ownerが旧streamを閉じたあと、旧ownerの3秒後の無条件再subscribeが新leaseを奪い返すblockerを発見。旧ownerを3.2秒存続させるtestは修正前に新route受信timeoutでFAIL。transport lock内で期待leaseが現世代と一致するときだけ再subscribeする契約へ変更し、旧leaseなら停止する。supersede通知は処理中の最大4futureにも届き、旧provider取得をcancelする。修正後のhandoff・実行中fetch取消・実Iroh conditional retryを局所testで確認し、新固定headの監査/CIまで解消判定しない。

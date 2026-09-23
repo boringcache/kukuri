@@ -397,6 +397,8 @@ pub struct ServiceHandles {
     pub(crate) projection_store: Arc<dyn ProjectionStore>,
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) hint_transport: Arc<dyn HintTransport>,
+    /// Shared across the account's peer retry tasks and receive ACK handling.
+    pub(crate) account_dm_offer_permits: Arc<tokio::sync::Semaphore>,
     pub(crate) docs_sync: Arc<dyn DocsSync>,
     pub(crate) blob_service: Arc<dyn BlobService>,
     pub(crate) keys: Arc<KukuriKeys>,
@@ -430,6 +432,7 @@ impl ServiceHandles {
             projection_store,
             transport,
             hint_transport,
+            account_dm_offer_permits: Arc::new(tokio::sync::Semaphore::new(4)),
             docs_sync,
             blob_service,
             keys: Arc::new(keys),

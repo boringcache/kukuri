@@ -2,7 +2,7 @@
 //! (後続 WP-H1 の安全網)。
 //!
 //! 対象: dm_conversations / dm_messages(outgoing の i64→bool 変換と
-//! acked_at の無条件上書き)/ dm_outbox / dm_message_tombstones /
+//! acked_at の初回固定)/ dm_outbox / dm_message_tombstones /
 //! notifications(kind 6 値の永続文字列と read_at COALESCE = 既読を上書きしない)。
 //! 分割元の全体説明は row_mapping_roundtrip.rs の冒頭を参照。
 
@@ -178,9 +178,9 @@ async fn direct_message_message_roundtrip_preserves_all_columns() {
 }
 
 #[tokio::test]
-async fn direct_message_acked_at_set_overwrites_unconditionally() {
-    // set_direct_message_acked_at は COALESCE ではなく無条件 UPDATE
-    // (notifications の read_at と対照的)。Some の上書きと None→Some を固定。
+async fn direct_message_acked_at_keeps_first_signed_ack() {
+    // 旧pairwiseとaccount routeからACKが重複しても最初の時刻を維持する。
+    // 既存Someを保持し、None→Someだけを記録する。
     let store = SqliteStore::connect_memory().await.expect("sqlite store");
     DirectMessageStore::put_direct_message_message(&store, message_max())
         .await
@@ -195,6 +195,9 @@ async fn direct_message_acked_at_set_overwrites_unconditionally() {
     DirectMessageStore::set_direct_message_acked_at(&store, "dm-min", "msg-min", 42)
         .await
         .expect("ack min");
+    DirectMessageStore::set_direct_message_acked_at(&store, "dm-min", "msg-min", 43)
+        .await
+        .expect("duplicate ack min");
 
     assert_eq!(
         DirectMessageStore::get_direct_message_message(&store, "dm-max", "msg-max")
@@ -202,7 +205,7 @@ async fn direct_message_acked_at_set_overwrites_unconditionally() {
             .expect("get max message")
             .expect("max message exists")
             .acked_at,
-        Some(1_700_000_000_099)
+        Some(1_700_000_000_020)
     );
     assert_eq!(
         DirectMessageStore::get_direct_message_message(&store, "dm-min", "msg-min")

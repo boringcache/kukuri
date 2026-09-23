@@ -205,6 +205,14 @@ ACK未確認のDMを短期通知queueの期限で捨てない。相互follow失�
 これは投稿のdocs書込み先を変更しない規則の例外である。ACKも送信者account routeへ返し、
 既存署名ACKのsender/recipient/message照合を保つ。再起動/途中中断は同じmessageで再開し、
 旧pairwise受信と新route受信が重なっても既存message IDとtombstoneへ収束する。
+送信側の既知peer候補はpeer別outboxページ（最大64行）で1回だけbindingを照合する。
+未解決なら保護rowを残し、照合済み宛先には同じ暗号frame hashを指す小さいmanifestをsealed offerで知らせる。
+初回の画面操作はこの宛先照合を待たず、既存のbackground再送がaccount routeへ進める。
+受信側は検証済みofferのprovider endpointへ署名ACKの参照を返し、送信側account routeでも既存の
+sender/recipient/conversation/message照合を通す。旧pairwise ACKも移行中は維持し、両routeの重複ACKは
+最初に記録した配達時刻を保持する。ACKのofferにはACKを返さず、未ACKのDM outboxは受信確認まで消さない。
+送信offerとACK offerの1回の待機は各2秒で打ち切り、失敗は保護outboxの次回再送へ委ねる。
+同一account runtimeが同時に発行するDM/ACK offerは最大4件とし、満杯時は待機列を作らず延期する。
 更新済み端末同士の未完了DMを保全するための移行であり、旧版との互換期間は設けない。
 
 private rotation/freeze/失効には投稿通知と別の制御capsuleを使う。

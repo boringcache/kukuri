@@ -1,4 +1,5 @@
 use super::super::*;
+use kukuri_transport::EndpointAddr;
 
 #[derive(Clone)]
 pub(crate) struct StaticTransport {
@@ -14,6 +15,11 @@ impl StaticTransport {
             hints: Arc::new(TokioMutex::new(HashMap::new())),
             local_ticket: "static-peer".into(),
         }
+    }
+
+    pub(crate) fn with_local_endpoint_id(mut self, endpoint_id: String) -> Self {
+        self.local_ticket = endpoint_id;
+        self
     }
 
     pub(crate) async fn hint_sender(&self, topic: &TopicId) -> broadcast::Sender<HintEnvelope> {
@@ -211,6 +217,13 @@ impl Transport for StaticTransport {
     async fn import_ticket(&self, _ticket: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn discovery(&self) -> Result<kukuri_transport::DiscoverySnapshot> {
+        Ok(kukuri_transport::DiscoverySnapshot {
+            local_endpoint_id: self.local_ticket.clone(),
+            ..Default::default()
+        })
+    }
 }
 
 #[async_trait]
@@ -281,6 +294,11 @@ pub(crate) struct TrackingHintTransport {
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
     pub(crate) unsubscribed_topics: Arc<TokioMutex<Vec<String>>>,
     pub(crate) published_count: Arc<AtomicUsize>,
+    pub(crate) resolved_destination: Arc<TokioMutex<Option<EndpointAddr>>>,
+    pub(crate) resolved_count: Arc<AtomicUsize>,
+    pub(crate) offers:
+        Arc<TokioMutex<Vec<(Pubkey, EndpointAddr, kukuri_core::SealedReceiveOfferV1)>>>,
+    pub(crate) fail_offer_publish: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TrackingHintTransport {
@@ -319,6 +337,46 @@ impl HintTransport for TrackingHintTransport {
             received_at: Utc::now().timestamp_millis(),
             source_peer: "tracking".into(),
         });
+        Ok(())
+    }
+
+    async fn resolve_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        self.resolved_count.fetch_add(1, Ordering::SeqCst);
+        Ok(self.resolved_destination.lock().await.clone())
+    }
+
+    async fn invalidate_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+        endpoint_id: &str,
+    ) -> Result<()> {
+        let mut resolved = self.resolved_destination.lock().await;
+        if resolved
+            .as_ref()
+            .is_some_and(|addr| addr.id.to_string() == endpoint_id)
+        {
+            *resolved = None;
+        }
+        Ok(())
+    }
+
+    async fn publish_receive_offer(
+        &self,
+        recipient: &Pubkey,
+        destination: EndpointAddr,
+        offer: kukuri_core::SealedReceiveOfferV1,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.fail_offer_publish.load(Ordering::SeqCst),
+            "simulated account offer failure"
+        );
+        self.offers
+            .lock()
+            .await
+            .push((recipient.clone(), destination, offer));
         Ok(())
     }
 }

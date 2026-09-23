@@ -229,7 +229,7 @@ impl AppService {
         let provider = EndpointAddr::new(verified.reference().provider_endpoint_id.parse()?);
         let payload = services
             .blob_service
-            .fetch_verified_receive_offer_payload(&verified, provider)
+            .fetch_verified_receive_offer_payload(&verified, provider.clone())
             .await?;
         if Utc::now().timestamp_millis() >= verified.expires_at_ms()
             || !receive_offer_dm_is_mutual(services, local.as_str(), sender).await?
@@ -243,7 +243,17 @@ impl AppService {
         let hint: GossipHint =
             serde_json::from_slice(&payload).context("invalid direct message receive manifest")?;
         let topic = derive_direct_message_topic(services.keys.as_ref(), verified.sender())?;
-        if !matches!(&hint, GossipHint::DirectMessageFrame { topic_id, .. } if topic_id == &topic) {
+        if !matches!(
+            &hint,
+            GossipHint::DirectMessageFrame { topic_id, .. }
+                | GossipHint::DirectMessageAck { topic_id, .. }
+                if topic_id == &topic
+        ) {
+            return Ok(false);
+        }
+        let ack_destination =
+            matches!(&hint, GossipHint::DirectMessageFrame { .. }).then_some(provider);
+        if !receive_offer_dm_is_mutual(services, local.as_str(), sender).await? {
             return Ok(false);
         }
         Self::handle_direct_message_hint(
@@ -252,6 +262,7 @@ impl AppService {
                 local_author_pubkey: local.as_str(),
                 peer_pubkey: sender,
                 topic: &topic,
+                ack_destination,
             },
             &hint,
         )

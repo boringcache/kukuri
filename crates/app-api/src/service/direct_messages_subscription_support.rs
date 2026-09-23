@@ -472,6 +472,7 @@ impl AppService {
                                 local_author_pubkey: local_author_pubkey.as_str(),
                                 peer_pubkey: peer_for_task.as_str(),
                                 topic: &topic_for_task,
+                                ack_destination: None,
                             },
                             &event.hint,
                         ).await {
