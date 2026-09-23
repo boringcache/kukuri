@@ -114,6 +114,8 @@ reloadable_service! {
         async fn subscribe_hints(topic: &TopicId) -> Result<HintStream>;
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
+        async fn resolve_receive_destination(recipient: &Pubkey) -> Result<Option<EndpointAddr>>;
+        async fn invalidate_receive_destination(recipient: &Pubkey, endpoint_id: &str) -> Result<()>;
         async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferSubscription>;
         async fn resubscribe_receive_offers_if_current(recipient: &Pubkey, expected: ReceiveOfferLease) -> Result<Option<ReceiveOfferSubscription>>;
         async fn subscribe_receive_offers_if_vacant(recipient: &Pubkey) -> Result<Option<ReceiveOfferSubscription>>;

@@ -374,6 +374,22 @@ impl HintTransport for FakeTransport {
         Ok(())
     }
 
+    async fn resolve_receive_destination(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        receive_route_for_account(recipient)?;
+        Ok(None)
+    }
+
+    async fn invalidate_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+        _endpoint_id: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn subscribe_receive_offers(
         &self,
         recipient: &Pubkey,

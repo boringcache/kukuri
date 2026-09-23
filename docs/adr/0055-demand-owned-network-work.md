@@ -176,6 +176,10 @@ bucketへの追加とTTL設定は[Valkey互換の`MULTI/EXEC` transaction](https
 CN不使用時は、既知の署名bindingからDHT解決するか、manual ticket/seedで到達したpeerとの
 binding交換および対象著者の制御stateの個別取得を使う。全author/全peerを探索しない。
 binding未取得/期限切れ/宛先不在は未解決として延期し、接続成功や配送成功を捏造しない。
+既知manual ticket/seedのbinding交換はaccount別cursorで候補を進め、1試行は最大4候補・同時2照合までとする。
+候補全体を複製・整列せず、照合済み宛先はaccount別に最大1,024件、署名の期限を超えず最長10秒保持する。
+未認証候補を配送先へ渡さない。配送失敗時は該当account/endpointのcacheを失効させ、次の試行で再照合する。
+この窓は既知peerからの発見に限り、著者制御state/CN経由の候補取得とoutbox再試行を代替しない。
 endpointを再生成した側は新bindingを制御state・接続先・利用中CNへ更新する。
 更新がまだ到達していない間の完全配送は保証しないが、peer再発見で未完了送信を再試行する。
 DHTへ通知本体を置かず、CNに通知一覧や必須の保存queueを作らない。
