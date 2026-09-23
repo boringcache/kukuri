@@ -437,7 +437,7 @@ export function DesktopShellMessagesSurface({
               <div className='topic-diagnostic topic-diagnostic-secondary'>
                 <span>
                   {t('shell:messages.pendingOutbox', {
-                    count: formatCount(conversationStatus?.pending_outbox_count ?? 0),
+                    count: `${formatCount(conversationStatus?.pending_outbox_count ?? 0)}${conversationStatus?.pending_outbox_has_more ? '+' : ''}`,
                   })}
                 </span>
               </div>

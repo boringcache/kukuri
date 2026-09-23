@@ -65,7 +65,7 @@ export type BookmarkedPostView = { bookmarked_at: number, post: PostView, };
 
 export type AuthorSocialView = { author_pubkey: string, name?: string | null, display_name?: string | null, about?: string | null, picture_asset?: ProfileAssetView | null, updated_at?: number | null, following: boolean, followed_by: boolean, mutual: boolean, friend_of_friend: boolean, friend_of_friend_via_pubkeys: Array<string>, provenance?: ContentProvenanceView | null, muted: boolean, blocking: boolean, blocked_by: boolean, };
 
-export type DirectMessageStatusView = { peer_pubkey: string, dm_id: string, mutual: boolean, send_enabled: boolean, peer_count: number, pending_outbox_count: number, };
+export type DirectMessageStatusView = { peer_pubkey: string, dm_id: string, mutual: boolean, send_enabled: boolean, peer_count: number, pending_outbox_count: number, pending_outbox_has_more: boolean, };
 
 export type DirectMessageTopicStatusView = { topic: string, joined: boolean, peer_count: number, connected_peers: Array<string>, status_detail: string, last_error?: string | null, };
 

@@ -468,7 +468,8 @@ export const dmConversationView = {
     "mutual": true,
     "send_enabled": true,
     "peer_count": 1,
-    "pending_outbox_count": 2
+    "pending_outbox_count": 2,
+    "pending_outbox_has_more": false
   }
 } satisfies DirectMessageConversationView;
 

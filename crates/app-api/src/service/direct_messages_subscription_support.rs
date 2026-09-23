@@ -37,21 +37,24 @@ impl AppService {
         } else {
             0
         };
-        let pending_outbox_count = self
+        let pending_outbox_page = self
             .services
             .projection_store
-            .list_direct_message_outbox()
-            .await?
-            .into_iter()
-            .filter(|row| row.peer_pubkey == peer_pubkey)
-            .count();
+            .list_direct_message_outbox_for_peer_page(
+                peer_pubkey,
+                None,
+                None,
+                kukuri_store::DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+            )
+            .await?;
         Ok(DirectMessageStatusView {
             peer_pubkey: peer_pubkey.to_string(),
             dm_id,
             mutual: send_enabled,
             send_enabled,
             peer_count,
-            pending_outbox_count,
+            pending_outbox_count: pending_outbox_page.items.len(),
+            pending_outbox_has_more: pending_outbox_page.next_cursor.is_some(),
         })
     }
 

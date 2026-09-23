@@ -411,6 +411,7 @@ fn dm_status() -> DirectMessageStatusView {
         send_enabled: true,
         peer_count: 1,
         pending_outbox_count: 2,
+        pending_outbox_has_more: false,
     }
 }
 

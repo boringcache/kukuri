@@ -147,6 +147,7 @@ function buildDmStatus(
     send_enabled: false,
     peer_count: 1,
     pending_outbox_count: 2,
+    pending_outbox_has_more: false,
     ...overrides,
   };
 }

@@ -115,6 +115,7 @@ function buildConversation(peerPubkey: string): DirectMessageConversationView {
       send_enabled: true,
       peer_count: 1,
       pending_outbox_count: 0,
+      pending_outbox_has_more: false,
     },
   };
 }
