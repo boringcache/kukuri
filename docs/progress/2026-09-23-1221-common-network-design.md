@@ -110,6 +110,20 @@ N66では下層N60/N61のaccount routeとprovider検証取得をアプリのrunt
 
 関連のFake契約では未mutual/他scopeのprovider取得0、valid DMの反映と通知event、取得中のmutual失効後の反映0、明示shutdownのroute解除と予期しないowner dropの処理stream中止、subscribe登録待ちとprovider取得中のshutdown取消を確認。drop時に旧appが同一accountの新runtime routeを誤解除しないよう、transport routeの解除は明示shutdown/transport寿命だけが所有する。実Irohでは別nodeの署名bindingを同一provider endpointで検証してmanifestだけを一時取得し、暗号DM frameを既存経路で復号・保存する二端末試験が、受信側に送信者ticketを事前importしない構成で成功。旧pairwise配送・通知は残している。
 
+N67では送信側の前提となる`resolve_receive_destination`をtransportへ追加する。configured/bootstrap/imported peerをaccount別cursorで最大4候補だけ選び、実QUIC接続で署名bindingを照合した宛先だけ返す。全peer履歴のclone/sortはしない。照合は同時2件までで満杯なら延期し、1候補2秒で打ち切る。検証済み宛先のcacheはaccount最大1,024件、署名期限以内かつ最長10秒とし、配送失敗時の個別失効APIを用意する。未解決は`None`とし、outboxを成功扱いにしない。既知peer以外の著者制御state/CN候補、送信側offer発行・ACK/旧pairwise移行は後続であり、この変更だけでNET-AC-2/6やD2を完了としない。
+
+N67の区分C preflight: ownerは呼出中のtransport、候補窓とcacheはその実体だけが保持する。stack rebuildは新実体へ付け替えるため古いcacheを移さず、取消されたfutureは下位`fetch_receive_endpoint_binding`のQUIC接続を閉じる。共有2 permitは待機列を持たず、候補選択と署名検証を終えるまで保持する。account scopeは照合後にもcache書込み前に失効世代と署名期限を確認する。
+
+| N67入口・trigger | shared helper / sink | guard / 状態遷移 | 局所test |
+| --- | --- | --- | --- |
+| senderが宛先を解決、Reloadableが転送 | account別cursor→`fetch_receive_endpoint_binding`→検証済み`EndpointAddr` | 未候補・満杯・別account・失効・取消は未解決、未認証addressは配送へ渡さない | `destination_requires_live_binding_for_the_exact_account_and_invalidates_cache`、`saturated_probe_budget_defers_without_queuing`、下層`receive_binding_cancel_closes_the_connection` |
+| seed/ticket追加後の再試行 | configured/bootstrap/imported BTreeMap→最大4候補の窓 | 1,000既知peerと継続挿入/削除でも全件clone/sortなし、古い候補へ進む | `destination_window_rotates_through_large_peer_history_in_four_candidate_steps`、`destination_cursor_reaches_old_peer_during_new_inserts_and_deletes` |
+| 配送失敗時のcache失効、stack再構築 | account/endpoint一致のcacheだけ削除、新transportの空cache | 旧in-flight結果は世代不一致で採用しない。別endpointの成功cacheを消さず、上限1,024account・期限排他 | `invalidation_rejects_stale_lookup_and_state_has_a_fixed_account_cap`、`cache_expires_and_invalidating_another_endpoint_preserves_current_binding` |
+
+N67初回固定head `278d44d3` の独立監査は2blockerでFAIL。cache lock待機中のshutdown後に古い宛先を返すこと、進行中のbinding照合をshutdownで止めず次候補へ接続し得ること、別endpointのcacheを保持したまま旧照合結果の上書きを許すことを確認した。shutdown/cache lockと旧probe X・新cache Yの2契約testは修正前にFAIL。cache返却後と各probe開始前のclosed確認、shutdown通知による照合futureの取消、全失効での世代更新と該当endpointだけのcache削除に修正し、9件の局所testで成功。実QUICの停止中照合が即時終了し接続を閉じる負例も追加した。新固定headの監査とCIまで解消判定しない。
+
+局所結果: `cargo test -p kukuri-transport receive_destination --lib` 9件成功、`cargo check -p kukuri-desktop-runtime -p kukuri-transport`、変更2crateの`cargo clippy --all-targets -- -D warnings`、format、`cargo xtask oversized-files`成功。全体testはPR CIで確認する。
+
 N66初回固定head `83d691cb` の独立監査は2blockerでFAIL。添付fetch中のmutual失効では旧実装がDM rowを拒否してもplaintext blobを1件保存した。失敗testを置き、各添付のfetch後・plaintext保存前にmutualを再確認して保存0とした。旧ownerのaccount名だけのroute解除は同一account新ownerを止め、旧実装のhandoff testがtimeoutでFAIL。transportのprocess一意leaseへunsubscribeを束縛し、旧leaseでは新streamを解除できないことを実IrohとFakeで確認した。shutdownをcancelしてもleaseをregistryへ残し、再度のshutdownで解除を完了するcontractも追加。新固定headの監査とCIまで解消判定しない。
 
 N66次固定headのdelta監査は、同account新ownerが旧streamを閉じたあと、旧ownerの3秒後の無条件再subscribeが新leaseを奪い返すblockerを発見。旧ownerを3.2秒存続させるtestは修正前に新route受信timeoutでFAIL。transport lock内で期待leaseが現世代と一致するときだけ再subscribeする契約へ変更し、旧leaseなら停止する。supersede通知は処理中の最大4futureにも届き、旧provider取得をcancelする。修正後のhandoff・実行中fetch取消・実Iroh conditional retryを局所testで確認し、新固定headの監査/CIまで解消判定しない。

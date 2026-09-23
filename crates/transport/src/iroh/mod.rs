@@ -123,6 +123,8 @@ pub struct IrohGossipTransport {
     configured_seed_peers: Arc<Mutex<BTreeMap<String, EndpointAddr>>>,
     bootstrap_seed_peers: Arc<Mutex<BTreeMap<String, EndpointAddr>>>,
     imported_peers: Arc<Mutex<BTreeMap<String, EndpointAddr>>>,
+    receive_destinations: Mutex<receive_destination::DestinationWindow>,
+    receive_destination_probes: Semaphore,
     subscribed_topics: Arc<Mutex<BTreeSet<String>>>,
     topic_states: Arc<Mutex<HashMap<String, HintTopicState>>>,
     receive_offer_topic: Mutex<Option<ReceiveOfferTopicState>>,
@@ -152,6 +154,7 @@ mod discovery;
 mod endpoint;
 mod offer;
 mod peer_state;
+mod receive_destination;
 mod relay;
 #[cfg(test)]
 mod tests;
@@ -232,6 +235,23 @@ impl HintTransport for IrohGossipTransport {
     }
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()> {
         self.hint_publish_hint_impl(topic, hint).await
+    }
+
+    async fn resolve_receive_destination(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        self.resolve_receive_destination_impl(recipient).await
+    }
+
+    async fn invalidate_receive_destination(
+        &self,
+        recipient: &Pubkey,
+        endpoint_id: &str,
+    ) -> Result<()> {
+        self.invalidate_receive_destination_impl(recipient, endpoint_id)
+            .await;
+        Ok(())
     }
 
     async fn subscribe_receive_offers(

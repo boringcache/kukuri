@@ -128,6 +128,23 @@ pub trait HintTransport: Send + Sync {
     async fn unsubscribe_hints(&self, topic: &TopicId) -> Result<()>;
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()>;
 
+    /// Resolve only an endpoint whose current binding proves `recipient`.
+    /// None means deferred; callers must keep durable outbox rows pending.
+    async fn resolve_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        anyhow::bail!("authenticated receive destination resolution is not supported")
+    }
+
+    async fn invalidate_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+        _endpoint_id: &str,
+    ) -> Result<()> {
+        anyhow::bail!("authenticated receive destination invalidation is not supported")
+    }
+
     /// A new lease supersedes the previous consumer, including for the same
     /// account. The underlying route may be reused, but the old stream ends.
     async fn subscribe_receive_offers(
