@@ -10,7 +10,7 @@
   Terraform でデプロイする（Issue #381）。
 - `deploy_indexer_stack=true` で index / moderation stack（`cn-indexer` + ArcadeDB +
   relation 定期解析 + moderation secrets）を同じ VM に追加する（Issue #615）。
-- 初期から deployment profile を切り替えられる（`low-cost` / `managed-db` / `ha`）。
+- 本手順の配備対象は実装済みの `low-cost`。`managed-db` / `ha` は後述の未完成の拡張点であり、配備作業で完成させる対象にしない。
 - third-party community node operator が低コストで始められる `low-cost` profile を標準入口にする。
 
 実装は `infra/terraform/`。この runbook は実行手順、設計の根拠は同 `README.md` と
@@ -26,6 +26,8 @@ live確認は `docs/runbooks/community-node-production-rollout.md` を先に参�
 > 注意: この runbook は法的助言ではない。日本国内で relay を運用する場合の電気通信事業の
 > 届出要否や記載内容は、最終的に operator 自身と総合通信局・専門家への確認が必要。region 既定の
 > `asia-northeast1`（東京）も法的保証ではなく、単なる既定値。
+
+実行前に対象project・VM・deployment profile・有効capability・image digestと、今回の配備または復旧の終了条件を固定する。任意のindex stackや別profileを一律に有効化・検証しない。
 
 ## アーキテクチャ
 
@@ -68,10 +70,10 @@ VM 外: cn-indexer ─outbound HTTPS─▶ Project Arachnid Shield
 |---|---|---|
 | auth/consent, admission mode, invite/allowlist/ban, report metadata, operator config | Postgres（control-plane data） | low-cost: pg_dump→GCS / managed-db,ha: Cloud SQL |
 | topic rendezvous, presence, short-lived connection hints | Valkey（TTL ephemeral） | 対象外 |
-| blob/media 本体 | local cache / iroh blobs / object storage（**Postgres に置かない**。恒久保存しない） | 対象外（rebuildable cache） |
+| blob/media 本体 | local cache / iroh blobs / object storage（**Postgres に置かない**。恒久保存しない） | 対象外。必要時の再取得は提供元と保持状態に依存 |
 | index 真実源（supported set / indexing request / channel secret）、moderation verdict / artifact / risk signal | Postgres（#615。既存 backup にそのまま含まれる） | low-cost: pg_dump→GCS |
 | index 投影 + relation graph | ArcadeDB（**rebuildable projection。canonical store ではない**） | 対象外（空からの再構築手順を後述） |
-| cn-indexer の iroh state（endpoint 同一性 / docs replica / blob store） | `indexer_data_disk_gb > 0` で専用 PD | 対象外（再同期で復元可。PD で VM 置換に耐える） |
+| cn-indexer の iroh state（endpoint 同一性 / docs replica / blob store） | `indexer_data_disk_gb > 0` で専用 PD | 対象外。PDでVM置換を越えて保持する。endpoint秘密鍵や欠損した全履歴をネットワークから復元できるとは扱わない |
 
 ## 人手で先に用意するもの
 
@@ -418,8 +420,9 @@ self-host VLM は次のどちらか一方の境界に固定し、runbook・netwo
 
 ### ArcadeDB を空から再構築する
 
-ArcadeDB は rebuildable projection（真実源は Postgres + docs replica）であり、canonical store
-ではない。data が失われた / 壊れた場合:
+ArcadeDBはprojectionであり、正本はPostgresと取得できるdocsにある。対象scope・objectと必要な表示・検索結果を先に固定し、全履歴が揃うことを復旧の成功条件にしない。
+
+以下のvolume初期化は、projection全体の破損等で再作成を明示的に選んだ場合だけの操作である。通常の欠損・検索不調に適用せず、削除対象volumeと正本の保持を確認する。
 
 ```bash
 cd /var/lib/kukuri/community-node
@@ -427,10 +430,10 @@ cd /var/lib/kukuri/community-node
 docker volume rm community-node_cn-arcadedb-data   # volume 名は docker volume ls で確認
 /var/lib/toolbox/kukuri/bin/docker-compose up -d cn-arcadedb
 /var/lib/toolbox/kukuri/bin/docker-compose up -d cn-indexer
-# cn-indexer が起動時に schema を作成し、全件見直し（poll interval、既定 300 秒）で再投影する。
-# relation graph は次回 relation analyze 実行で再構築される（手動なら:
-#   sudo systemctl start kukuri-relation-analyze.service ）
+# cn-indexerはschemaを作成する。復旧結果は事前に固定した対象で確認する。
 ```
+
+現行indexerには起動時・周期的な全件見直しが残る。これは設計原則上の未解消点であり、全件再同期を正当化したり、文書変更だけで有界な復旧を実装済みとしたりしない。対象を絞った復旧が現行入口でできない場合は未完了として記録し、完了範囲を再定義する。
 
 ### rollback（API / relay のみ構成へ戻す）
 
@@ -452,7 +455,7 @@ docker volume rm community-node_cn-arcadedb-data   # volume 名は docker volume
   database 全体 dump のため、#615 で増えた永続 table（moderation verdict / artifact /
   risk signal / index 真実源）と暗号化済み案件データ／legal hold も追加設定なしで含まれる。
 - Valkey と blob cache は backup 対象外。ArcadeDB も backup 対象外
-  （rebuildable projection。前節の再構築手順で復元する）。raw blob / media は恒久保存しない。
+  （再作成時も全件復元は保証しない）。raw blob / media は恒久保存しない。
 
 restore 例（VM 上）:
 

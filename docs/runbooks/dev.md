@@ -1,6 +1,6 @@
 # Development Runbook
 
-Issueの起票からCloseまでのstage gate、固定surface inventory、状態遷移、独立監査は [Issue lifecycle runbook](./issue-lifecycle.md) に従う。本書は各validation commandの実行方法を規定する。
+[AGENTS.md](../../AGENTS.md)の作業原則・設計原則に従い、実行前に今回の目的・対象・期待結果・判定方法を固定する。起票から終了までの手順は[Issue lifecycle runbook](./issue-lifecycle.md)、本書は選んだ操作と検証commandの実行方法を規定する。
 
 実行する検証の選定・重複path・重い検証の中断は [REFACTORING.md](../../REFACTORING.md) の「path別検証マトリクス」「検証の選定・中断」に従う。下の一覧は全変更で全commandを実行する指定ではない。
 
@@ -74,21 +74,14 @@ cargo xtask desktop-visual-test
 
 ### 検証を選ぶ入口
 
-日常の製品変更は `cargo xtask check` + `cargo xtask test` を起点とし、変更pathと影響に応じた必須項目は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選ぶ。文書の誤字など区分Aは同節の対象確認を使う。UIの証跡は [ADR 0014](../adr/0014-uiux-dev-flow.md)、視覚baselineの更新方法は次節を参照する。
+ローカルでは受入条件と変更影響に対応するtest・型検査等を[検証マトリクス](../../REFACTORING.md#path別検証マトリクス)から選び、全体確認はPR CIで行う。文書の誤字など区分Aは同節の対象確認を使う。UIの証跡は [ADR 0014](../adr/0014-uiux-dev-flow.md)、視覚baselineの更新方法は次節を参照する。
 
 ## ローカル先行検証
 
-接続・同期・取得のtimer/retryを変更する際は、#1221で進めている
-[共通ownerの設計案](../adr/0055-demand-owned-network-work.md#6-周期処理の登録規則)と
-[現行inventory](../architecture/network-work-inventory.md)を参照する。
-設計案はProposedであり、現行経路の移行済みを意味しない。
+接続・同期・取得を変更する際は、AGENTS.mdの設計原則に従い、総履歴の走査・完全取得・一括再同期を前提にしない。現在の経路を[現行inventory](../architecture/network-work-inventory.md)と照合し、関連する[共通ownerの設計案](../adr/0055-demand-owned-network-work.md)を参照する。既存の比例経路は未解消の事実として扱い、設計案を移行済みの証拠にしない。
 
-#1221の次のPRからは、[ADR 0055の実装前の境界](../adr/0055-demand-owned-network-work.md#実装前に固定する境界と負例)を
-変更した入口とsinkに適用する。PRの着手時に該当する所有/世代、権限/保存、cursorの公平性、
-公開schemaの伝播を選び、旧実装の失敗testまたは新経路の拒否/停止contractを先に置く。
-未該当の項目は理由を短く記し、全項目の機械的な再検査を目的にしない。
-#1221ではユーザー指示に従ってローカルtestを変更関連箇所に限り、全suiteはPR CIで確認する。
-独立監査は従来どおり固定headで行う。
+受入条件に含めた所有・停止、権限・保存、cursorの公平性、公開schemaのうち変更に必要な検証だけを選ぶ。全項目の機械的な再監査や、未依頼の失敗条件の追加を行わない。同種の不具合へ個別のguardやtaskを追加する前に、共通の責務へ統合・旧処理を削除した最終形を比較する。
+
 Store migrationを追加・変更したPRでは、up/downの対と`crates/store/src/tests/migrations.rs`の
 世代数、`migrations_roundtrip.rs`の`EXPECTED_VERSIONS`、
 `fixtures/schema/store_schema_full.txt`を同じ差分で確認する。意図したschema変更ならgoldenを
@@ -100,11 +93,11 @@ irohのmapped address回収を変更・更新するときは
 Cargoの共有source cacheを変更せず、`target/upstream-contracts`内の一時checkoutへtestだけを追加する。
 `--revision <40桁SHA>`で変更前を再現できる。PR/nightlyのRust jobでも同じcontractを実行する。
 
-CI は課金対象の計算資源で動く。実装しながら CI へ push して確かめる進め方は費用が大きいので行わない。実装中の確認はローカルで済ませ、CI は PR を作った後の最終確認だけに使う。
+ローカルの関連検証で実装を確認し、全体の確認が必要になった段階でPRを作成してCIを使う。同じ未変更範囲の全suiteをローカルとCIで反復しない。CI固有の失敗は原因と必要な再実行範囲を確定してから修正する。
 
-- 変更 path に対応する validation は [検証マトリクス](../../REFACTORING.md#path別検証マトリクス) で選び、ローカルで実行してから commit する。
+- 関連validationとその結果、CI・別環境で補う必要な範囲を記録する。未実行の検証は成功と区別する。
 - workflow を変えるときは `actionlint <対象 file>` を実行する。runner label を増やす場合は `.github/actionlint.yaml` にも追加する。
-- `docker/cn/**` や image の build 手順を変えるときは、ローカルの Docker で `docker buildx bake --file docker/cn/docker-bake.hcl --allow "fs.write=<出力先>"` を実行し、smoke まで通してから PR にする。
+- `docker/cn/**` やimageのbuild手順を変えるときは、ローカルで変更した設定・script・対象imageの関連検証を行い、全imageのbuild/smokeはPR CIで確認する。全体のlocal再現が必要な場合のcommandは `docker buildx bake --file docker/cn/docker-bake.hcl --allow "fs.write=<出力先>"`。
   - `OUT_DIR=<出力先>` を設定し、`--set '*.platform=linux/amd64'` を付けて比較対象を固定する。出力先は build context の外に置く。
   - bake 後に `python scripts/ci/cn_image_check.py <出力先>`（Linux は `python3`）を実行する。Python 3.11 以上、Docker、PATH 上の Bash が必要。Windows は Git Bash の `bin` を PATH の先頭へ加える。
   - 4 本番 OCI の全 layer・圧縮サイズ・entrypoint を検査し、同じ config/layer を Docker に読み込んで起動確認する。PostgreSQL/Valkey は専用 internal network と一時 container を使い、終了時にその資源だけを除去する。既存 indexer の正負 smoke は `scripts/ci/cn_indexer_smoke.sh` を共用する。結果は出力先の `image-check-results.json` に残る。
@@ -112,7 +105,7 @@ CI は課金対象の計算資源で動く。実装しながら CI へ push し�
 - ローカルで再現できない項目（実 runner の版差、Cache Volume の当たり外れ、registry への push）は、PR の run か merge 後の run で確認する。その項目を PR 本文の「検証」に明記する。
 - 反復して失敗率を測るときは `Kukuri Flake Probe` を使い、通常の CI を繰り返し起動しない。
 
-PR 作成後は `gh pr checks <番号>` で全 check の完了を待ち、pending が 0 件になってから merge する（`kukuri-fast.yml` 以外にも `xtask/**` や `.cargo/**` の変更で起動する workflow がある）。
+PR作成後は `gh pr checks <番号>` で実際に発生したcheckの成功を確認してからmergeする。文書のみ等でパス条件に該当せずcheckが0件の場合は、その事実を確認して完了できる。CIを発火させるためだけの変更や手動の全suite実行は不要。
 
 ## リファクタリング監査の発火要否（#873）
 
@@ -434,6 +427,9 @@ $env:KUKURI_INSTANCE="desktop-a"
 ```
 
 ## Linux / Windows 共通の回帰用手動確認
+
+以下の手動確認は、合意した利用条件と自動検証で不足する点から選ぶ参照表である。対象OS・操作・期待結果・確認を打ち切る時点を先に固定する。Social graph、Private channel、DHT、Windowsの各節も同じ扱いとし、未依頼のlaneや異常系を追加しない。
+
 1. 各端末で `KUKURI_BIND_ADDR=0.0.0.0:0` と `KUKURI_ADVERTISE_HOST` を設定する。
 2. 同一マシンで複数起動する場合は `KUKURI_INSTANCE` も別値にする。
 3. `npx pnpm@10.16.1 tauri:dev` を起動する。
@@ -477,7 +473,7 @@ cd apps/desktop && npx pnpm@10.16.1 test
 
 ## Private channel manual verification
 
-最小 lane は static-peer ticket import。manual verification は `invite_only`, `friend_only`, `friend_plus` の audience ごとに流す。
+最小laneはstatic-peer ticket import。`invite_only`、`friend_only`、`friend_plus`のうち、今回の受入条件に含めたaudienceだけを確認する。
 
 事前に流す自動テスト:
 
@@ -575,7 +571,7 @@ cd apps/desktop && npx pnpm@10.16.1 test
 
 ### 一般的なWindows動作確認
 
-1. native Windows host で `cargo xtask doctor`、`cargo xtask check`、`cargo xtask test` を通す。
+1. native Windows hostで必要な環境を確認し、選択した操作に関係する検証を実行する。全体確認のCI結果は再利用する。
 2. `cd apps/desktop && npx pnpm@10.16.1 tauri:dev` を起動し、`post -> restart -> persist` と author pubkey 不変を確認する。
 3. `KUKURI_DISABLE_KEYRING` を外した状態でも author pubkey が維持されることを確認する。
 4. `KUKURI_INSTANCE` を分けた 2 instance で static-peer ticket import、`reply/thread`、live/game の伝播を確認する。
@@ -606,7 +602,7 @@ cd apps/desktop && npx pnpm@10.16.1 test
 - Windows 実機で `cargo xtask desktop-package` による NSIS installer build、install、packaged app 起動が成功
 - Linux-first MVP の Phase4 desktop 縦スライスは完了
 
-## Phase5 Cutover Check
+## Phase5 Cutover Check（完了時の記録）
 1. `cargo xtask doctor` を通す。
 2. `cargo xtask check` を通す。
 3. `cargo xtask test` を通す。
@@ -616,17 +612,17 @@ cd apps/desktop && npx pnpm@10.16.1 test
 7. `missing_gossip_but_docs_sync_recovers_post` と `gossip_loss_does_not_lose_durable_post` が green であることを確認する。
 8. `compat_event_gossip` が current code から除去されていることを確認する。
 
-現在の HEAD では上記 1-8 を local で確認済みで、Phase5 cutover は完了。
+上記1-8は当時のPhase5完了時の確認記録であり、現在のHEADの検証結果や各変更への再実行指示ではない。現在の確認は固定した受入条件と変更影響から選ぶ。
 
 補足:
-- desktop shell は約 2 秒ごとに timeline / sync status / local ticket を再取得する。
+- 当時のdesktop shellは約2秒ごとにtimeline / sync status / local ticketを再取得していた。周期的な全件読取りを現在の設計目標や必須挙動として固定しない。
 - `Refresh` は強制再取得用で、通常の確認では押さなくても反映される想定。
 
 ## 現在の注意点
 - `kukuri-transport` の `transport_static_peer_can_connect_endpoint` は required。
 - `kukuri-transport` の `transport_two_process_roundtrip_static_peer` は required に戻した。
 - deterministic な required lane は `FakeTransport` と `kukuri-harness` が担う。
-- Tauri wrapper の単体 compile は `cargo xtask check` に含めて確認する。
+- Tauri wrapperのcompileは関連する `cargo xtask tauri-check` またはCIで確認する。
 - `cargo xtask desktop-package` はWindows hostでcurrent-user NSIS installer、Linux x86_64 hostで署名付きAppImageとDebを生成する。Linuxの前提と検査は [AppImage手順](linux-appimage-smoke.md)／[Deb手順](linux-deb.md) を参照する。
 
 補足:

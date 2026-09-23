@@ -8,6 +8,8 @@ Store packageの更新はMicrosoft Store／Windowsへ委譲する。kukuriはSto
 
 Microsoftは[`StoreContext`によるpackage更新](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/package-updates-from-store)も任意APIとして提供するが、#1190では採用しない。既定のStore更新経路をもう一つのapp内state machineで包まず、更新の有無・download・install・再起動はStore／Windowsの表示と設定を正とする。
 
+実行前に、今回がbuild、loose smoke、MSIX動作確認、Store提出のどこまでかを定め、対象version・成果物・操作と成功判定を固定する。選んだ段階まで確認して終了し、無関係なOS・device条件を追加しない。
+
 ## 固定identityとtool
 
 | 項目 | 値 |
@@ -106,7 +108,7 @@ Tauriの論理app data pathは`%APPDATA%\app.kukuri.desktop`。ただし既存ro
 提出候補はclean worktreeから作ったunsigned MSIXに固定し、source SHA、Store version、SHA-256を記録する。
 
 1. unsigned candidateをPartner CenterのStore ID `9NQ18HML4GS3`へuploadする。
-2. Partner Center validationのerror／warningを保存し、失敗をoverrideしない。再buildは別candidateとして全検査をやり直す。
+2. Partner Center validationのerror／warningを保存し、失敗をoverrideしない。再buildは別candidateとしてsource・hash・署名・payloadに結び付く検査を行う。コードと実行条件が不変の検証証拠は再利用し、未変更の全手動matrixを繰り返さない。
 3. certification提出とavailability／一般公開を分離し、承認された公開範囲・日時だけを適用する。
 4. certification後にStoreから取得したMicrosoft署名済みpackageについて、signature、identity／version、clean install、同一identity update、起動、deep link、OS notification、app data保持、Store update認識を確認する。
 
@@ -122,4 +124,4 @@ cd apps/desktop
 npx pnpm@10.16.1 test -- src/lib/distribution.test.ts src/components/settings/ReleasePanel.update.test.tsx src/shell/DesktopShellPage.updateSchedule.test.tsx
 ```
 
-加えて`cargo xtask check`、`cargo xtask test`、`cargo xtask e2e-smoke`、既存release contractsを実行する。Store差分を通常`desktop-package`へ混ぜず、NSIS／GitHub updater、Linux AppImage／Deb、CLIの既存成果物を維持する。
+上記は検証commandの参照一覧。ローカルは受入条件と変更箇所に関連するtestを選び、全体確認はPR CIで行う。Store固有の必要な実機検証は対象操作を固定して補う。Store差分を通常`desktop-package`へ混ぜず、NSIS／GitHub updater、Linux AppImage／Deb、CLIの既存成果物を維持する。
