@@ -11,8 +11,9 @@ mod tests;
 pub use memory::MemoryStore;
 pub use models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
-    BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
+    BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+    DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
+    DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
     DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
     LiveSessionProjectionRow, MutedAuthorRow, NotificationKind, NotificationRow,
     ObjectProjectionRow, Page, PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,

@@ -431,20 +431,21 @@ impl AppService {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(
                 DIRECT_MESSAGE_RETRY_INTERVAL_MS,
             ));
-            let _ = AppService::flush_direct_message_outbox_for_peer(
-                &services,
-                local_author_pubkey.as_str(),
-                peer_for_task.as_str(),
-            )
-            .await;
+            let mut outbox_cursor = None;
+            let mut outbox_cycle_end = None;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let _ = AppService::flush_direct_message_outbox_for_peer(
+                        if let Ok((_, next_cursor, cycle_end)) = AppService::flush_direct_message_outbox_page_for_peer(
                             &services,
                             local_author_pubkey.as_str(),
                             peer_for_task.as_str(),
-                        ).await;
+                            outbox_cursor.as_ref(),
+                            outbox_cycle_end.as_ref(),
+                        ).await {
+                            outbox_cursor = next_cursor;
+                            outbox_cycle_end = cycle_end;
+                        }
                     }
                     Some(event) = hint_stream.next() => {
                         if !matches!(

@@ -280,6 +280,7 @@ pub(crate) struct TrackingHintTransport {
     hints: Arc<TokioMutex<HashMap<String, broadcast::Sender<HintEnvelope>>>>,
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
     pub(crate) unsubscribed_topics: Arc<TokioMutex<Vec<String>>>,
+    pub(crate) published_count: Arc<AtomicUsize>,
 }
 
 impl TrackingHintTransport {
@@ -311,6 +312,7 @@ impl HintTransport for TrackingHintTransport {
     }
 
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()> {
+        self.published_count.fetch_add(1, Ordering::SeqCst);
         let sender = self.hint_sender(topic).await;
         let _ = sender.send(HintEnvelope {
             hint,

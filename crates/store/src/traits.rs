@@ -10,10 +10,11 @@ use kukuri_core::{
 use crate::models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
     BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
-    DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
-    LiveSessionProjectionRow, MutedAuthorRow, NotificationRow, ObjectProjectionRow, Page,
-    PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,
+    DirectMessageMessageRow, DirectMessageOutboxCursor, DirectMessageOutboxPage,
+    DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
+    DomeHostingProjectionRow, GameRoomProjectionRow, LiveSessionProjectionRow, MutedAuthorRow,
+    NotificationRow, ObjectProjectionRow, Page, PostWithdrawalRow, ReactionProjectionRow,
+    TimelineCursor,
 };
 
 pub(crate) const CONTENT_OBSERVATION_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1000;
@@ -443,6 +444,13 @@ pub trait DirectMessageStore: Send + Sync {
         message_id: &str,
     ) -> Result<Option<DirectMessageOutboxRow>>;
     async fn list_direct_message_outbox(&self) -> Result<Vec<DirectMessageOutboxRow>>;
+    async fn list_direct_message_outbox_for_peer_page(
+        &self,
+        peer_pubkey: &str,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage>;
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,

@@ -12,8 +12,9 @@ use tokio::sync::RwLock;
 
 use crate::models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
-    BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
+    BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+    DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
+    DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
     DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
     LiveSessionProjectionRow, MutedAuthorRow, NotificationRow, ObjectProjectionRow, Page,
     PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,
@@ -35,7 +36,13 @@ type LivePresenceKey = (String, String, String, String);
 type LivePresenceValue = (i64, i64);
 type MemoryReactionProjectionRows = HashMap<(String, String, String), ReactionProjectionRow>;
 type MemoryDirectMessageRows = HashMap<(String, String), DirectMessageMessageRow>;
-type MemoryDirectMessageOutboxRows = HashMap<(String, String), DirectMessageOutboxRow>;
+type DirectMessageOutboxPeerKey = (String, i64, String, String);
+#[derive(Default)]
+struct MemoryDirectMessageOutboxRows {
+    rows: HashMap<(String, String), DirectMessageOutboxRow>,
+    by_peer: BTreeSet<DirectMessageOutboxPeerKey>,
+    by_dm: HashMap<String, BTreeSet<String>>,
+}
 type MemoryDirectMessageTombstones = HashMap<(String, String), DirectMessageTombstoneRow>;
 #[derive(Default)]
 struct MemoryNotificationRows {

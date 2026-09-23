@@ -100,6 +100,8 @@ N63初回固定headの監査では、既存stateのtimeout判定がlock外で待
 
 同修正で`transport/src/iroh/topics.rs`が1,061行となり、oversized-file検査が新規超過を検出した。既存のtest module 375行を機械的に`topics_tests.rs`へ移し、製品コードとtestの責務を分離した。baselineは増やさず、移動後の同module 13件と変更crateの静的検査で確認する。
 
+N11のDM outbox再送は毎tickで全rowを読み、相手pubkeyをメモリ側でfilterしていた。N64ではpeer別64行の索引ページとcursorへ変更し、新規送信は保存した1rowを直接publishする。1000件の他peer履歴/130件の対象履歴でも1tickは最大64行、3tickで130行を巡回する。固定head監査では継続挿入時に末尾が動き続け、古い未ACK rowが再試行されないblockerを検出。修正前に1tick64件を追加するtestが第三ページ64件対期待2件でFAIL。1巡の末尾keyを開始時に固定し、64件ずつ消費して元の終点に達したら先頭へ戻るよう修正した。SQLite query planの索引利用、Memoryとの同順、同時刻・同message IDの異なる会話、削除/会話clear後の索引、既存DM delivery/restartを関連testで確認。起動/DM statusの全件outbox読みと旧pairwise routeは残る。
+
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。

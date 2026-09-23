@@ -321,6 +321,12 @@ index idx_dm_outbox_created_at table=dm_outbox unique=0 origin=c partial=0
   key seqno=0 cid=4 name=Some("created_at")
   key seqno=1 cid=1 name=Some("message_id")
   sql=Some("CREATE INDEX idx_dm_outbox_created_at ON dm_outbox(created_at ASC, message_id ASC)")
+index idx_dm_outbox_peer_cursor table=dm_outbox unique=0 origin=c partial=0
+  key seqno=0 cid=2 name=Some("peer_pubkey")
+  key seqno=1 cid=4 name=Some("created_at")
+  key seqno=2 cid=1 name=Some("message_id")
+  key seqno=3 cid=0 name=Some("dm_id")
+  sql=Some("CREATE INDEX idx_dm_outbox_peer_cursor ON dm_outbox(peer_pubkey, created_at ASC, message_id ASC, dm_id ASC)")
 index idx_dm_tombstones_dm_id table=dm_message_tombstones unique=0 origin=c partial=0
   key seqno=0 cid=0 name=Some("dm_id")
   key seqno=1 cid=2 name=Some("deleted_at")

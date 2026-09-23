@@ -1,6 +1,129 @@
 use super::super::*;
 
 #[tokio::test]
+async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::DirectMessageOutboxRow;
+
+    let store = Arc::new(MemoryStore::default());
+    let local_keys = generate_keys();
+    let local = local_keys.public_key_hex();
+    let peer = generate_keys().public_key_hex();
+    let unrelated = generate_keys().public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local.clone(),
+            author_pubkey: peer.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    for index in 0..1_000 {
+        DirectMessageStore::put_direct_message_outbox(
+            store.as_ref(),
+            DirectMessageOutboxRow {
+                dm_id: "dm-unrelated".into(),
+                message_id: format!("unrelated-{index:04}"),
+                peer_pubkey: unrelated.clone(),
+                frame_blob_hash: BlobHash::new("unrelated-hash"),
+                created_at: 42,
+                last_attempt_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for index in 0..130 {
+        DirectMessageStore::put_direct_message_outbox(
+            store.as_ref(),
+            DirectMessageOutboxRow {
+                dm_id: "dm-target".into(),
+                message_id: format!("target-{index:04}"),
+                peer_pubkey: peer.clone(),
+                frame_blob_hash: BlobHash::new("target-hash"),
+                created_at: 42,
+                last_attempt_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let hint_transport = Arc::new(TrackingHintTransport::default());
+    let topic = derive_direct_message_topic(&local_keys, &Pubkey::from(peer.as_str())).unwrap();
+    let projection_store = store.clone();
+    let services = ServiceHandles::new(
+        store.clone(),
+        store,
+        Arc::new(StaticTransport::new(PeerSnapshot::default())),
+        hint_transport.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        local_keys,
+    );
+    let mut cursor = None;
+    let mut cycle_end = None;
+    for (page_index, expected) in [64, 64, 2].into_iter().enumerate() {
+        let (published, next, end) = AppService::flush_direct_message_outbox_page_for_peer(
+            &services,
+            local.as_str(),
+            peer.as_str(),
+            cursor.as_ref(),
+            cycle_end.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(published, expected);
+        assert_eq!(
+            hint_transport.published_count.load(Ordering::SeqCst),
+            [64, 128, 130][page_index]
+        );
+        cursor = next;
+        cycle_end = end;
+        if page_index < 2 {
+            for index in 0..64 {
+                DirectMessageStore::put_direct_message_outbox(
+                    projection_store.as_ref(),
+                    DirectMessageOutboxRow {
+                        dm_id: "dm-target".into(),
+                        message_id: format!("new-{page_index}-{index:04}"),
+                        peer_pubkey: peer.clone(),
+                        frame_blob_hash: BlobHash::new("target-hash"),
+                        created_at: 43 + page_index as i64,
+                        last_attempt_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+    }
+    assert!(cursor.is_none());
+    let mut fresh_hints = hint_transport.subscribe_hints(&topic).await.unwrap();
+    let app = AppService::from_handles(services);
+    let fresh = app
+        .send_direct_message_internal(peer.as_str(), Some("fresh"), None, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(hint_transport.published_count.load(Ordering::SeqCst), 131);
+    let received = timeout(Duration::from_secs(1), fresh_hints.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        received.hint,
+        GossipHint::DirectMessageFrame { message_id, .. } if message_id == fresh
+    ));
+}
+
+#[tokio::test]
 async fn dm_first_message_appears_in_recipient_conversation_list_without_opening_dm() {
     let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
     let hint_transport = Arc::new(TrackingHintTransport::default());
