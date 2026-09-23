@@ -17,7 +17,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N01 `PeerAddrBook::{merged_peers,ranked_peers,set_seed_peers,record_learned_peer}`、`transport/src/peers.rs` | ticket/learn/seed/取得。各serviceのpeer全体 | 各service寿命。docs側はreapplyへ進む | merge/clone/sortが全peer、mapに件数上限なし。P3共通owner | scope別候補、NW-5/6 |
 | N02 `RemoteFetchRetryState::{begin,finish}`、`iroh-node/src/remote_fetch.rs` の取得入口 | local miss、retry。全候補。30秒は実行時、接続5秒/転送15秒 | 通常walkは待機者cancel後も継続。in-flight task→permit待機→接続 | 実行8の外に無制限の待機とcooldown走査。P3受付 | NW-2/3/4、LocalOnly |
 | N03 `TopicWarmupCoordinator::warmup_peers_once/warmup_peer`、`transport/src/iroh/topics.rs` | topic join/peer追加。direct 250ms〜5秒、relay 1〜10秒 | deadline/neighbor成立。移動する4候補窓だけを走査し、同時2future・共有2dial枠を超える試行は待機せず延期 | peerごとのspawn/permit待機を撤去。topicごとのretry taskと初回bootstrap全件materializeはN04残件 | NW-2/5/6 |
-| N04 `ensure_hint_topic/extend_active_topic_peers/remove_topic_state`、同上 | hint subscribe/publish、peer変化。全topicへ追加 | receiverはabort、warmupの所有を別途解消する必要。bootstrap集合変化で再join | 全topic×peer、再購読。P3差分 | NW-5/7 |
+| N04 `ensure_hint_topic/extend_active_topic_peers/remove_topic_state`、同上 | hint subscribe/publish、peer変化。全topicへ追加 | 初回warmupはreceiverのDrop guard、更新warmupはtopic stateの単一handleが所有。topic解除/置換/shutdownで先に全taskをabortし、終了を待つ。世代closed/通知と登録前lockで旧task復活を防ぐ | 全topic×peerの初回bootstrap合成、再購読、topic数に比例するreceiver/retry taskはP3残件 | NW-5/7 |
 | N05 docs `reapply_sync_peers` とopen/start/subscribe、`docs-sync/src/iroh_sync.rs` | seed/学習/restore。cached replica集合 | local-onlyはsync昇格しない。registry guard内で再適用 | replica×peer、同期requested全体。P3差分/P4bucket | NW-3/5、LIFE契約 |
 | N06 `close_replica_owned/close_replica_under_guard`、`iroh_sync_lifecycle.rs`、`iroh_local_source.rs` | close/revoke/既存source読取り。最大32所有task | caller cancel後も所有。leave失敗隔離、停止task完了 | P1で有界な停止基盤。再監査し直さずP3接続 | NW-7、P1監査/CI |
 | N07 `ensure_topic_subscription/spawn_topic_subscription/maybe_restart_*`、`service/timeline_subscription_support.rs` | timeline操作、empty/recovery、欠損本文 | subscription registryのtask終了/明示再起動。docs/blob/withdrawal取得を起動 | topic登録、期限map、背景spawnの累積。P3 | NW-1/3/4/5 |
@@ -268,3 +268,11 @@ N60のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip経路�
 | N62 | topic join/retry → `TopicWarmupCoordinator::warmup_peers_once` → gossip ALPN dial | peer履歴100/1,000でも4候補だけを巡回してclone。`for_each_concurrent(2)`はtaskをspawnせず、共有dial slot2件が満杯ならin-flight台帳を増やさず即時延期。既存direct優先とrelay fallbackはwarmup先のaddress構築を維持 | `warmup_samples_a_moving_four_peer_window_from_large_history`、`warmup_does_not_queue_peer_state_when_shared_dial_slots_are_full`、`transport_import_ticket_updates_existing_topic_subscription`、`transport_seed_update_updates_existing_topic_subscription` |
 
 N62はper-peer warmupの増幅だけを除く。`ensure_hint_topic`の初回bootstrap合成とtopic全体のretry task、`extend_active_topic_peers`の全topic更新、SDK内部のgossip viewはN04/U07のまま残る。D2の現在の受信対象を減らすために購読を切り捨てない。
+
+## Gossip topic warmupのtask所有（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N63 | 初回join/peer追加 → receiverまたはtopic stateのwarmup task → gossip dial | 初回warmupはreceiver取消時にDropでabort。更新は同一topic世代で最大1taskを登録し、旧taskをabort/awaitしてから置換。解除/shutdownではclosed通知と全task abortを先に発行し、終了を待つ。join待ちの旧世代は通知で取消し、shutdown後のsubscribe登録を拒否 | `unsubscribing_during_initial_join_stops_its_warmup_task`、`unsubscribing_stops_a_registered_peer_update_warmup`、`hint_subscribe_waiting_for_registration_cannot_revive_after_shutdown`、`cancelled_hint_shutdown_aborts_all_topic_tasks_before_waiting`、既存ticket/seed更新・timed-out再購読 |
+
+N63はwarmup taskの停止所有を対象とし、topic全体やpeer全体の走査量を削減したと主張しない。`ensure_hint_topic`のbootstrap全件materializeと `extend_active_topic_peers` の全topic更新は残る。D2の現在の受信対象を維持するため、active topic数を暗黙に切り捨てない。

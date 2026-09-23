@@ -129,6 +129,44 @@ struct TopicWarmupInFlightGuard {
     in_flight_peers: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
+struct AbortWarmupOnDrop(JoinHandle<()>);
+
+impl Drop for AbortWarmupOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn topic_closed(closed: &AtomicBool, notify: &Notify) {
+    loop {
+        let stopped = notify.notified();
+        tokio::pin!(stopped);
+        stopped.as_mut().enable();
+        if closed.load(Ordering::Acquire) {
+            return;
+        }
+        stopped.await;
+    }
+}
+
+#[cfg(test)]
+struct CountedWarmupTask(Arc<AtomicUsize>);
+
+#[cfg(test)]
+impl CountedWarmupTask {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CountedWarmupTask {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Drop for TopicWarmupInFlightGuard {
     fn drop(&mut self) {
         if let Ok(mut in_flight_peers) = self.in_flight_peers.write() {
@@ -139,11 +177,23 @@ impl Drop for TopicWarmupInFlightGuard {
 
 impl IrohGossipTransport {
     async fn remove_topic_state(&self, topic: &str) {
-        if let Some(state) = self.topic_states.lock().await.remove(topic) {
+        let mut topics = self.topic_states.lock().await;
+        if let Some(mut state) = topics.remove(topic) {
+            state.closed.store(true, Ordering::Release);
+            state.closed_notify.notify_waiters();
             state._receiver_task.abort();
-            drop(state.sender);
+            let update = state.update_warmup_task.take();
+            if let Some(update) = &update {
+                update.abort();
+            }
+            self.subscribed_topics.lock().await.remove(topic);
+            let _ = state._receiver_task.await;
+            if let Some(update) = update {
+                let _ = update.await;
+            }
+        } else {
+            self.subscribed_topics.lock().await.remove(topic);
         }
-        self.subscribed_topics.lock().await.remove(topic);
     }
 
     pub(crate) async fn extend_active_topic_peers(
@@ -151,12 +201,15 @@ impl IrohGossipTransport {
         endpoint_addrs: Vec<EndpointAddr>,
         reason: &str,
     ) {
-        if endpoint_addrs.is_empty() {
+        if endpoint_addrs.is_empty() || self.hint_closed.load(Ordering::Acquire) {
             return;
         }
         let mut updates = Vec::new();
         {
             let mut topic_states = self.topic_states.lock().await;
+            if self.hint_closed.load(Ordering::Acquire) {
+                return;
+            }
             for (topic, state) in topic_states.iter_mut() {
                 let mut join_peer_ids = Vec::new();
                 let mut added_peer_ids = Vec::new();
@@ -174,6 +227,8 @@ impl IrohGossipTransport {
                         topic.clone(),
                         state.sender.clone(),
                         Arc::clone(&state.neighbors),
+                        Arc::clone(&state.closed),
+                        Arc::clone(&state.closed_notify),
                         added_peer_ids,
                         join_peer_ids,
                         join_endpoint_addrs,
@@ -182,8 +237,16 @@ impl IrohGossipTransport {
             }
         }
 
-        for (topic, sender, neighbors, added_peer_ids, join_peer_ids, join_endpoint_addrs) in
-            updates
+        for (
+            topic,
+            sender,
+            neighbors,
+            closed,
+            closed_notify,
+            added_peer_ids,
+            join_peer_ids,
+            join_endpoint_addrs,
+        ) in updates
         {
             info!(
                 topic = %topic,
@@ -191,7 +254,13 @@ impl IrohGossipTransport {
                 added_peer_ids = ?added_peer_ids,
                 "updating active gossip topic peers"
             );
-            if let Err(error) = sender.lock().await.join_peers(join_peer_ids).await {
+            let join = async { sender.lock().await.join_peers(join_peer_ids).await };
+            let result = tokio::select! {
+                biased;
+                _ = topic_closed(&closed, &closed_notify) => continue,
+                result = join => result,
+            };
+            if let Err(error) = result {
                 warn!(
                     topic = %topic,
                     reason,
@@ -204,7 +273,18 @@ impl IrohGossipTransport {
             let endpoint = self.endpoint.clone();
             let gossip = self.gossip.clone();
             let warmups = Arc::clone(&self.topic_warmups);
-            tokio::spawn(async move {
+            let mut topics = self.topic_states.lock().await;
+            let Some(state) = topics.get_mut(&topic) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&state.closed, &closed) || closed.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some(previous) = state.update_warmup_task.take() {
+                previous.abort();
+                let _ = previous.await;
+            }
+            let task = tokio::spawn(async move {
                 let join_deadline = tokio::time::Instant::now() + initial_topic_join_timeout();
                 let relay_backed = peers_use_relay(&join_endpoint_addrs);
                 let mut attempt = 0usize;
@@ -229,10 +309,15 @@ impl IrohGossipTransport {
                     sleep(retry_delay).await;
                 }
             });
+            state.update_warmup_task = Some(task);
         }
     }
 
     async fn ensure_hint_topic(&self, topic: &TopicId) -> Result<broadcast::Sender<HintEnvelope>> {
+        anyhow::ensure!(
+            !self.hint_closed.load(Ordering::Acquire),
+            "hint transport is closed"
+        );
         let bootstrap_peers = self.bootstrap_peers().await;
         let bootstrap_peer_ids = bootstrap_peers
             .iter()
@@ -251,7 +336,7 @@ impl IrohGossipTransport {
             })
         };
 
-        if let Some((broadcaster, existing_bootstrap_peer_ids, neighbors, last_error)) = existing {
+        if let Some((_broadcaster, existing_bootstrap_peer_ids, neighbors, last_error)) = existing {
             let has_neighbors = !neighbors.read().await.is_empty();
             let timed_out_join = last_error
                 .lock()
@@ -261,8 +346,16 @@ impl IrohGossipTransport {
             if existing_bootstrap_peer_ids == bootstrap_peer_ids
                 && (!timed_out_join || has_neighbors)
             {
-                self.subscribed_topics.lock().await.insert(topic.0.clone());
-                return Ok(broadcaster);
+                let topics = self.topic_states.lock().await;
+                let mut subscribed = self.subscribed_topics.lock().await;
+                anyhow::ensure!(
+                    !self.hint_closed.load(Ordering::Acquire),
+                    "hint transport is closed"
+                );
+                if let Some(current) = topics.get(topic.as_str()) {
+                    subscribed.insert(topic.0.clone());
+                    return Ok(current.broadcaster.clone());
+                }
             }
             self.remove_topic_state(topic.as_str()).await;
         }
@@ -304,6 +397,8 @@ impl IrohGossipTransport {
         let last_error_task = Arc::clone(&last_error);
         let invalid_hint_count = Arc::new(AtomicU64::new(0));
         let invalid_hint_count_task = Arc::clone(&invalid_hint_count);
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_notify = Arc::new(Notify::new());
         let transport_last_error = Arc::clone(&self.last_error);
         let imported_count = bootstrap_peers.len();
         let warm_endpoint = self.endpoint.clone();
@@ -311,10 +406,28 @@ impl IrohGossipTransport {
         let warm_gossip = self.gossip.clone();
         let warmups = Arc::clone(&self.topic_warmups);
 
+        // The receiver must enter the registry in the same non-await section
+        // in which it is spawned. Shutdown and concurrent subscribe use these
+        // locks in the same order.
+        let mut topics = self.topic_states.lock().await;
+        let mut subscribed = self.subscribed_topics.lock().await;
+        anyhow::ensure!(
+            !self.hint_closed.load(Ordering::Acquire),
+            "hint transport is closed"
+        );
+        if let Some(current) = topics.get(topic.as_str()) {
+            subscribed.insert(topic.0.clone());
+            return Ok(current.broadcaster.clone());
+        }
+
         let task = tokio::spawn(async move {
             if imported_count > 0 {
                 let join_timeout = initial_topic_join_timeout();
-                let warmup_task = tokio::spawn(async move {
+                #[cfg(test)]
+                let task_guard = CountedWarmupTask::new(Arc::clone(&warmups.initial_warmup_tasks));
+                let warmup_task = AbortWarmupOnDrop(tokio::spawn(async move {
+                    #[cfg(test)]
+                    let _task_guard = task_guard;
                     let join_deadline = tokio::time::Instant::now() + join_timeout;
                     let relay_backed = peers_use_relay(&warm_bootstrap_peers);
                     let mut attempt = 0usize;
@@ -329,11 +442,11 @@ impl IrohGossipTransport {
                         attempt = attempt.saturating_add(1);
                         sleep(retry_delay).await;
                     }
-                });
+                }));
                 let joined = timeout(join_timeout, receiver.joined())
                     .await
                     .is_ok_and(|result| result.is_ok());
-                warmup_task.abort();
+                warmup_task.0.abort();
                 if joined {
                     joined_task_state.store(true, Ordering::SeqCst);
                     joined_task_notify.notify_waiters();
@@ -433,8 +546,8 @@ impl IrohGossipTransport {
             }
         });
 
-        self.subscribed_topics.lock().await.insert(topic.0.clone());
-        self.topic_states.lock().await.insert(
+        subscribed.insert(topic.0.clone());
+        topics.insert(
             topic.0.clone(),
             HintTopicState {
                 sender: Arc::new(Mutex::new(sender)),
@@ -444,6 +557,9 @@ impl IrohGossipTransport {
                 last_received_at,
                 last_error,
                 invalid_hint_count,
+                closed,
+                closed_notify,
+                update_warmup_task: None,
                 _receiver_task: task,
             },
         );
@@ -457,20 +573,33 @@ impl IrohGossipTransport {
         Box::pin(stream)
     }
 
+    async fn shutdown_hint_topics(&self) {
+        let mut topics = self.topic_states.lock().await;
+        let mut states = topics.drain().map(|(_, state)| state).collect::<Vec<_>>();
+        for state in &mut states {
+            state.closed.store(true, Ordering::Release);
+            state.closed_notify.notify_waiters();
+            state._receiver_task.abort();
+            if let Some(update) = &state.update_warmup_task {
+                update.abort();
+            }
+        }
+        drop(topics);
+        self.subscribed_topics.lock().await.clear();
+        for mut state in states {
+            let _ = state._receiver_task.await;
+            if let Some(update) = state.update_warmup_task.take() {
+                let _ = update.await;
+            }
+        }
+    }
+
     pub async fn shutdown(&self) {
+        self.hint_closed.store(true, Ordering::Release);
         self.offer_closed.store(true, Ordering::Release);
         self.offer_shutdown_notify.notify_waiters();
+        self.shutdown_hint_topics().await;
         self.shutdown_receive_offers().await;
-        let topics = self
-            .subscribed_topics
-            .lock()
-            .await
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for topic in topics {
-            self.remove_topic_state(topic.as_str()).await;
-        }
     }
 
     pub(crate) async fn hint_subscribe_hints_impl(&self, topic: &TopicId) -> Result<HintStream> {
@@ -525,6 +654,177 @@ impl IrohGossipTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NotifyOnDrop(Arc<Notify>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_during_initial_join_stops_its_warmup_task() {
+        let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+        let peer = iroh::SecretKey::from_bytes(&[47; 32]).public();
+        transport
+            .insert_imported_peer_addr(EndpointAddr::new(peer))
+            .await;
+        let topic = TopicId::new("kukuri:topic:owned-initial-warmup");
+        let _stream = transport.subscribe_hints(&topic).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            while transport
+                .topic_warmups
+                .initial_warmup_tasks
+                .load(Ordering::SeqCst)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("initial warmup task must start");
+        transport.unsubscribe_hints(&topic).await.unwrap();
+        timeout(Duration::from_millis(300), async {
+            while transport
+                .topic_warmups
+                .initial_warmup_tasks
+                .load(Ordering::SeqCst)
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unsubscription must stop the initial warmup task");
+        transport.shutdown().await;
+        transport._router.take().unwrap().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsubscribing_stops_a_registered_peer_update_warmup() {
+        let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+        let topic = TopicId::new("kukuri:topic:owned-update-warmup");
+        let _stream = transport.subscribe_hints(&topic).await.unwrap();
+        let dropped = Arc::new(Notify::new());
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let update = tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _guard = NotifyOnDrop(dropped);
+                let _ = ready_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        ready_rx.await.unwrap();
+        let hint_topic = kukuri_core::wire::hint_topic_id(&topic);
+        transport
+            .topic_states
+            .lock()
+            .await
+            .get_mut(hint_topic.as_str())
+            .unwrap()
+            .update_warmup_task = Some(update);
+        transport.unsubscribe_hints(&topic).await.unwrap();
+        timeout(Duration::from_secs(2), dropped.notified())
+            .await
+            .expect("removing the topic must abort its update warmup");
+        transport.shutdown().await;
+        transport._router.take().unwrap().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hint_subscribe_waiting_for_registration_cannot_revive_after_shutdown() {
+        let transport = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+        let topic = TopicId::new("kukuri:topic:hint-shutdown-registration");
+        let registration_guard = transport.subscribed_topics.lock().await;
+        let subscribe = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move { transport.subscribe_hints(&topic).await }
+        });
+        timeout(Duration::from_secs(2), async {
+            while transport.topic_states.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let shutdown = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move { transport.shutdown().await }
+        });
+        timeout(Duration::from_secs(2), async {
+            while !transport.hint_closed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(registration_guard);
+        assert!(subscribe.await.unwrap().is_err());
+        shutdown.await.unwrap();
+        assert!(transport.topic_states.lock().await.is_empty());
+        let mut transport = Arc::try_unwrap(transport).ok().unwrap();
+        transport._router.take().unwrap().shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_hint_shutdown_aborts_all_topic_tasks_before_waiting() {
+        let transport = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+        let first_topic = TopicId::new("kukuri:topic:a-blocked-hint-shutdown");
+        let second_topic = TopicId::new("kukuri:topic:b-pending-hint-shutdown");
+        let _first_stream = transport.subscribe_hints(&first_topic).await.unwrap();
+        let _second_stream = transport.subscribe_hints(&second_topic).await.unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let blocked = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let dropped = Arc::new(Notify::new());
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _guard = NotifyOnDrop(dropped);
+                let _ = ready_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        ready_rx.await.unwrap();
+        let first_key = kukuri_core::wire::hint_topic_id(&first_topic);
+        let second_key = kukuri_core::wire::hint_topic_id(&second_topic);
+        {
+            let mut states = transport.topic_states.lock().await;
+            let first = states.get_mut(first_key.as_str()).unwrap();
+            let old = std::mem::replace(&mut first._receiver_task, blocked);
+            old.abort();
+            let second = states.get_mut(second_key.as_str()).unwrap();
+            let old = std::mem::replace(&mut second._receiver_task, pending);
+            old.abort();
+        }
+        let shutdown = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move { transport.shutdown().await }
+        });
+        timeout(Duration::from_secs(2), async {
+            while !transport.topic_states.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.abort();
+        let _ = shutdown.await;
+        release_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), dropped.notified())
+            .await
+            .expect("all topic tasks must be aborted before shutdown awaits one");
+        transport.shutdown().await;
+        let mut transport = Arc::try_unwrap(transport).ok().unwrap();
+        transport._router.take().unwrap().shutdown().await.unwrap();
+    }
 
     #[test]
     fn warmup_samples_a_moving_four_peer_window_from_large_history() {
