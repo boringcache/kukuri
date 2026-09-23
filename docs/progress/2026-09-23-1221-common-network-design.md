@@ -309,3 +309,20 @@ Tauri clippyは既存の3種類のlint（`drop_non_drop`、`collapsible_if`、`e
 初回PR headの全体Rust CIで、別のmigration契約`migrations.rs`が世代数を30に固定していてFAILした。
 新世代のup/downが揃う判定と全replay後の件数を31へ更新し、関連migration 12件を局所で確認した。
 `migrations_roundtrip.rs`の31世代/goldenと合わせ、固定値の両入口を更新してからCIを再実行する。
+
+## P3: N25の通知event待機taskをaccount runtimeへ所有させる
+
+`DesktopRuntime::new`は`notification_inserted_notify`を待つtaskをspawnし、handleを保持しない。
+account shutdown後にも旧Notifyとbroadcast senderをtaskが保持するため、旧accountの通知signalを
+送る経路とtaskが残る。N58としてtaskの所有・停止だけを修正し、通知rowの保存/OS toastや
+host側のdesired購読復元の意味を変えない。
+
+- EVENT-1: account runtimeあたり転送taskは1件で、通知挿入時は従来どおりeventを1件転送する。
+- EVENT-2: shutdown開始時にtaskをabortし終了を待つ。終了後の旧Notifyではbroadcastしない。
+- EVENT-3: 明示shutdownを経ないruntime Dropでもtaskをabortし、旧accountの待機taskを残さない。
+
+修正前の`notification_event_forwarder_stops_when_runtime_shuts_down`は旧Notifyを再通知すると
+shutdown後にもeventを受け取ってFAIL。task handleをruntimeへ保持してshutdownでabort/await、
+Dropでもabortする修正後に同testとDrop testが成功した。既存sync observer/wireと合わせた
+runtime event4件、共有資源lock分類1件が成功。変更crateのclippy/format/sizeを局所で確認し、
+全体とslowはPR/CI、固定headのaccount境界は独立監査に委ねる。

@@ -274,6 +274,8 @@ private/manifestに必要な情報だけを版付きで追加し、旧locator不
 owner要求として登録する。OS通知dispatch、UI描画、音声/videoのmedia clockは通信retryのownerではない。
 これらの既存timerを維持する場合も、新たなnetwork workはownerへ渡す。
 CN indexerは別processなので独立したownerを持つが、同じ受付・停止・差分の契約を使う。
+local通知のevent転送taskもaccount runtimeが所有する。shutdownでは終了を待ち、明示shutdownを
+経ずruntimeが破棄された場合も中止する。旧accountのNotifyを保持する待機taskを残さない。
 
 OS通知dispatchはlocal inboxの全件読取りを行わない。新規INSERTにだけ単調な永続sequenceを付け、
 64件の索引ページを処理してからcursorを進める。既存rowはmigration時にsequenceを付けず、

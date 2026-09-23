@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -126,6 +126,8 @@ pub struct DesktopRuntime {
     pub(crate) community_node_reconnect_guard: Arc<Mutex<()>>,
     pub(crate) community_node_scheduler_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) sync_status_observer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Notification forwarding belongs to this account runtime, including Drop without shutdown.
+    notification_event_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) active_connectivity_urls: Arc<Mutex<Vec<String>>>,
     pub(crate) last_runtime_connectivity_assist_state:
         Arc<Mutex<Option<crate::community_node::RuntimeConnectivityAssistState>>>,
@@ -434,7 +436,7 @@ impl DesktopRuntime {
         app_service.resume_direct_message_state().await?;
 
         let (event_sender, _) = tokio::sync::broadcast::channel(64);
-        {
+        let notification_event_task = {
             let notify = app_service.notification_inserted_notify();
             let sender = event_sender.clone();
             tokio::spawn(async move {
@@ -442,8 +444,8 @@ impl DesktopRuntime {
                     notify.notified().await;
                     let _ = sender.send(RuntimeEvent::NotificationStatusChanged);
                 }
-            });
-        }
+            })
+        };
 
         Ok(Self {
             app_service,
@@ -465,6 +467,7 @@ impl DesktopRuntime {
             community_node_reconnect_guard: Arc::new(Mutex::new(())),
             community_node_scheduler_task: Mutex::new(None),
             sync_status_observer_task: Mutex::new(None),
+            notification_event_task: StdMutex::new(Some(notification_event_task)),
             active_connectivity_urls: Arc::new(Mutex::new(relay_config.iroh_relay_urls.clone())),
             last_runtime_connectivity_assist_state: Arc::new(Mutex::new(Some(
                 initial_runtime_connectivity_state,
@@ -519,6 +522,13 @@ impl DesktopRuntime {
         let _ = self.event_sender.send(event);
     }
 
+    pub(crate) fn take_notification_event_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.notification_event_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     pub(crate) async fn persist_gossip_subscription_state_from_app(&self) -> Result<()> {
         persist_gossip_subscription_state(
             &self.db_path,
@@ -528,5 +538,18 @@ impl DesktopRuntime {
                 disabled_channels: self.app_service.list_gossip_disabled_channels().await,
             },
         )
+    }
+}
+
+impl Drop for DesktopRuntime {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .notification_event_task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
     }
 }

@@ -38,7 +38,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N22 `wait_for_private_channel_epoch_snapshot`、`object_persistence_support.rs` | epoch参加/rotation、50ms間隔・全体10秒 | caller取消/期限で停止。metadata/policy/participantsを再取得 | participant全体の反復。P4個別owner/recipient確認 | NW-9、旧epoch grant経路 |
 | N23 `spawn_reply_target_reflection`、`reply_target_support.rs` | 未反映の返信先、台帳受付後 | spawn後にpermit待機、所有handleなし、docs LocalOnly→本文remote | 台帳は既存、task所有とscope別取得はP3統合 | NW-2/4/9、署名/LocalOnly維持 |
 | N24 `MissingBodyLedger`、`hydration_limits.rs` | 欠損本文、5秒/30秒/120秒/600秒、最大8試行 | RAIIで失敗記録、最大4実行/4,096記録 | 台帳は有界。上限は共通予算へ統合し履歴をリセットしない | NW-2/4、既存missing-body tests |
-| N25 `runtime/mod.rs` の通知event転送、`host/mod.rs::replace_event_task/restore_desired_subscriptions` | account起動/restart、notify event | host転送taskは置換/shutdownでabort。runtime通知転送はdetached loop | desired購読全件復元と旧runtime task寿命。P3owner/復元索引 | NW-7/8/10 |
+| N25 `runtime/mod.rs` の通知event転送、`host/mod.rs::replace_event_task/restore_desired_subscriptions` | account起動/restart、notify event | host転送taskは置換/shutdownでabort。runtime通知転送もruntimeが所有しshutdown完了待ち・Drop中止 | desired購読全件復元はP3残件。旧runtime task寿命はP3 ownerへ接続 | NW-7/8/10 |
 | N26 `iroh-node/src/node.rs::apply_relay_config/shutdown`、`transport/src/discovery.rs/iroh/discovery.rs` | 起動/relay設定、endpoint.online待機 | node shutdownは所有付き。online待機はdetached | endpoint世代単位。P3で監視taskを所有し重複設定をno-op | NW-6/7、既存node終了契約 |
 | N27 `cn-runtime/requests_support.rs/session_runtime_support.rs` | auth/consent要求、token/heartbeat/rendezvous/metadataの期限、設定変更 | HTTP timeoutと401再認証。ready node/seed集合を再適用 | 全ready node/購読/seedの再合成。P3差分/due索引 | NW-5/6、mixed node auth/consent |
 | N28 `cn-core/src/rendezvous.rs::heartbeat`、`cn-user-api/handlers/bootstrap.rs::topic_rendezvous_heartbeat` | 認証・同意後のjoins/refreshes/leaves | request期限。Redis TTL、期限切れpeerを照会中に削除 | topicごとのSMEMBERS/sort/peer GETが全登録peer比例。P3有界cursorとTTL索引 | NW-2/5/8、auth/endpoint binding |
@@ -125,6 +125,15 @@ private capsule、旧DM outboxの移行を達成したとは扱わない。
 N53〜55は公開accountと接続endpointの対応だけを提供する。recipientのscope/DM mutual/private能力、
 gossip offerと出典の照合、旧listenerの撤去やoutbox輸送先変更はまだ行わない。slotの署名鍵は
 account runtime/node寿命内に保持し、binding応答に秘密値・参照本文を含めない。
+
+### N25のlocal通知event転送task所有（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N58 | `DesktopRuntime::new` → `notification_inserted_notify`待機task → `RuntimeEvent::NotificationStatusChanged` | 同一account runtimeに1task。`shutdown_checked`でabort/完了待ち、Dropでもabort。旧accountのNotify保持からevent broadcastしない | `notification_event_forwarder_stops_when_runtime_shuts_down`、`notification_event_forwarder_stops_when_runtime_is_dropped`、lock分類contract |
+
+N58のsinkはlocal runtime broadcastのみ。通知row生成、OS toast、network送信、hostのdesired購読復元には
+触れない。host側の既存task所有とruntime側の世代を混同しない。
 
 ### 追加した暗号化参照（P2実証、I/O未接続）
 
