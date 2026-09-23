@@ -46,6 +46,211 @@ fn offer_for(
 }
 
 #[tokio::test]
+async fn signed_account_route_ack_clears_only_matching_dm_outbox() {
+    use kukuri_core::build_direct_message_ack;
+    use kukuri_store::DirectMessageOutboxRow;
+
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    let local = sender.public_key_hex();
+    let peer = recipient.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local.clone(),
+            author_pubkey: peer.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let dm_id = direct_message_id_for_participants(&sender.public_key(), &recipient.public_key());
+    let row = DirectMessageOutboxRow {
+        dm_id: dm_id.clone(),
+        message_id: "ack-on-account-route".into(),
+        peer_pubkey: peer.clone(),
+        frame_blob_hash: kukuri_core::BlobHash::new("aa".repeat(32)),
+        created_at: 10,
+        last_attempt_at: None,
+    };
+    store.put_direct_message_outbox(row.clone()).await.unwrap();
+    let blob = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
+    let transport = Arc::new(FakeTransport::new("sender", FakeNetwork::default()));
+    let app = offer_app(sender.clone(), store.clone(), transport, blob.clone());
+    let ack = build_direct_message_ack(
+        &recipient,
+        &dm_id,
+        &row.message_id,
+        &sender.public_key(),
+        Utc::now().timestamp_millis(),
+    )
+    .unwrap();
+    let now = Utc::now().timestamp_millis();
+    let forged = seal_receive_offer(
+        &recipient,
+        &sender.public_key(),
+        ReceiveOfferReferenceV1::inline(
+            String::new(),
+            ReceiveOfferScopeV1::DirectMessageAck {
+                dm_id: ack.dm_id.clone(),
+                message_id: ack.message_id.clone(),
+                acked_at: ack.acked_at,
+                signature: "11".repeat(64),
+            },
+        )
+        .unwrap(),
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    assert!(
+        AppService::ingest_account_receive_offer(
+            &app.services,
+            ReceiveOfferEnvelope {
+                offer: forged,
+                received_at: now,
+                source_peer: "untrusted relay".into(),
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        store
+            .get_direct_message_outbox(&dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let offer = seal_receive_offer(
+        &recipient,
+        &sender.public_key(),
+        ReceiveOfferReferenceV1::inline(
+            String::new(),
+            ReceiveOfferScopeV1::DirectMessageAck {
+                dm_id: ack.dm_id,
+                message_id: ack.message_id,
+                acked_at: ack.acked_at,
+                signature: ack.signature,
+            },
+        )
+        .unwrap(),
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    assert!(
+        AppService::ingest_account_receive_offer(
+            &app.services,
+            ReceiveOfferEnvelope {
+                offer,
+                received_at: Utc::now().timestamp_millis(),
+                source_peer: "untrusted relay".into(),
+            },
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        store
+            .get_direct_message_outbox(&dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(blob.fetches.load(Ordering::SeqCst), 0);
+    assert_eq!(blob.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn inline_dm_frame_requires_sender_bound_provider_before_blob_io() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &recipient.public_key_hex(),
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: recipient.public_key_hex(),
+            author_pubkey: sender.public_key_hex(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let network = FakeNetwork::default();
+    let transport = Arc::new(FakeTransport::new("recipient", network.clone()));
+    let blob = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
+    let app = offer_app(recipient.clone(), store, transport, blob.clone());
+    let provider = iroh::SecretKey::from_bytes(&[44; 32]).public();
+    let now = Utc::now().timestamp_millis();
+    let offer = seal_receive_offer(
+        &sender,
+        &recipient.public_key(),
+        ReceiveOfferReferenceV1::inline(
+            provider.to_string(),
+            ReceiveOfferScopeV1::DirectMessageFrame {
+                dm_id: direct_message_id_for_participants(
+                    &sender.public_key(),
+                    &recipient.public_key(),
+                ),
+                message_id: "wrong-provider".into(),
+                frame_hash: kukuri_core::BlobHash::new("aa".repeat(32)),
+            },
+        )
+        .unwrap(),
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    assert!(
+        AppService::ingest_account_receive_offer(
+            &app.services,
+            ReceiveOfferEnvelope {
+                offer: offer.clone(),
+                received_at: now,
+                source_peer: provider.to_string(),
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(blob.regular_fetches.load(Ordering::SeqCst), 0);
+    network
+        .trust_receive_provider(&generate_keys().public_key(), &provider.to_string())
+        .await;
+    assert!(
+        AppService::ingest_account_receive_offer(
+            &app.services,
+            ReceiveOfferEnvelope {
+                offer,
+                received_at: now,
+                source_peer: provider.to_string(),
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(blob.regular_fetches.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn account_receive_offer_rejects_unmutual_and_other_scopes_before_provider_io() {
     let sender = generate_keys();
     let recipient = generate_keys();
@@ -123,8 +328,16 @@ async fn account_route_ingests_verified_mutual_dm_and_stops_on_shutdown() {
     let memory_blob = Arc::new(MemoryBlobService::default());
     let blob = Arc::new(OfferBlobService::new(memory_blob.clone()));
     let network = FakeNetwork::default();
-    let receiver_transport = Arc::new(FakeTransport::new("recipient", network.clone()));
+    let receiver_endpoint_id = iroh::SecretKey::from_bytes(&[25; 32]).public();
+    let receiver_transport = Arc::new(FakeTransport::new(
+        receiver_endpoint_id.to_string(),
+        network.clone(),
+    ));
     let sender_transport = FakeTransport::new("sender", network);
+    let (_ack_lease, mut account_acks, _) = sender_transport
+        .subscribe_receive_offers(&sender.public_key())
+        .await
+        .unwrap();
     let app = offer_app(
         recipient.clone(),
         store.clone(),
@@ -219,6 +432,24 @@ async fn account_route_ingests_verified_mutual_dm_and_stops_on_shutdown() {
         .await
         .expect("DM notification event forwarded");
     assert_eq!(blob.fetches.load(Ordering::SeqCst), 1);
+    let account_ack = timeout(Duration::from_secs(2), account_acks.next())
+        .await
+        .expect("DM ACK must return through sender account route")
+        .expect("sender account route ended");
+    let opened_ack = account_ack
+        .offer
+        .open(&sender, Utc::now().timestamp_millis())
+        .unwrap();
+    assert_eq!(opened_ack.sender(), &recipient.public_key());
+    assert!(opened_ack.reference().provider_endpoint_id.is_empty());
+    assert!(opened_ack.reference().payload_hash.as_str().is_empty());
+    assert_eq!(opened_ack.reference().payload_bytes, 0);
+    assert!(
+        matches!(&opened_ack.reference().scope, ReceiveOfferScopeV1::DirectMessageAck {
+        dm_id: ack_dm_id, message_id: ack_message_id, ..
+    } if ack_dm_id == &dm_id && ack_message_id == message_id)
+    );
+    assert_eq!(blob.writes.load(Ordering::SeqCst), 0);
 
     app.shutdown().await;
     assert!(app.start_account_receive_offers().await.is_err());
@@ -430,6 +661,7 @@ async fn revoked_mutual_during_attachment_fetch_never_persists_plaintext() {
             &dm_id_for_task,
             message_id,
             &frame_hash,
+            None,
         )
         .await
     });
@@ -756,143 +988,4 @@ async fn superseding_account_owner_cancels_old_in_flight_provider_fetch() {
     assert_eq!(old_blob.writes.load(Ordering::SeqCst), 0);
     old_app.shutdown().await;
     new_app.shutdown().await;
-}
-
-#[cfg(feature = "iroh-integration-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_account_route_fetches_bound_provider_manifest_and_reflects_dm() {
-    let _guard = iroh_integration_test_lock().lock_owned().await;
-    let dir = tempdir().unwrap();
-    let sender_stack = TestIrohStack::new(&dir.path().join("offer-sender")).await;
-    let recipient_stack = TestIrohStack::new(&dir.path().join("offer-recipient")).await;
-    let sender = generate_keys();
-    let recipient = generate_keys();
-    sender_stack
-        ._node
-        .install_receive_binding(Arc::new(sender.clone()))
-        .await
-        .unwrap();
-    let sender_store = Arc::new(MemoryStore::default());
-    let recipient_store = Arc::new(MemoryStore::default());
-    let sender_app = app_service_from_dependencies(
-        sender_store.clone(),
-        sender_store,
-        sender_stack.transport.clone(),
-        sender_stack.transport.clone(),
-        sender_stack.docs_sync.clone(),
-        sender_stack.blob_service.clone(),
-        sender.clone(),
-    );
-    let recipient_app = app_service_from_dependencies(
-        recipient_store.clone(),
-        recipient_store.clone(),
-        recipient_stack.transport.clone(),
-        recipient_stack.transport.clone(),
-        recipient_stack.docs_sync.clone(),
-        recipient_stack.blob_service.clone(),
-        recipient.clone(),
-    );
-    let recipient_ticket = recipient_app.peer_ticket().await.unwrap().unwrap();
-    sender_app
-        .import_peer_ticket(&recipient_ticket)
-        .await
-        .unwrap();
-    SocialProjectionStore::rebuild_author_relationships(
-        recipient_store.as_ref(),
-        &recipient.public_key_hex(),
-        vec![AuthorRelationshipProjectionRow {
-            local_author_pubkey: recipient.public_key_hex(),
-            author_pubkey: sender.public_key_hex(),
-            following: true,
-            followed_by: true,
-            mutual: true,
-            friend_of_friend: false,
-            friend_of_friend_via_pubkeys: Vec::new(),
-            derived_at: 1,
-        }],
-    )
-    .await
-    .unwrap();
-    let dm_id = direct_message_id_for_participants(&sender.public_key(), &recipient.public_key());
-    let message_id = "real-account-offer-1";
-    let frame = encrypt_direct_message_frame(
-        &sender,
-        &recipient.public_key(),
-        &dm_id,
-        message_id,
-        Utc::now().timestamp_millis(),
-        &DirectMessagePayloadV1 {
-            text: Some("bound provider route".into()),
-            reply_to: None,
-            attachment_manifest: None,
-        },
-    )
-    .unwrap();
-    let frame_blob = sender_stack
-        .blob_service
-        .put_blob(
-            serde_json::to_vec(&frame).unwrap(),
-            DIRECT_MESSAGE_FRAME_MIME,
-        )
-        .await
-        .unwrap();
-    let manifest = serde_json::to_vec(&GossipHint::DirectMessageFrame {
-        topic_id: derive_direct_message_topic(&recipient, &sender.public_key()).unwrap(),
-        dm_id: dm_id.clone(),
-        message_id: message_id.into(),
-        frame_hash: frame_blob.hash,
-    })
-    .unwrap();
-    let manifest_blob = sender_stack
-        .blob_service
-        .put_blob(
-            manifest,
-            "application/vnd.kukuri.direct-message-receive-manifest+json",
-        )
-        .await
-        .unwrap();
-    let now = Utc::now().timestamp_millis();
-    let offer = seal_receive_offer(
-        &sender,
-        &recipient.public_key(),
-        ReceiveOfferReferenceV1 {
-            provider_endpoint_id: sender_stack._node.endpoint().id().to_string(),
-            payload_hash: manifest_blob.hash,
-            payload_bytes: manifest_blob.bytes as u32,
-            scope: ReceiveOfferScopeV1::DirectMessage,
-        },
-        now,
-        now + 60_000,
-    )
-    .unwrap();
-    recipient_app.start_account_receive_offers().await.unwrap();
-    sender_stack
-        .transport
-        .publish_receive_offer(
-            &recipient.public_key(),
-            recipient_stack._node.endpoint().addr(),
-            offer,
-        )
-        .await
-        .unwrap();
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if DirectMessageStore::get_direct_message_message(
-                recipient_store.as_ref(),
-                &dm_id,
-                message_id,
-            )
-            .await
-            .unwrap()
-            .is_some()
-            {
-                break;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("verified account offer DM reached recipient");
-    recipient_app.shutdown().await;
-    sender_app.shutdown().await;
 }

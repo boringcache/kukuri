@@ -165,6 +165,7 @@ impl DirectMessageStore for MemoryStore {
             .write()
             .await
             .get_mut(&(dm_id.to_string(), message_id.to_string()))
+            && row.acked_at.is_none()
         {
             row.acked_at = Some(acked_at);
         }

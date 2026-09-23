@@ -82,6 +82,7 @@ impl HintTransport for ProbeOfferTransport {
 pub(super) struct OfferBlobService {
     pub(super) inner: Arc<MemoryBlobService>,
     pub(super) fetches: Arc<AtomicUsize>,
+    pub(super) regular_fetches: Arc<AtomicUsize>,
     pub(super) barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(super) pause_blob_hash: Option<kukuri_core::BlobHash>,
     pub(super) attachment_barrier: Option<Arc<tokio::sync::Barrier>>,
@@ -102,6 +103,7 @@ impl OfferBlobService {
         Self {
             inner,
             fetches: Arc::new(AtomicUsize::new(0)),
+            regular_fetches: Arc::new(AtomicUsize::new(0)),
             barrier: None,
             pause_blob_hash: None,
             attachment_barrier: None,
@@ -119,6 +121,7 @@ impl BlobService for OfferBlobService {
     }
 
     async fn fetch_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.regular_fetches.fetch_add(1, Ordering::SeqCst);
         if self.pause_blob_hash.as_ref() == Some(hash)
             && let Some(barrier) = &self.attachment_barrier
         {

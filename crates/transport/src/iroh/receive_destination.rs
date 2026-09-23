@@ -150,6 +150,44 @@ fn next_peer(
 }
 
 impl IrohGossipTransport {
+    pub(super) async fn verify_receive_provider_impl(
+        &self,
+        sender: &Pubkey,
+        provider: EndpointAddr,
+    ) -> Result<()> {
+        receive_route_for_account(sender)?;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        let _permit = self
+            .receive_destination_probes
+            .try_acquire()
+            .context("receive binding probe budget is full")?;
+        let shutdown = self.offer_shutdown_notify.notified();
+        tokio::pin!(shutdown);
+        shutdown.as_mut().enable();
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        let binding = tokio::select! {
+            _ = &mut shutdown => anyhow::bail!("account receive offer transport is closed"),
+            result = fetch_receive_endpoint_binding(
+                &self.endpoint,
+                provider.clone(),
+                sender,
+                Instant::now() + BINDING_PROBE_TIMEOUT,
+            ) => result?,
+        };
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire)
+                && binding.endpoint_id() == provider.id.to_string(),
+            "receive provider changed or transport closed"
+        );
+        Ok(())
+    }
+
     pub(super) async fn resolve_receive_destination_impl(
         &self,
         recipient: &Pubkey,

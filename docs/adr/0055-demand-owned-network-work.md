@@ -205,6 +205,14 @@ ACK未確認のDMを短期通知queueの期限で捨てない。相互follow失�
 これは投稿のdocs書込み先を変更しない規則の例外である。ACKも送信者account routeへ返し、
 既存署名ACKのsender/recipient/message照合を保つ。再起動/途中中断は同じmessageで再開し、
 旧pairwise受信と新route受信が重なっても既存message IDとtombstoneへ収束する。
+送信側の既知peer候補はpeer別outboxページ（最大64行）で1回だけbindingを照合する。
+未解決なら保護rowを残し、照合済み宛先には同じ暗号frame hashとmessage IDをsealed offer内で直接知らせる。
+初回の画面操作はこの宛先照合を待たず、既存のbackground再送がaccount routeへ進める。
+受信側はbinding照合済みprovider endpointへ署名ACKをsealed offer内に直接収めて返し、送信側account routeでも既存の
+sender/recipient/conversation/message照合を通す。旧pairwise ACKも移行中は維持し、両routeの重複ACKは
+最初に記録した配達時刻を保持する。ACKのofferにはACKを返さず、未ACKのDM outboxは受信確認まで消さない。
+送信offerとACK offerの1回の待機は各2秒で打ち切り、失敗は保護outboxの次回再送へ委ねる。
+同一account runtimeが同時に発行するDM/ACK offerは最大4件とし、満杯時は待機列を作らず延期する。
 更新済み端末同士の未完了DMを保全するための移行であり、旧版との互換期間は設けない。
 
 private rotation/freeze/失効には投稿通知と別の制御capsuleを使う。
@@ -271,8 +279,11 @@ gossip topic IDはrouteのUTF-8 bytesのBLAKE3で、既存topic通知の`hint/`�
   AADは固定順JSON配列 `["kukuri:receive-offer:v1", 1, ephemeral_pubkey, recipient]` のUTF-8。
   XChaCha20-Poly1305で暗号化し、nonceとephemeral鍵は生成ごとに更新する。
 - 内側はversion、sender、recipient、reference、issued_at_ms、expires_at_ms、signature。
-  referenceはprovider_endpoint_id、payload_hash、payload_bytes、scopeの固定fieldを持つ。
-  scopeのkindは `public_source/direct_message/private_source/epoch_control`、後二つはepoch_key_idを持つ。
+  blob参照のreferenceはprovider_endpoint_id、payload_hash、payload_bytes、scopeを持つ。
+  scopeのkindは `public_source/direct_message/direct_message_frame/direct_message_ack/private_source/epoch_control`。
+  `direct_message_frame`はdm_id、message_id、frame_hashを持ち、provider_endpoint_id以外のblob参照fieldを省く。
+  `direct_message_ack`はdm_id、message_id、acked_at、ACK署名を持ち、provider/blob参照fieldを省く。
+  省いたfieldは0byte/空値だけを許可し、inline scopeがblob参照を同時に持つ形を拒否する。
   endpoint/hash/key IDは32byteの小文字hex。未知field/版を拒否する。
 - 署名は固定順JSON配列
   `["kukuri:receive-offer:v1", version, sender, recipient, reference, issued_at_ms, expires_at_ms]`
@@ -280,7 +291,8 @@ gossip topic IDはrouteのUTF-8 bytesのBLAKE3で、既存topic通知の`hint/`�
   公開鍵暗号を作れるだけでsenderを名乗れないよう、復号後に署名も検証する。
 - offerの寿命は最大5分、未来許容1分、失効は排他的。期限切れofferは配送済み/既読と扱わない。
   DM outboxと永続grantの再試行は、内容のIDを保って新しいofferを発行する。
-- payload_bytesは参照manifestの実byte数で1〜65,536。本文・DM frame・添付の全体サイズではない。
+- blob参照のpayload_bytesは参照manifestの実byte数で1〜65,536。本文・DM frame・添付の全体サイズではない。
+  inline DM/ACKはpayload_bytes=0と空payload_hashを要求し、新たなmanifest blobを保存しない。
   取得側は宣言サイズと上限を両方検査し、宣言と異なるbodyを採用しない。
   既存の本文/DM/添付をこのmanifest上限へ縮めない。
 

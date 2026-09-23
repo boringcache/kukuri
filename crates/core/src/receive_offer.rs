@@ -28,15 +28,33 @@ const EPOCH_ID_DOMAIN: &[u8] = b"kukuri:receive-epoch-key-id:v1\0";
 pub enum ReceiveOfferScopeV1 {
     PublicSource,
     DirectMessage,
-    PrivateSource { epoch_key_id: String },
-    EpochControl { epoch_key_id: String },
+    DirectMessageFrame {
+        dm_id: String,
+        message_id: String,
+        frame_hash: BlobHash,
+    },
+    DirectMessageAck {
+        dm_id: String,
+        message_id: String,
+        acked_at: i64,
+        signature: String,
+    },
+    PrivateSource {
+        epoch_key_id: String,
+    },
+    EpochControl {
+        epoch_key_id: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiveOfferReferenceV1 {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider_endpoint_id: String,
+    #[serde(default, skip_serializing_if = "is_empty_hash")]
     pub payload_hash: BlobHash,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub payload_bytes: u32,
     pub scope: ReceiveOfferScopeV1,
 }
@@ -49,22 +67,75 @@ impl std::fmt::Debug for ReceiveOfferReferenceV1 {
 }
 
 impl ReceiveOfferReferenceV1 {
-    fn validate(&self) -> Result<()> {
-        fixed_hex::<32>(&self.provider_endpoint_id)?;
-        fixed_hex::<32>(self.payload_hash.as_str())?;
+    pub fn inline(provider_endpoint_id: String, scope: ReceiveOfferScopeV1) -> Result<Self> {
         ensure!(
-            (1..=RECEIVE_PAYLOAD_MAX_BYTES as u32).contains(&self.payload_bytes),
-            "invalid receive payload size"
+            matches!(
+                &scope,
+                ReceiveOfferScopeV1::DirectMessageFrame { .. }
+                    | ReceiveOfferScopeV1::DirectMessageAck { .. }
+            ),
+            "inline receive offer scope is unsupported"
         );
+        let reference = Self {
+            provider_endpoint_id,
+            payload_hash: BlobHash::default(),
+            payload_bytes: 0,
+            scope,
+        };
+        reference.validate()?;
+        Ok(reference)
+    }
+
+    fn validate(&self) -> Result<()> {
         match &self.scope {
+            ReceiveOfferScopeV1::DirectMessageFrame { frame_hash, .. } => {
+                fixed_hex::<32>(&self.provider_endpoint_id)?;
+                fixed_hex::<32>(frame_hash.as_str())?;
+                ensure!(
+                    self.payload_bytes == 0 && self.payload_hash.as_str().is_empty(),
+                    "inline receive offer cannot reference a blob"
+                );
+            }
+            ReceiveOfferScopeV1::DirectMessageAck { signature, .. } => {
+                ensure!(
+                    self.provider_endpoint_id.is_empty(),
+                    "inline ACK cannot name a provider"
+                );
+                fixed_hex::<64>(signature)?;
+                ensure!(
+                    self.payload_bytes == 0 && self.payload_hash.as_str().is_empty(),
+                    "inline receive offer cannot reference a blob"
+                );
+            }
             ReceiveOfferScopeV1::PrivateSource { epoch_key_id }
             | ReceiveOfferScopeV1::EpochControl { epoch_key_id } => {
+                fixed_hex::<32>(&self.provider_endpoint_id)?;
+                fixed_hex::<32>(self.payload_hash.as_str())?;
                 fixed_hex::<32>(epoch_key_id)?;
+                ensure!(
+                    (1..=RECEIVE_PAYLOAD_MAX_BYTES as u32).contains(&self.payload_bytes),
+                    "invalid receive payload size"
+                );
             }
-            _ => {}
+            _ => {
+                fixed_hex::<32>(&self.provider_endpoint_id)?;
+                fixed_hex::<32>(self.payload_hash.as_str())?;
+                ensure!(
+                    (1..=RECEIVE_PAYLOAD_MAX_BYTES as u32).contains(&self.payload_bytes),
+                    "invalid receive payload size"
+                );
+            }
         }
         Ok(())
     }
+}
+
+fn is_empty_hash(hash: &BlobHash) -> bool {
+    hash.as_str().is_empty()
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -93,6 +164,9 @@ impl std::fmt::Debug for VerifiedReceiveOffer {
 impl VerifiedReceiveOffer {
     pub fn sender(&self) -> &Pubkey {
         &self.0.sender
+    }
+    pub fn recipient(&self) -> &Pubkey {
+        &self.0.recipient
     }
     pub fn reference(&self) -> &ReceiveOfferReferenceV1 {
         &self.0.reference

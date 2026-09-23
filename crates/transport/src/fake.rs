@@ -38,6 +38,19 @@ pub struct FakeNetwork {
     offers: Arc<Mutex<HashMap<String, broadcast::Sender<ReceiveOfferEnvelope>>>>,
     topic_subscribers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
     known_peers: Arc<Mutex<BTreeSet<String>>>,
+    verified_receive_providers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
+}
+
+impl FakeNetwork {
+    /// Test-only proof registry. Unregistered account/endpoint pairs fail closed.
+    pub async fn trust_receive_provider(&self, account: &Pubkey, endpoint_id: &str) {
+        self.verified_receive_providers
+            .lock()
+            .await
+            .entry(account.as_str().to_string())
+            .or_default()
+            .insert(endpoint_id.to_string());
+    }
 }
 
 struct FakeOfferRoute {
@@ -387,6 +400,20 @@ impl HintTransport for FakeTransport {
         _recipient: &Pubkey,
         _endpoint_id: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn verify_receive_provider(&self, sender: &Pubkey, provider: EndpointAddr) -> Result<()> {
+        receive_route_for_account(sender)?;
+        anyhow::ensure!(
+            self.network
+                .verified_receive_providers
+                .lock()
+                .await
+                .get(sender.as_str())
+                .is_some_and(|ids| ids.contains(&provider.id.to_string())),
+            "fake receive provider is not bound to sender"
+        );
         Ok(())
     }
 

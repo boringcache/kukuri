@@ -194,7 +194,7 @@ impl DirectMessageStore for SqliteStore {
         sqlx::query(
             r#"
             UPDATE dm_messages
-            SET acked_at = ?3
+            SET acked_at = COALESCE(acked_at, ?3)
             WHERE dm_id = ?1 AND message_id = ?2
             "#,
         )

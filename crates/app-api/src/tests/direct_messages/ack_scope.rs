@@ -70,6 +70,7 @@ async fn signed_ack_for_another_conversation_cannot_remove_protected_outbox() {
             local_author_pubkey: &local,
             peer_pubkey: &peer,
             topic: &topic,
+            ack_destination: None,
         },
         &GossipHint::DirectMessageAck {
             topic_id: topic.clone(),
@@ -113,6 +114,7 @@ async fn signed_ack_for_another_conversation_cannot_remove_protected_outbox() {
                 local_author_pubkey: &local,
                 peer_pubkey: &other,
                 topic: &valid_topic,
+                ack_destination: None,
             },
             &GossipHint::DirectMessageAck {
                 topic_id: valid_topic.clone(),
@@ -136,4 +138,37 @@ async fn signed_ack_for_another_conversation_cannot_remove_protected_outbox() {
         .unwrap();
     assert_eq!(delivered.acked_at, Some(30));
     assert_eq!(delivered.text, message.text);
+    let repeated_ack = build_direct_message_ack(
+        &other_keys,
+        &dm_id,
+        &message.message_id,
+        &local_keys.public_key(),
+        40,
+    )
+    .unwrap();
+    AppService::handle_direct_message_hint(
+        DirectMessageHintServices {
+            services: &app.services,
+            local_author_pubkey: &local,
+            peer_pubkey: &other,
+            topic: &valid_topic,
+            ack_destination: None,
+        },
+        &GossipHint::DirectMessageAck {
+            topic_id: valid_topic.clone(),
+            ack: repeated_ack,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .get_direct_message_message(&dm_id, &message.message_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .acked_at,
+        Some(30),
+        "duplicate ACKs across pairwise and account routes keep the first delivery time"
+    );
 }

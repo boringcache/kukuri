@@ -519,6 +519,7 @@ async fn incoming_dm_frame_creates_single_direct_message_notification_after_stor
         dm_id.as_str(),
         message_id,
         &frame_blob.hash,
+        None,
     )
     .await
     .expect("ingest direct message frame");

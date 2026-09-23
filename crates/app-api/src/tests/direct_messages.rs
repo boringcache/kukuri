@@ -3,5 +3,7 @@ mod ack_scope;
 mod delivery;
 mod receive_offer;
 mod receive_offer_doubles;
+#[cfg(feature = "iroh-integration-tests")]
+mod receive_offer_real;
 mod restart;
 mod subscription_status;

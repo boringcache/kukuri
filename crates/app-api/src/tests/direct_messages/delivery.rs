@@ -1,4 +1,215 @@
 use super::super::*;
+use super::receive_offer_doubles::OfferBlobService;
+
+#[tokio::test]
+async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_row() {
+    use kukuri_core::{BlobHash, ReceiveOfferScopeV1};
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+    use kukuri_transport::EndpointAddr;
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let local = sender.public_key_hex();
+    let peer = recipient.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local.clone(),
+            author_pubkey: peer.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let row = DirectMessageOutboxRow {
+        dm_id: direct_message_id_for_participants(&sender.public_key(), &recipient.public_key()),
+        message_id: "account-offer-message".into(),
+        peer_pubkey: peer.clone(),
+        frame_blob_hash: BlobHash::new("aa".repeat(32)),
+        created_at: 42,
+        last_attempt_at: None,
+    };
+    store.put_direct_message_outbox(row.clone()).await.unwrap();
+    let destination = EndpointAddr::new(iroh::SecretKey::from_bytes(&[23; 32]).public());
+    let provider = iroh::SecretKey::from_bytes(&[24; 32]).public();
+    let hints = Arc::new(TrackingHintTransport::default());
+    *hints.resolved_destination.lock().await = Some(destination.clone());
+    let blobs = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
+    let services = ServiceHandles::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(
+            StaticTransport::new(PeerSnapshot::default())
+                .with_local_endpoint_id(provider.to_string()),
+        ),
+        hints.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        blobs.clone(),
+        sender.clone(),
+    );
+    let (published, _, _) =
+        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
+            .await
+            .unwrap();
+    assert_eq!(published, 1);
+    assert_eq!(hints.resolved_count.load(Ordering::SeqCst), 1);
+    let offers = hints.offers.lock().await;
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].0, recipient.public_key());
+    assert_eq!(offers[0].1.id, destination.id);
+    let opened = offers[0]
+        .2
+        .open(&recipient, Utc::now().timestamp_millis())
+        .unwrap();
+    assert_eq!(opened.sender(), &sender.public_key());
+    assert_eq!(
+        opened.reference().provider_endpoint_id,
+        provider.to_string()
+    );
+    assert_eq!(opened.reference().payload_bytes, 0);
+    assert!(opened.reference().payload_hash.as_str().is_empty());
+    assert!(
+        matches!(&opened.reference().scope, ReceiveOfferScopeV1::DirectMessageFrame { dm_id, message_id, frame_hash }
+        if dm_id == &row.dm_id && message_id == &row.message_id && frame_hash == &row.frame_blob_hash)
+    );
+    assert_eq!(blobs.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    drop(offers);
+    let _busy = services
+        .account_dm_offer_permits
+        .acquire_many(4)
+        .await
+        .unwrap();
+    timeout(
+        Duration::from_secs(1),
+        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None),
+    )
+    .await
+    .expect("busy account offer permits must defer without queuing")
+    .unwrap();
+    assert_eq!(hints.offers.lock().await.len(), 1);
+    assert!(
+        store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    drop(_busy);
+    hints.fail_offer_publish.store(true, Ordering::SeqCst);
+    AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
+        .await
+        .unwrap();
+    assert!(hints.resolved_destination.lock().await.is_none());
+    assert_eq!(hints.offers.lock().await.len(), 1);
+    assert!(
+        store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn revoked_mutual_after_destination_lookup_sends_no_account_dm_offer() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+    use kukuri_transport::EndpointAddr;
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let local = sender.public_key_hex();
+    let peer = recipient.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local.clone(),
+            author_pubkey: peer.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let row = DirectMessageOutboxRow {
+        dm_id: direct_message_id_for_participants(&sender.public_key(), &recipient.public_key()),
+        message_id: "revoked-while-resolving-destination".into(),
+        peer_pubkey: peer.clone(),
+        frame_blob_hash: BlobHash::new("bb".repeat(32)),
+        created_at: 42,
+        last_attempt_at: None,
+    };
+    store.put_direct_message_outbox(row.clone()).await.unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut hint_double = TrackingHintTransport::default();
+    hint_double.resolve_barrier = Some(barrier.clone());
+    let hints = Arc::new(hint_double);
+    *hints.resolved_destination.lock().await = Some(EndpointAddr::new(
+        iroh::SecretKey::from_bytes(&[26; 32]).public(),
+    ));
+    let blob = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
+    let services = ServiceHandles::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(
+            StaticTransport::new(PeerSnapshot::default()).with_local_endpoint_id(
+                iroh::SecretKey::from_bytes(&[27; 32]).public().to_string(),
+            ),
+        ),
+        hints.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        blob.clone(),
+        sender,
+    );
+    let local_for_revoke = local.clone();
+    let flush = tokio::spawn(async move {
+        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
+            .await
+    });
+    timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .expect("destination lookup must reach the pause");
+    SocialProjectionStore::rebuild_author_relationships(store.as_ref(), &local_for_revoke, vec![])
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .expect("destination lookup must resume");
+    flush.await.unwrap().unwrap();
+    assert!(hints.offers.lock().await.is_empty());
+    assert_eq!(blob.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
 
 #[tokio::test]
 async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
@@ -84,6 +295,11 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
         assert_eq!(
             hint_transport.published_count.load(Ordering::SeqCst),
             [64, 128, 130][page_index]
+        );
+        assert_eq!(
+            hint_transport.resolved_count.load(Ordering::SeqCst),
+            page_index + 1,
+            "recipient binding lookup must run once per peer page, not once per row"
         );
         cursor = next;
         cycle_end = end;

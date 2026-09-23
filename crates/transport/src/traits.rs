@@ -145,6 +145,16 @@ pub trait HintTransport: Send + Sync {
         anyhow::bail!("authenticated receive destination invalidation is not supported")
     }
 
+    /// Verify that the live QUIC endpoint is currently bound to `sender`
+    /// before an inline receive reference can initiate a blob fetch.
+    async fn verify_receive_provider(
+        &self,
+        _sender: &Pubkey,
+        _provider: EndpointAddr,
+    ) -> Result<()> {
+        anyhow::bail!("authenticated receive provider verification is not supported")
+    }
+
     /// A new lease supersedes the previous consumer, including for the same
     /// account. The underlying route may be reused, but the old stream ends.
     async fn subscribe_receive_offers(
