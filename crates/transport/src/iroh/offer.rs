@@ -48,28 +48,48 @@ impl IrohGossipTransport {
     pub(super) async fn subscribe_receive_offers_impl(
         &self,
         recipient: &Pubkey,
-    ) -> Result<ReceiveOfferStream> {
+        expected: Option<ReceiveOfferLease>,
+        if_vacant: bool,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
         );
         let route = receive_route_for_account(recipient)?;
         let mut current = self.receive_offer_topic.lock().await;
+        if if_vacant && current.is_some() {
+            return Ok(None);
+        }
+        if let Some(expected) = expected
+            && !current
+                .as_ref()
+                .is_some_and(|state| state.route == route.as_str() && state.lease == expected)
+        {
+            return Ok(None);
+        }
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
         );
-        if let Some(state) = current.as_ref()
+        if let Some(state) = current.as_mut()
             && state.route == route.as_str()
             && !state.closing
             && !state.receiver_task.is_finished()
         {
-            return Ok(stream_from_offer_sender(&state.broadcaster, &state.stop));
+            let _ = state.stop.send(ReceiveOfferStop::Superseded);
+            let (stop, _) = watch::channel(ReceiveOfferStop::Active);
+            state.stop = stop;
+            state.lease = ReceiveOfferLease::for_instance(self.receive_offer_instance);
+            return Ok(Some((
+                state.lease,
+                stream_from_offer_sender(&state.broadcaster, &state.stop),
+                state.stop.subscribe(),
+            )));
         }
         if current.is_some() {
             let old = current.as_mut().expect("offer route exists");
             old.closing = true;
-            let _ = old.stop.send(true);
+            let _ = old.stop.send(ReceiveOfferStop::Superseded);
             old.receiver_task.abort();
             let _ = (&mut old.receiver_task).await;
             current.take();
@@ -94,7 +114,7 @@ impl IrohGossipTransport {
             .await?;
         let (sender, mut receiver) = topic.split();
         let (broadcaster, _) = broadcast::channel(64);
-        let (stop, _) = watch::channel(false);
+        let (stop, _) = watch::channel(ReceiveOfferStop::Active);
         let forward = broadcaster.clone();
         // Registration cannot suspend after the receiver task is spawned.
         anyhow::ensure!(
@@ -119,27 +139,37 @@ impl IrohGossipTransport {
                 }
             }
         });
+        let lease = ReceiveOfferLease::for_instance(self.receive_offer_instance);
         *current = Some(ReceiveOfferTopicState {
             route: route.as_str().to_string(),
+            lease,
             closing: false,
             broadcaster: broadcaster.clone(),
             stop: stop.clone(),
             _sender: sender,
             receiver_task: task,
         });
-        Ok(stream_from_offer_sender(&broadcaster, &stop))
+        Ok(Some((
+            lease,
+            stream_from_offer_sender(&broadcaster, &stop),
+            stop.subscribe(),
+        )))
     }
 
-    pub(super) async fn unsubscribe_receive_offers_impl(&self, recipient: &Pubkey) -> Result<()> {
+    pub(super) async fn unsubscribe_receive_offers_impl(
+        &self,
+        recipient: &Pubkey,
+        lease: ReceiveOfferLease,
+    ) -> Result<()> {
         let route = receive_route_for_account(recipient)?;
         let mut current = self.receive_offer_topic.lock().await;
         if current
             .as_ref()
-            .is_some_and(|state| state.route == route.as_str())
+            .is_some_and(|state| state.route == route.as_str() && state.lease == lease)
         {
             let old = current.as_mut().expect("matching offer route");
             old.closing = true;
-            let _ = old.stop.send(true);
+            let _ = old.stop.send(ReceiveOfferStop::Closed);
             old.receiver_task.abort();
             let _ = (&mut old.receiver_task).await;
             current.take();
@@ -242,7 +272,7 @@ impl IrohGossipTransport {
         if current.is_some() {
             let state = current.as_mut().expect("offer route exists");
             state.closing = true;
-            let _ = state.stop.send(true);
+            let _ = state.stop.send(ReceiveOfferStop::TransportClosed);
             state.receiver_task.abort();
             let _ = (&mut state.receiver_task).await;
             current.take();
@@ -264,13 +294,13 @@ impl IrohGossipTransport {
 
 fn stream_from_offer_sender(
     sender: &broadcast::Sender<ReceiveOfferEnvelope>,
-    stop: &watch::Sender<bool>,
+    stop: &watch::Sender<ReceiveOfferStop>,
 ) -> ReceiveOfferStream {
     let stream = stream::unfold(
         (sender.subscribe(), stop.subscribe()),
         |(mut receiver, mut stop)| async move {
             loop {
-                if *stop.borrow() {
+                if *stop.borrow() != ReceiveOfferStop::Active {
                     return None;
                 }
                 tokio::select! {

@@ -49,8 +49,8 @@ use crate::tickets::{
     encode_endpoint_ticket, endpoint_addr_with_relays, parse_endpoint_ticket, ticket_network_config,
 };
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
-    ReceiveOfferStream, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
+    ReceiveOfferStop, ReceiveOfferStream, ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
 };
 
 struct HintTopicState {
@@ -72,12 +72,15 @@ struct HintTopicState {
 
 struct ReceiveOfferTopicState {
     route: String,
+    lease: ReceiveOfferLease,
     closing: bool,
     broadcaster: broadcast::Sender<ReceiveOfferEnvelope>,
-    stop: watch::Sender<bool>,
+    stop: watch::Sender<ReceiveOfferStop>,
     _sender: GossipSender,
     receiver_task: JoinHandle<()>,
 }
+
+static NEXT_RECEIVE_OFFER_TRANSPORT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 struct OutboundOfferHold {
     expires_at: tokio::time::Instant,
@@ -111,6 +114,7 @@ pub struct TransportPeerState {
 }
 
 pub struct IrohGossipTransport {
+    receive_offer_instance: u64,
     endpoint: Endpoint,
     gossip: Gossip,
     _router: Option<Router>,
@@ -178,7 +182,7 @@ impl Drop for IrohGossipTransport {
             subscribed_topics.clear();
         }
         if let Some(offer) = self.receive_offer_topic.get_mut().take() {
-            let _ = offer.stop.send(true);
+            let _ = offer.stop.send(ReceiveOfferStop::TransportClosed);
             offer.receiver_task.abort();
         }
         for hold in self.outbound_offer_holds.get_mut().drain(..) {
@@ -230,12 +234,42 @@ impl HintTransport for IrohGossipTransport {
         self.hint_publish_hint_impl(topic, hint).await
     }
 
-    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
-        self.subscribe_receive_offers_impl(recipient).await
+    async fn subscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<ReceiveOfferSubscription> {
+        self.subscribe_receive_offers_impl(recipient, None, false)
+            .await?
+            .ok_or_else(|| anyhow!("account receive route was superseded"))
     }
 
-    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
-        self.unsubscribe_receive_offers_impl(recipient).await
+    async fn resubscribe_receive_offers_if_current(
+        &self,
+        recipient: &Pubkey,
+        expected: ReceiveOfferLease,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        self.subscribe_receive_offers_impl(recipient, Some(expected), false)
+            .await
+    }
+
+    async fn subscribe_receive_offers_if_vacant(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        self.subscribe_receive_offers_impl(recipient, None, true)
+            .await
+    }
+
+    async fn receive_offer_transport_instance(&self) -> Result<u64> {
+        Ok(self.receive_offer_instance)
+    }
+
+    async fn unsubscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+        lease: ReceiveOfferLease,
+    ) -> Result<()> {
+        self.unsubscribe_receive_offers_impl(recipient, lease).await
     }
 
     async fn publish_receive_offer(

@@ -300,3 +300,11 @@ N64は再送tickと新規送信時のoutbox読取りだけを有限化する。`
 | N65 | DM状態/会話表示 → `direct_message_status_view` → `list_direct_message_outbox_for_peer_page` | peer別索引の先頭64行だけを読み、続きがある場合は`pending_outbox_has_more`を立てて画面で`64+`と表示。0〜64件は正確な値を維持。CLIの厳格出力schemaにもflagを登録。保護outboxを削除せず、送信・ACK判定へ計数を流用しない | `dm_status_uses_a_bounded_peer_outbox_window`、`dm_status_and_conversation_outputs_accept_the_bounded_count_flag`、既存DM状態・送信待ち/restart・IPC型/表示契約 |
 
 N65は個別状態表示の全outbox走査だけを除く。会話一覧全件、起動時の全outbox/会話/相互peer走査、peerごとの常時taskは残る。N64の「未完了」記録は当時の状態として残し、この欄で差分を示す。
+
+## Account受信routeのアプリDM入口（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N66 | runtime identity load → `start_account_receive_offers` → sealed offer復号/署名確認 → scope/DM mutual → provider限定manifest一時取得 → 既存DM frame取込 | accountごと1route、同時最大4future。未移行scopeはprovider I/O前に拒否し旧受信routeを維持。DM mutualをmanifest・frame・各添付fetch後とplaintext保存前に再確認。route解除はprocess一意leaseで旧世代を弾き、shutdown取消後もleaseを保持して再開する。旧streamのsupersede時は実行中futureを取消して停止。stack再構築時だけ新transportの空routeを条件付きで取得して復旧する。予期しないapp owner dropは処理taskをabortし、route自体はtransport寿命が所有する | `account_receive_offer_rejects_unmutual_and_other_scopes_before_provider_io`、`account_route_ingests_verified_mutual_dm_and_stops_on_shutdown`、`account_offer_rechecks_mutual_after_provider_io_before_reflection`、`revoked_mutual_during_attachment_fetch_never_persists_plaintext`、`old_account_owner_shutdown_cannot_stop_new_same_account_receiver`、`superseding_account_owner_cancels_old_in_flight_provider_fetch`、`cancelled_shutdown_retries_the_account_route_lease_cleanup`、`stale_same_account_lease_cannot_unsubscribe_a_new_receiver`、`app_account_listener_reclaims_vacant_route_after_stack_rebuild`、停止/Drop、実Iroh `real_account_route_fetches_bound_provider_manifest_and_reflects_dm`、既存DM delivery/restart、runtime binding |
+
+N66のDM manifestは既存`GossipHint::DirectMessageFrame`のJSONをprovider限定65,536byte以内の一時参照として使い、復号済みsenderと導出DM topicが一致した場合だけ既存frame検証・通知へ渡す。新送信側のaccount→endpoint binding解決とoffer発行、ACKのaccount route化、公開通知/private epochのscope guardと反映は残件。旧pairwise受信・outboxは撤去せず、D2の受信範囲と保護データを維持する。
