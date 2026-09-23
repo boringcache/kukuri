@@ -29,7 +29,10 @@ async fn assert_dispatch_pages(store: &dyn NotificationStore) {
     }
     assert!(!store.put_notification_if_absent(row(0)).await.unwrap());
     assert_eq!(store.notification_dispatch_head().await.unwrap(), 129);
-    store.mark_notification_read("notification-64", 30).await.unwrap();
+    store
+        .mark_notification_read("notification-64", 30)
+        .await
+        .unwrap();
 
     let first = store.list_notification_dispatch_after(0).await.unwrap();
     let second = store.list_notification_dispatch_after(64).await.unwrap();
