@@ -14,6 +14,7 @@ use super::*;
 pub(crate) struct SubscriptionRegistry {
     /// Accountごとに一つの暗号化offer受信task。dropでも実行中の取得を中止する。
     pub(crate) account_receive_offer_task: Arc<Mutex<Option<AbortOnDropTask>>>,
+    pub(crate) account_receive_offer_lease: Arc<std::sync::Mutex<Option<ReceiveOfferLease>>>,
     pub(crate) account_receive_offer_closed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) account_receive_offer_shutdown: Arc<tokio::sync::Notify>,
     /// 公開 topic の購読 task(key = topic_id)。

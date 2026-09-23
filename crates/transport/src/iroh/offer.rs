@@ -48,7 +48,7 @@ impl IrohGossipTransport {
     pub(super) async fn subscribe_receive_offers_impl(
         &self,
         recipient: &Pubkey,
-    ) -> Result<ReceiveOfferStream> {
+    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
@@ -59,12 +59,19 @@ impl IrohGossipTransport {
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
         );
-        if let Some(state) = current.as_ref()
+        if let Some(state) = current.as_mut()
             && state.route == route.as_str()
             && !state.closing
             && !state.receiver_task.is_finished()
         {
-            return Ok(stream_from_offer_sender(&state.broadcaster, &state.stop));
+            let _ = state.stop.send(true);
+            let (stop, _) = watch::channel(false);
+            state.stop = stop;
+            state.lease = next_receive_offer_lease();
+            return Ok((
+                state.lease,
+                stream_from_offer_sender(&state.broadcaster, &state.stop),
+            ));
         }
         if current.is_some() {
             let old = current.as_mut().expect("offer route exists");
@@ -119,23 +126,29 @@ impl IrohGossipTransport {
                 }
             }
         });
+        let lease = next_receive_offer_lease();
         *current = Some(ReceiveOfferTopicState {
             route: route.as_str().to_string(),
+            lease,
             closing: false,
             broadcaster: broadcaster.clone(),
             stop: stop.clone(),
             _sender: sender,
             receiver_task: task,
         });
-        Ok(stream_from_offer_sender(&broadcaster, &stop))
+        Ok((lease, stream_from_offer_sender(&broadcaster, &stop)))
     }
 
-    pub(super) async fn unsubscribe_receive_offers_impl(&self, recipient: &Pubkey) -> Result<()> {
+    pub(super) async fn unsubscribe_receive_offers_impl(
+        &self,
+        recipient: &Pubkey,
+        lease: ReceiveOfferLease,
+    ) -> Result<()> {
         let route = receive_route_for_account(recipient)?;
         let mut current = self.receive_offer_topic.lock().await;
         if current
             .as_ref()
-            .is_some_and(|state| state.route == route.as_str())
+            .is_some_and(|state| state.route == route.as_str() && state.lease == lease)
         {
             let old = current.as_mut().expect("matching offer route");
             old.closing = true;

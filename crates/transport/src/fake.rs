@@ -27,8 +27,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
-    ReceiveOfferStream, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
+    ReceiveOfferStream, TopicPeerSnapshot, Transport, next_receive_offer_lease,
 };
 
 #[derive(Clone, Default)]
@@ -41,6 +41,7 @@ pub struct FakeNetwork {
 
 struct FakeOfferRoute {
     route: String,
+    lease: ReceiveOfferLease,
     stop: watch::Sender<bool>,
 }
 
@@ -318,24 +319,23 @@ impl HintTransport for FakeTransport {
         Ok(())
     }
 
-    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+    async fn subscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
         let route = receive_route_for_account(recipient)?;
         let sender = self.offer_sender(recipient).await?;
         let mut active = self.active_offer_route.lock().await;
-        let stop = match active.as_ref() {
-            Some(current) if current.route == route.as_str() => current.stop.clone(),
-            _ => {
-                if let Some(old) = active.take() {
-                    let _ = old.stop.send(true);
-                }
-                let (stop, _) = watch::channel(false);
-                *active = Some(FakeOfferRoute {
-                    route: route.as_str().to_string(),
-                    stop: stop.clone(),
-                });
-                stop
-            }
-        };
+        if let Some(old) = active.take() {
+            let _ = old.stop.send(true);
+        }
+        let (stop, _) = watch::channel(false);
+        let lease = next_receive_offer_lease();
+        *active = Some(FakeOfferRoute {
+            route: route.as_str().to_string(),
+            lease,
+            stop: stop.clone(),
+        });
         let stream = stream::unfold(
             (sender.subscribe(), stop.subscribe()),
             |(mut receiver, mut stop)| async move {
@@ -358,15 +358,19 @@ impl HintTransport for FakeTransport {
                 }
             },
         );
-        Ok(Box::pin(stream))
+        Ok((lease, Box::pin(stream)))
     }
 
-    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
+    async fn unsubscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+        lease: ReceiveOfferLease,
+    ) -> Result<()> {
         let route = receive_route_for_account(recipient)?;
         let mut active = self.active_offer_route.lock().await;
         if active
             .as_ref()
-            .is_some_and(|current| current.route == route.as_str())
+            .is_some_and(|current| current.route == route.as_str() && current.lease == lease)
         {
             let old = active.take().expect("matching offer route");
             let _ = old.stop.send(true);
@@ -408,11 +412,11 @@ mod tests {
         let sender = KukuriKeys::generate();
         let old = KukuriKeys::generate();
         let current = KukuriKeys::generate();
-        let mut old_stream = transport
+        let (_, mut old_stream) = transport
             .subscribe_receive_offers(&old.public_key())
             .await
             .unwrap();
-        let mut current_stream = transport
+        let (current_lease, mut current_stream) = transport
             .subscribe_receive_offers(&current.public_key())
             .await
             .unwrap();
@@ -443,7 +447,7 @@ mod tests {
             "switch must close the old account stream before further delivery"
         );
         transport
-            .unsubscribe_receive_offers(&current.public_key())
+            .unsubscribe_receive_offers(&current.public_key(), current_lease)
             .await
             .unwrap();
         let current_offer = seal_receive_offer(

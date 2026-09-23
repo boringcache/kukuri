@@ -1,11 +1,12 @@
 use super::super::*;
 use kukuri_core::{ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer};
-use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferStream};
+use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferLease, ReceiveOfferStream};
 
 #[derive(Default)]
 struct ProbeOfferTransport {
     unsubscribes: AtomicUsize,
     subscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
+    unsubscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
     stream_drops: Arc<AtomicUsize>,
 }
 
@@ -42,18 +43,32 @@ impl HintTransport for ProbeOfferTransport {
         Ok(())
     }
 
-    async fn subscribe_receive_offers(&self, _recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+    async fn subscribe_receive_offers(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
         if let Some(barrier) = &self.subscribe_barrier {
             barrier.wait().await;
             barrier.wait().await;
         }
-        Ok(Box::pin(CountedPendingOfferStream(Arc::clone(
-            &self.stream_drops,
-        ))))
+        Ok((
+            ReceiveOfferLease::fresh(),
+            Box::pin(CountedPendingOfferStream(Arc::clone(&self.stream_drops))),
+        ))
     }
 
-    async fn unsubscribe_receive_offers(&self, _recipient: &Pubkey) -> Result<()> {
-        self.unsubscribes.fetch_add(1, Ordering::SeqCst);
+    async fn unsubscribe_receive_offers(
+        &self,
+        _recipient: &Pubkey,
+        _lease: ReceiveOfferLease,
+    ) -> Result<()> {
+        let attempt = self.unsubscribes.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0
+            && let Some(barrier) = &self.unsubscribe_barrier
+        {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
         Ok(())
     }
 }
@@ -63,6 +78,9 @@ struct OfferBlobService {
     inner: Arc<MemoryBlobService>,
     fetches: Arc<AtomicUsize>,
     barrier: Option<Arc<tokio::sync::Barrier>>,
+    pause_blob_hash: Option<kukuri_core::BlobHash>,
+    attachment_barrier: Option<Arc<tokio::sync::Barrier>>,
+    writes: Arc<AtomicUsize>,
 }
 
 impl OfferBlobService {
@@ -71,6 +89,9 @@ impl OfferBlobService {
             inner,
             fetches: Arc::new(AtomicUsize::new(0)),
             barrier: None,
+            pause_blob_hash: None,
+            attachment_barrier: None,
+            writes: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -78,10 +99,17 @@ impl OfferBlobService {
 #[async_trait]
 impl BlobService for OfferBlobService {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
         self.inner.put_blob(data, mime).await
     }
 
     async fn fetch_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        if self.pause_blob_hash.as_ref() == Some(hash)
+            && let Some(barrier) = &self.attachment_barrier
+        {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
         self.inner.fetch_blob(hash).await
     }
 
@@ -464,6 +492,126 @@ async fn account_offer_rechecks_mutual_after_provider_io_before_reflection() {
 }
 
 #[tokio::test]
+async fn revoked_mutual_during_attachment_fetch_never_persists_plaintext() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    let memory_blob = Arc::new(MemoryBlobService::default());
+    let message_id = "revoke-during-attachment";
+    let encrypted = encrypt_direct_message_attachment(
+        &sender,
+        &recipient.public_key(),
+        message_id,
+        "attachment-1",
+        b"private attachment",
+    )
+    .unwrap();
+    let encrypted_blob = memory_blob
+        .put_blob(
+            serde_json::to_vec(&encrypted).unwrap(),
+            "application/vnd.kukuri.direct-message-attachment+json",
+        )
+        .await
+        .unwrap();
+    let dm_id = direct_message_id_for_participants(&sender.public_key(), &recipient.public_key());
+    let frame = encrypt_direct_message_frame(
+        &sender,
+        &recipient.public_key(),
+        &dm_id,
+        message_id,
+        Utc::now().timestamp_millis(),
+        &DirectMessagePayloadV1 {
+            text: None,
+            reply_to: None,
+            attachment_manifest: Some(DirectMessageAttachmentManifestV1 {
+                attachment_id: "attachment-1".into(),
+                kind: DirectMessageAttachmentKind::Image,
+                original: DirectMessageEncryptedBlobRefV1 {
+                    blob_id: "attachment-1".into(),
+                    hash: encrypted_blob.hash.clone(),
+                    mime: "image/png".into(),
+                    bytes: 18,
+                    nonce_hex: encrypted.nonce_hex,
+                },
+                poster: None,
+            }),
+        },
+    )
+    .unwrap();
+    let frame_blob = memory_blob
+        .put_blob(
+            serde_json::to_vec(&frame).unwrap(),
+            DIRECT_MESSAGE_FRAME_MIME,
+        )
+        .await
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut wrapped = OfferBlobService::new(memory_blob);
+    wrapped.pause_blob_hash = Some(encrypted_blob.hash);
+    wrapped.attachment_barrier = Some(barrier.clone());
+    let blob = Arc::new(wrapped);
+    let app = offer_app(
+        recipient.clone(),
+        store.clone(),
+        Arc::new(FakeTransport::new("recipient", FakeNetwork::default())),
+        blob.clone(),
+    );
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &recipient.public_key_hex(),
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: recipient.public_key_hex(),
+            author_pubkey: sender.public_key_hex(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let topic = derive_direct_message_topic(&recipient, &sender.public_key()).unwrap();
+    let recipient_pubkey = recipient.public_key_hex();
+    let sender_pubkey = sender.public_key_hex();
+    let dm_id_for_task = dm_id.clone();
+    let frame_hash = frame_blob.hash;
+    let services = app.services.clone();
+    let ingest = tokio::spawn(async move {
+        AppService::ingest_direct_message_frame(
+            &services,
+            &recipient_pubkey,
+            &sender_pubkey,
+            &topic,
+            &dm_id_for_task,
+            message_id,
+            &frame_hash,
+        )
+        .await
+    });
+    timeout(Duration::from_secs(2), barrier.wait())
+        .await
+        .expect("attachment fetch started");
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &recipient.public_key_hex(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    barrier.wait().await;
+    assert!(!ingest.await.unwrap().unwrap());
+    assert_eq!(blob.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        DirectMessageStore::get_direct_message_message(store.as_ref(), &dm_id, message_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn dropping_account_owner_aborts_offer_stream() {
     let store = Arc::new(MemoryStore::default());
     let transport = Arc::new(ProbeOfferTransport::default());
@@ -494,6 +642,7 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
     let transport = Arc::new(ProbeOfferTransport {
         unsubscribes: AtomicUsize::new(0),
         subscribe_barrier: Some(barrier.clone()),
+        unsubscribe_barrier: None,
         stream_drops: Arc::new(AtomicUsize::new(0)),
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
@@ -521,6 +670,56 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
             .account_receive_offer_task
             .lock()
             .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_shutdown_retries_the_account_route_lease_cleanup() {
+    let store = Arc::new(MemoryStore::default());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let transport = Arc::new(ProbeOfferTransport {
+        unsubscribes: AtomicUsize::new(0),
+        subscribe_barrier: None,
+        unsubscribe_barrier: Some(barrier.clone()),
+        stream_drops: Arc::new(AtomicUsize::new(0)),
+    });
+    let app = Arc::new(AppService::from_handles(ServiceHandles::new(
+        store.clone(),
+        store,
+        Arc::new(StaticTransport::new(PeerSnapshot::default())),
+        transport.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        generate_keys(),
+    )));
+    app.start_account_receive_offers().await.unwrap();
+    let first_shutdown = {
+        let app = app.clone();
+        tokio::spawn(async move { app.shutdown().await })
+    };
+    timeout(Duration::from_secs(1), barrier.wait())
+        .await
+        .expect("first unsubscribe started");
+    first_shutdown.abort();
+    let _ = first_shutdown.await;
+    assert!(
+        app.subscription_registry
+            .account_receive_offer_lease
+            .lock()
+            .unwrap()
+            .is_some(),
+        "cancelled cleanup must retain its lease"
+    );
+    timeout(Duration::from_secs(1), app.shutdown())
+        .await
+        .expect("next shutdown should retry unsubscribe");
+    assert_eq!(transport.unsubscribes.load(Ordering::SeqCst), 2);
+    assert!(
+        app.subscription_registry
+            .account_receive_offer_lease
+            .lock()
+            .unwrap()
             .is_none()
     );
 }
@@ -580,6 +779,69 @@ async fn shutdown_cancels_an_in_flight_account_offer_provider_fetch() {
             .await
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn old_account_owner_shutdown_cannot_stop_new_same_account_receiver() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let network = FakeNetwork::default();
+    let receiver = Arc::new(FakeTransport::new("recipient", network.clone()));
+    let publisher = FakeTransport::new("sender", network);
+    let old_store = Arc::new(MemoryStore::default());
+    let new_store = Arc::new(MemoryStore::default());
+    for store in [&old_store, &new_store] {
+        SocialProjectionStore::rebuild_author_relationships(
+            store.as_ref(),
+            &recipient.public_key_hex(),
+            vec![AuthorRelationshipProjectionRow {
+                local_author_pubkey: recipient.public_key_hex(),
+                author_pubkey: sender.public_key_hex(),
+                following: true,
+                followed_by: true,
+                mutual: true,
+                friend_of_friend: false,
+                friend_of_friend_via_pubkeys: Vec::new(),
+                derived_at: 1,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+    let old_app = offer_app(
+        recipient.clone(),
+        old_store,
+        receiver.clone(),
+        Arc::new(OfferBlobService::new(
+            Arc::new(MemoryBlobService::default()),
+        )),
+    );
+    let new_blob = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
+    let new_app = offer_app(recipient.clone(), new_store, receiver, new_blob.clone());
+    old_app.start_account_receive_offers().await.unwrap();
+    new_app.start_account_receive_offers().await.unwrap();
+    old_app.shutdown().await;
+    let (provider, offer) = offer_for(
+        &sender,
+        &recipient,
+        ReceiveOfferScopeV1::DirectMessage,
+        kukuri_core::BlobHash::new("11".repeat(32)),
+        1,
+    );
+    publisher
+        .publish_receive_offer(&recipient.public_key(), provider, offer)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), async {
+        while new_blob.fetches.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new account route must survive old owner shutdown");
+    new_app.shutdown().await;
 }
 
 #[cfg(feature = "iroh-integration-tests")]

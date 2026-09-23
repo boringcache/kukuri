@@ -49,8 +49,8 @@ use crate::tickets::{
     encode_endpoint_ticket, endpoint_addr_with_relays, parse_endpoint_ticket, ticket_network_config,
 };
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
-    ReceiveOfferStream, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
+    ReceiveOfferStream, TopicPeerSnapshot, Transport, next_receive_offer_lease,
 };
 
 struct HintTopicState {
@@ -72,6 +72,7 @@ struct HintTopicState {
 
 struct ReceiveOfferTopicState {
     route: String,
+    lease: ReceiveOfferLease,
     closing: bool,
     broadcaster: broadcast::Sender<ReceiveOfferEnvelope>,
     stop: watch::Sender<bool>,
@@ -230,12 +231,19 @@ impl HintTransport for IrohGossipTransport {
         self.hint_publish_hint_impl(topic, hint).await
     }
 
-    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+    async fn subscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
         self.subscribe_receive_offers_impl(recipient).await
     }
 
-    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
-        self.unsubscribe_receive_offers_impl(recipient).await
+    async fn unsubscribe_receive_offers(
+        &self,
+        recipient: &Pubkey,
+        lease: ReceiveOfferLease,
+    ) -> Result<()> {
+        self.unsubscribe_receive_offers_impl(recipient, lease).await
     }
 
     async fn publish_receive_offer(

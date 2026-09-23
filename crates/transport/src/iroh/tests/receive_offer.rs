@@ -21,7 +21,7 @@ async fn account_receive_offer_crosses_real_gossip_with_one_recipient_route() {
     right.discovery.add_endpoint_info(left.endpoint.addr());
     let sender = KukuriKeys::generate();
     let recipient = KukuriKeys::generate();
-    let mut incoming = right
+    let (lease, mut incoming) = right
         .subscribe_receive_offers(&recipient.public_key())
         .await
         .unwrap();
@@ -78,7 +78,7 @@ async fn account_receive_offer_crosses_real_gossip_with_one_recipient_route() {
     }
 
     right
-        .unsubscribe_receive_offers(&recipient.public_key())
+        .unsubscribe_receive_offers(&recipient.public_key(), lease)
         .await
         .unwrap();
     drop(incoming);
@@ -93,8 +93,9 @@ async fn account_receive_route_replaces_the_previous_account_subscription() {
     let mut transport = IrohGossipTransport::bind_local().await.unwrap();
     let old = KukuriKeys::generate().public_key();
     let current = KukuriKeys::generate().public_key();
-    let _old_stream = transport.subscribe_receive_offers(&old).await.unwrap();
-    let mut current_stream = transport.subscribe_receive_offers(&current).await.unwrap();
+    let (old_lease, _old_stream) = transport.subscribe_receive_offers(&old).await.unwrap();
+    let (current_lease, mut current_stream) =
+        transport.subscribe_receive_offers(&current).await.unwrap();
     assert_eq!(
         transport
             .receive_offer_topic
@@ -107,15 +108,57 @@ async fn account_receive_route_replaces_the_previous_account_subscription() {
             .unwrap()
             .as_str()
     );
-    transport.unsubscribe_receive_offers(&old).await.unwrap();
+    transport
+        .unsubscribe_receive_offers(&old, old_lease)
+        .await
+        .unwrap();
     assert!(transport.receive_offer_topic.lock().await.is_some());
     transport
-        .unsubscribe_receive_offers(&current)
+        .unsubscribe_receive_offers(&current, current_lease)
         .await
         .unwrap();
     assert!(transport.receive_offer_topic.lock().await.is_none());
     assert!(
         timeout(Duration::from_millis(100), current_stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_same_account_lease_cannot_unsubscribe_a_new_receiver() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let recipient = KukuriKeys::generate().public_key();
+    let (old_lease, mut old_stream) = transport
+        .subscribe_receive_offers(&recipient)
+        .await
+        .unwrap();
+    let (new_lease, mut new_stream) = transport
+        .subscribe_receive_offers(&recipient)
+        .await
+        .unwrap();
+    assert_ne!(old_lease, new_lease);
+    assert!(
+        timeout(Duration::from_millis(100), old_stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    transport
+        .unsubscribe_receive_offers(&recipient, old_lease)
+        .await
+        .unwrap();
+    assert!(transport.receive_offer_topic.lock().await.is_some());
+    transport
+        .unsubscribe_receive_offers(&recipient, new_lease)
+        .await
+        .unwrap();
+    assert!(transport.receive_offer_topic.lock().await.is_none());
+    assert!(
+        timeout(Duration::from_millis(100), new_stream.next())
             .await
             .unwrap()
             .is_none()

@@ -1,3 +1,4 @@
+use super::attachment_support::DirectMessageMaterializationGuard;
 use super::*;
 
 pub(crate) struct DirectMessageHintServices<'a> {
@@ -245,12 +246,20 @@ impl AppService {
         }
         let local_manifest = materialize_direct_message_manifest(
             blob_service,
+            &DirectMessageMaterializationGuard {
+                projection_store,
+                local_author_pubkey,
+                peer_pubkey,
+            },
             keys,
             &frame.sender,
             frame.message_id.as_str(),
             payload.attachment_manifest.as_ref(),
         )
         .await?;
+        if payload.attachment_manifest.is_some() && local_manifest.is_none() {
+            return Ok(false);
+        }
         if !projection_store
             .get_author_relationship(local_author_pubkey, peer_pubkey)
             .await?

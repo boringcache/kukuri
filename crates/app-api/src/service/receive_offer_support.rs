@@ -11,6 +11,29 @@ const RECEIVE_OFFER_RESTART_DELAY: Duration = Duration::from_secs(3);
 const RECEIVE_OFFER_MAX_IN_FLIGHT: usize = 4;
 
 impl AppService {
+    async fn unsubscribe_account_receive_offer_lease(&self, recipient: &Pubkey) -> Result<()> {
+        let lease = *self
+            .subscription_registry
+            .account_receive_offer_lease
+            .lock()
+            .expect("account receive lease poisoned");
+        if let Some(lease) = lease {
+            self.services
+                .hint_transport
+                .unsubscribe_receive_offers(recipient, lease)
+                .await?;
+            let mut current = self
+                .subscription_registry
+                .account_receive_offer_lease
+                .lock()
+                .expect("account receive lease poisoned");
+            if *current == Some(lease) {
+                *current = None;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn shutdown_account_receive_offers(&self) {
         self.subscription_registry
             .account_receive_offer_closed
@@ -27,11 +50,12 @@ impl AppService {
         if let Some(task) = task {
             task.abort();
             let _ = tokio::time::timeout(Duration::from_secs(2), task.wait()).await;
-            let _ = self
-                .services
-                .hint_transport
-                .unsubscribe_receive_offers(&self.services.keys.public_key())
-                .await;
+        }
+        if let Err(error) = self
+            .unsubscribe_account_receive_offer_lease(&self.services.keys.public_key())
+            .await
+        {
+            warn!(%error, "account receive route unsubscribe deferred");
         }
     }
 
@@ -61,26 +85,28 @@ impl AppService {
         if let Some(old) = owner.take() {
             old.abort();
             old.wait().await;
-            let _ = self
-                .services
-                .hint_transport
-                .unsubscribe_receive_offers(&recipient)
-                .await;
         }
-        let stream = tokio::select! {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => anyhow::bail!("account receive route is closed"),
+            result = self.unsubscribe_account_receive_offer_lease(&recipient) => result?,
+        }
+        let (lease, stream) = tokio::select! {
             biased;
             _ = &mut shutdown => anyhow::bail!("account receive route is closed"),
             result = self.services.hint_transport.subscribe_receive_offers(&recipient) => result?,
         };
+        *self
+            .subscription_registry
+            .account_receive_offer_lease
+            .lock()
+            .expect("account receive lease poisoned") = Some(lease);
         if closed.load(Ordering::Acquire) {
-            self.services
-                .hint_transport
-                .unsubscribe_receive_offers(&recipient)
-                .await?;
             anyhow::bail!("account receive route is closed");
         }
         let services = self.services.clone();
         let closed = Arc::clone(closed);
+        let lease_slot = Arc::clone(&self.subscription_registry.account_receive_offer_lease);
         let last_sync = Arc::clone(&self.last_sync_ts);
         let notification_inserted = Arc::clone(&self.notification_inserted_notify);
         *owner = Some(AbortOnDropTask::new(tokio::spawn(async move {
@@ -122,7 +148,11 @@ impl AppService {
                     .subscribe_receive_offers(&recipient)
                     .await
                 {
-                    Ok(next) => stream = Some(next),
+                    Ok((next_lease, next)) => {
+                        *lease_slot.lock().expect("account receive lease poisoned") =
+                            Some(next_lease);
+                        stream = Some(next);
+                    }
                     Err(error) => {
                         tracing::debug!(%error, "account receive route retry deferred");
                     }

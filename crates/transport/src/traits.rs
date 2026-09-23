@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,6 +12,23 @@ use crate::config::{ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 
 pub type HintStream = Pin<Box<dyn Stream<Item = HintEnvelope> + Send>>;
 pub type ReceiveOfferStream = Pin<Box<dyn Stream<Item = ReceiveOfferEnvelope> + Send>>;
+
+/// Process-unique lease so an old account owner cannot close a later receiver,
+/// including after an endpoint/transport reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiveOfferLease(u64);
+
+static NEXT_RECEIVE_OFFER_LEASE: AtomicU64 = AtomicU64::new(1);
+
+impl ReceiveOfferLease {
+    pub fn fresh() -> Self {
+        Self(NEXT_RECEIVE_OFFER_LEASE.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+pub(crate) fn next_receive_offer_lease() -> ReceiveOfferLease {
+    ReceiveOfferLease::fresh()
+}
 
 #[derive(Clone, Debug)]
 pub struct ReceiveOfferEnvelope {
@@ -82,11 +100,21 @@ pub trait HintTransport: Send + Sync {
     async fn unsubscribe_hints(&self, topic: &TopicId) -> Result<()>;
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()>;
 
-    async fn subscribe_receive_offers(&self, _recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+    /// A new lease supersedes the previous consumer, including for the same
+    /// account. The underlying route may be reused, but the old stream ends.
+    async fn subscribe_receive_offers(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
         anyhow::bail!("account receive offers are not supported by this transport")
     }
 
-    async fn unsubscribe_receive_offers(&self, _recipient: &Pubkey) -> Result<()> {
+    /// Idempotent. Only the matching lease may close the current route.
+    async fn unsubscribe_receive_offers(
+        &self,
+        _recipient: &Pubkey,
+        _lease: ReceiveOfferLease,
+    ) -> Result<()> {
         anyhow::bail!("account receive offers are not supported by this transport")
     }
 
