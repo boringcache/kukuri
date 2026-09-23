@@ -50,7 +50,8 @@ use crate::tickets::{
 };
 use crate::traits::{
     HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
-    ReceiveOfferStream, TopicPeerSnapshot, Transport, next_receive_offer_lease,
+    ReceiveOfferStream, ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
+    next_receive_offer_lease,
 };
 
 struct HintTopicState {
@@ -234,8 +235,19 @@ impl HintTransport for IrohGossipTransport {
     async fn subscribe_receive_offers(
         &self,
         recipient: &Pubkey,
-    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
-        self.subscribe_receive_offers_impl(recipient).await
+    ) -> Result<ReceiveOfferSubscription> {
+        self.subscribe_receive_offers_impl(recipient, None)
+            .await?
+            .ok_or_else(|| anyhow!("account receive route was superseded"))
+    }
+
+    async fn resubscribe_receive_offers_if_current(
+        &self,
+        recipient: &Pubkey,
+        expected: ReceiveOfferLease,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        self.subscribe_receive_offers_impl(recipient, Some(expected))
+            .await
     }
 
     async fn unsubscribe_receive_offers(

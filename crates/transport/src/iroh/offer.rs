@@ -48,13 +48,21 @@ impl IrohGossipTransport {
     pub(super) async fn subscribe_receive_offers_impl(
         &self,
         recipient: &Pubkey,
-    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
+        expected: Option<ReceiveOfferLease>,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
         );
         let route = receive_route_for_account(recipient)?;
         let mut current = self.receive_offer_topic.lock().await;
+        if let Some(expected) = expected
+            && !current
+                .as_ref()
+                .is_some_and(|state| state.route == route.as_str() && state.lease == expected)
+        {
+            return Ok(None);
+        }
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
@@ -68,10 +76,11 @@ impl IrohGossipTransport {
             let (stop, _) = watch::channel(false);
             state.stop = stop;
             state.lease = next_receive_offer_lease();
-            return Ok((
+            return Ok(Some((
                 state.lease,
                 stream_from_offer_sender(&state.broadcaster, &state.stop),
-            ));
+                state.stop.subscribe(),
+            )));
         }
         if current.is_some() {
             let old = current.as_mut().expect("offer route exists");
@@ -136,7 +145,11 @@ impl IrohGossipTransport {
             _sender: sender,
             receiver_task: task,
         });
-        Ok((lease, stream_from_offer_sender(&broadcaster, &stop)))
+        Ok(Some((
+            lease,
+            stream_from_offer_sender(&broadcaster, &stop),
+            stop.subscribe(),
+        )))
     }
 
     pub(super) async fn unsubscribe_receive_offers_impl(

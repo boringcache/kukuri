@@ -91,7 +91,7 @@ impl AppService {
             _ = &mut shutdown => anyhow::bail!("account receive route is closed"),
             result = self.unsubscribe_account_receive_offer_lease(&recipient) => result?,
         }
-        let (lease, stream) = tokio::select! {
+        let (lease, stream, stop) = tokio::select! {
             biased;
             _ = &mut shutdown => anyhow::bail!("account receive route is closed"),
             result = self.services.hint_transport.subscribe_receive_offers(&recipient) => result?,
@@ -110,31 +110,34 @@ impl AppService {
         let last_sync = Arc::clone(&self.last_sync_ts);
         let notification_inserted = Arc::clone(&self.notification_inserted_notify);
         *owner = Some(AbortOnDropTask::new(tokio::spawn(async move {
-            let mut stream = Some(stream);
+            let mut stream = Some((stream, stop));
+            let mut active_lease = lease;
             loop {
-                if let Some(active_stream) = stream.take() {
+                if let Some((active_stream, stop)) = stream.take() {
                     let active_services = services.clone();
                     let active_last_sync = Arc::clone(&last_sync);
                     let active_notification = Arc::clone(&notification_inserted);
-                    active_stream
-                        .for_each_concurrent(RECEIVE_OFFER_MAX_IN_FLIGHT, move |envelope| {
-                            let services = active_services.clone();
-                            let last_sync = Arc::clone(&active_last_sync);
-                            let notification_inserted = Arc::clone(&active_notification);
-                            async move {
-                                match Self::ingest_account_receive_offer(&services, envelope).await {
-                                    Ok(true) => {
-                                        *last_sync.lock().await = Some(Utc::now().timestamp_millis());
-                                        notification_inserted.notify_waiters();
-                                    }
-                                    Ok(false) => {}
-                                    Err(error) => {
-                                        tracing::debug!(%error, "account receive offer was not applied");
+                    tokio::select! {
+                        biased;
+                        _ = wait_receive_offer_stop(stop) => {}
+                        _ = active_stream.for_each_concurrent(RECEIVE_OFFER_MAX_IN_FLIGHT, move |envelope| {
+                                let services = active_services.clone();
+                                let last_sync = Arc::clone(&active_last_sync);
+                                let notification_inserted = Arc::clone(&active_notification);
+                                async move {
+                                    match Self::ingest_account_receive_offer(&services, envelope).await {
+                                        Ok(true) => {
+                                            *last_sync.lock().await = Some(Utc::now().timestamp_millis());
+                                            notification_inserted.notify_waiters();
+                                        }
+                                        Ok(false) => {}
+                                        Err(error) => {
+                                            tracing::debug!(%error, "account receive offer was not applied");
+                                        }
                                     }
                                 }
-                            }
-                        })
-                        .await;
+                            }) => {}
+                    }
                 }
                 if closed.load(Ordering::Acquire) {
                     return;
@@ -145,14 +148,16 @@ impl AppService {
                 }
                 match services
                     .hint_transport
-                    .subscribe_receive_offers(&recipient)
+                    .resubscribe_receive_offers_if_current(&recipient, active_lease)
                     .await
                 {
-                    Ok((next_lease, next)) => {
+                    Ok(Some((next_lease, next, next_stop))) => {
                         *lease_slot.lock().expect("account receive lease poisoned") =
                             Some(next_lease);
-                        stream = Some(next);
+                        active_lease = next_lease;
+                        stream = Some((next, next_stop));
                     }
+                    Ok(None) => return,
                     Err(error) => {
                         tracing::debug!(%error, "account receive route retry deferred");
                     }
@@ -210,6 +215,17 @@ impl AppService {
             &hint,
         )
         .await
+    }
+}
+
+async fn wait_receive_offer_stop(mut stop: tokio::sync::watch::Receiver<bool>) {
+    if *stop.borrow() {
+        return;
+    }
+    while stop.changed().await.is_ok() {
+        if *stop.borrow() {
+            return;
+        }
     }
 }
 

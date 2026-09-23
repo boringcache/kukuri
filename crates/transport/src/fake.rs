@@ -28,7 +28,7 @@ use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapsho
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
     HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
-    ReceiveOfferStream, TopicPeerSnapshot, Transport, next_receive_offer_lease,
+    ReceiveOfferSubscription, TopicPeerSnapshot, Transport, next_receive_offer_lease,
 };
 
 #[derive(Clone, Default)]
@@ -91,6 +91,56 @@ impl FakeTransport {
             .entry(route.0)
             .or_insert_with(|| broadcast::channel(64).0)
             .clone())
+    }
+
+    async fn subscribe_receive_offers_impl(
+        &self,
+        recipient: &Pubkey,
+        expected: Option<ReceiveOfferLease>,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        let route = receive_route_for_account(recipient)?;
+        let sender = self.offer_sender(recipient).await?;
+        let mut active = self.active_offer_route.lock().await;
+        if let Some(expected) = expected
+            && !active
+                .as_ref()
+                .is_some_and(|current| current.route == route.as_str() && current.lease == expected)
+        {
+            return Ok(None);
+        }
+        if let Some(old) = active.take() {
+            let _ = old.stop.send(true);
+        }
+        let (stop, _) = watch::channel(false);
+        let lease = next_receive_offer_lease();
+        *active = Some(FakeOfferRoute {
+            route: route.as_str().to_string(),
+            lease,
+            stop: stop.clone(),
+        });
+        let stream = stream::unfold(
+            (sender.subscribe(), stop.subscribe()),
+            |(mut receiver, mut stop)| async move {
+                loop {
+                    if *stop.borrow() {
+                        return None;
+                    }
+                    tokio::select! {
+                        biased;
+                        changed = stop.changed() => {
+                            let _ = changed;
+                            return None;
+                        }
+                        event = receiver.recv() => match event {
+                            Ok(envelope) => return Some((envelope, (receiver, stop))),
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        },
+                    }
+                }
+            },
+        );
+        Ok(Some((lease, Box::pin(stream), stop.subscribe())))
     }
 }
 
@@ -322,43 +372,19 @@ impl HintTransport for FakeTransport {
     async fn subscribe_receive_offers(
         &self,
         recipient: &Pubkey,
-    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
-        let route = receive_route_for_account(recipient)?;
-        let sender = self.offer_sender(recipient).await?;
-        let mut active = self.active_offer_route.lock().await;
-        if let Some(old) = active.take() {
-            let _ = old.stop.send(true);
-        }
-        let (stop, _) = watch::channel(false);
-        let lease = next_receive_offer_lease();
-        *active = Some(FakeOfferRoute {
-            route: route.as_str().to_string(),
-            lease,
-            stop: stop.clone(),
-        });
-        let stream = stream::unfold(
-            (sender.subscribe(), stop.subscribe()),
-            |(mut receiver, mut stop)| async move {
-                loop {
-                    if *stop.borrow() {
-                        return None;
-                    }
-                    tokio::select! {
-                        biased;
-                        changed = stop.changed() => {
-                            let _ = changed;
-                            return None;
-                        }
-                        event = receiver.recv() => match event {
-                            Ok(envelope) => return Some((envelope, (receiver, stop))),
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => return None,
-                        },
-                    }
-                }
-            },
-        );
-        Ok((lease, Box::pin(stream)))
+    ) -> Result<ReceiveOfferSubscription> {
+        self.subscribe_receive_offers_impl(recipient, None)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("account receive route was superseded"))
+    }
+
+    async fn resubscribe_receive_offers_if_current(
+        &self,
+        recipient: &Pubkey,
+        expected: ReceiveOfferLease,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        self.subscribe_receive_offers_impl(recipient, Some(expected))
+            .await
     }
 
     async fn unsubscribe_receive_offers(
@@ -412,11 +438,11 @@ mod tests {
         let sender = KukuriKeys::generate();
         let old = KukuriKeys::generate();
         let current = KukuriKeys::generate();
-        let (_, mut old_stream) = transport
+        let (_, mut old_stream, _) = transport
             .subscribe_receive_offers(&old.public_key())
             .await
             .unwrap();
-        let (current_lease, mut current_stream) = transport
+        let (current_lease, mut current_stream, _) = transport
             .subscribe_receive_offers(&current.public_key())
             .await
             .unwrap();

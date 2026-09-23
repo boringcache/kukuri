@@ -7,11 +7,13 @@ use futures_util::Stream;
 pub use iroh::EndpointAddr;
 use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::config::{ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 
 pub type HintStream = Pin<Box<dyn Stream<Item = HintEnvelope> + Send>>;
 pub type ReceiveOfferStream = Pin<Box<dyn Stream<Item = ReceiveOfferEnvelope> + Send>>;
+pub type ReceiveOfferSubscription = (ReceiveOfferLease, ReceiveOfferStream, watch::Receiver<bool>);
 
 /// Process-unique lease so an old account owner cannot close a later receiver,
 /// including after an endpoint/transport reload.
@@ -105,8 +107,18 @@ pub trait HintTransport: Send + Sync {
     async fn subscribe_receive_offers(
         &self,
         _recipient: &Pubkey,
-    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
+    ) -> Result<ReceiveOfferSubscription> {
         anyhow::bail!("account receive offers are not supported by this transport")
+    }
+
+    /// Atomically restart only while `expected` still owns the route. A
+    /// superseded owner receives None and must stop instead of reclaiming it.
+    async fn resubscribe_receive_offers_if_current(
+        &self,
+        _recipient: &Pubkey,
+        _expected: ReceiveOfferLease,
+    ) -> Result<Option<ReceiveOfferSubscription>> {
+        Ok(None)
     }
 
     /// Idempotent. Only the matching lease may close the current route.

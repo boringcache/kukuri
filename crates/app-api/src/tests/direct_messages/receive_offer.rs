@@ -1,164 +1,7 @@
 use super::super::*;
+use super::receive_offer_doubles::{OfferBlobService, ProbeOfferTransport};
 use kukuri_core::{ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer};
-use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferLease, ReceiveOfferStream};
-
-#[derive(Default)]
-struct ProbeOfferTransport {
-    unsubscribes: AtomicUsize,
-    subscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
-    unsubscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
-    stream_drops: Arc<AtomicUsize>,
-}
-
-struct CountedPendingOfferStream(Arc<AtomicUsize>);
-
-impl futures_util::Stream for CountedPendingOfferStream {
-    type Item = ReceiveOfferEnvelope;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Pending
-    }
-}
-
-impl Drop for CountedPendingOfferStream {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl HintTransport for ProbeOfferTransport {
-    async fn subscribe_hints(&self, _topic: &TopicId) -> Result<HintStream> {
-        Ok(Box::pin(futures_util::stream::empty()))
-    }
-
-    async fn unsubscribe_hints(&self, _topic: &TopicId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn publish_hint(&self, _topic: &TopicId, _hint: GossipHint) -> Result<()> {
-        Ok(())
-    }
-
-    async fn subscribe_receive_offers(
-        &self,
-        _recipient: &Pubkey,
-    ) -> Result<(ReceiveOfferLease, ReceiveOfferStream)> {
-        if let Some(barrier) = &self.subscribe_barrier {
-            barrier.wait().await;
-            barrier.wait().await;
-        }
-        Ok((
-            ReceiveOfferLease::fresh(),
-            Box::pin(CountedPendingOfferStream(Arc::clone(&self.stream_drops))),
-        ))
-    }
-
-    async fn unsubscribe_receive_offers(
-        &self,
-        _recipient: &Pubkey,
-        _lease: ReceiveOfferLease,
-    ) -> Result<()> {
-        let attempt = self.unsubscribes.fetch_add(1, Ordering::SeqCst);
-        if attempt == 0
-            && let Some(barrier) = &self.unsubscribe_barrier
-        {
-            barrier.wait().await;
-            barrier.wait().await;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct OfferBlobService {
-    inner: Arc<MemoryBlobService>,
-    fetches: Arc<AtomicUsize>,
-    barrier: Option<Arc<tokio::sync::Barrier>>,
-    pause_blob_hash: Option<kukuri_core::BlobHash>,
-    attachment_barrier: Option<Arc<tokio::sync::Barrier>>,
-    writes: Arc<AtomicUsize>,
-}
-
-impl OfferBlobService {
-    fn new(inner: Arc<MemoryBlobService>) -> Self {
-        Self {
-            inner,
-            fetches: Arc::new(AtomicUsize::new(0)),
-            barrier: None,
-            pause_blob_hash: None,
-            attachment_barrier: None,
-            writes: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-#[async_trait]
-impl BlobService for OfferBlobService {
-    async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.put_blob(data, mime).await
-    }
-
-    async fn fetch_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
-        if self.pause_blob_hash.as_ref() == Some(hash)
-            && let Some(barrier) = &self.attachment_barrier
-        {
-            barrier.wait().await;
-            barrier.wait().await;
-        }
-        self.inner.fetch_blob(hash).await
-    }
-
-    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
-        self.inner.fetch_local_blob(hash).await
-    }
-
-    async fn fetch_verified_receive_offer_payload(
-        &self,
-        offer: &kukuri_core::VerifiedReceiveOffer,
-        provider: EndpointAddr,
-    ) -> Result<Vec<u8>> {
-        self.fetches.fetch_add(1, Ordering::SeqCst);
-        if let Some(barrier) = &self.barrier {
-            barrier.wait().await;
-            barrier.wait().await;
-        }
-        anyhow::ensure!(
-            provider.id.to_string() == offer.reference().provider_endpoint_id,
-            "provider mismatch"
-        );
-        let bytes = self
-            .inner
-            .fetch_local_blob(&offer.reference().payload_hash)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("manifest missing"))?;
-        anyhow::ensure!(
-            bytes.len() == offer.reference().payload_bytes as usize,
-            "manifest length mismatch"
-        );
-        Ok(bytes)
-    }
-
-    async fn pin_blob(&self, hash: &kukuri_core::BlobHash) -> Result<()> {
-        self.inner.pin_blob(hash).await
-    }
-
-    async fn blob_status(&self, hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
-        self.inner.blob_status(hash).await
-    }
-
-    async fn local_blob_status(&self, hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
-        self.inner.local_blob_status(hash).await
-    }
-
-    async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
-        self.inner.import_peer_ticket(ticket).await
-    }
-}
+use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope};
 
 fn offer_app(
     keys: KukuriKeys,
@@ -644,6 +487,7 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
         subscribe_barrier: Some(barrier.clone()),
         unsubscribe_barrier: None,
         stream_drops: Arc::new(AtomicUsize::new(0)),
+        stop_senders: std::sync::Mutex::new(Vec::new()),
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),
@@ -683,6 +527,7 @@ async fn cancelled_shutdown_retries_the_account_route_lease_cleanup() {
         subscribe_barrier: None,
         unsubscribe_barrier: Some(barrier.clone()),
         stream_drops: Arc::new(AtomicUsize::new(0)),
+        stop_senders: std::sync::Mutex::new(Vec::new()),
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),
@@ -822,6 +667,9 @@ async fn old_account_owner_shutdown_cannot_stop_new_same_account_receiver() {
     let new_app = offer_app(recipient.clone(), new_store, receiver, new_blob.clone());
     old_app.start_account_receive_offers().await.unwrap();
     new_app.start_account_receive_offers().await.unwrap();
+    // Keep the old owner alive past its retry delay. It must not reclaim the
+    // lease after the new owner supersedes its stream.
+    sleep(Duration::from_millis(3_200)).await;
     old_app.shutdown().await;
     let (provider, offer) = offer_for(
         &sender,
@@ -841,6 +689,72 @@ async fn old_account_owner_shutdown_cannot_stop_new_same_account_receiver() {
     })
     .await
     .expect("new account route must survive old owner shutdown");
+    new_app.shutdown().await;
+}
+
+#[tokio::test]
+async fn superseding_account_owner_cancels_old_in_flight_provider_fetch() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &recipient.public_key_hex(),
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: recipient.public_key_hex(),
+            author_pubkey: sender.public_key_hex(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut old_blob = OfferBlobService::new(Arc::new(MemoryBlobService::default()));
+    old_blob.barrier = Some(barrier.clone());
+    let old_blob = Arc::new(old_blob);
+    let network = FakeNetwork::default();
+    let receiver = Arc::new(FakeTransport::new("recipient", network.clone()));
+    let publisher = FakeTransport::new("sender", network);
+    let old_app = offer_app(recipient.clone(), store, receiver.clone(), old_blob.clone());
+    old_app.start_account_receive_offers().await.unwrap();
+    let (provider, offer) = offer_for(
+        &sender,
+        &recipient,
+        ReceiveOfferScopeV1::DirectMessage,
+        kukuri_core::BlobHash::new("11".repeat(32)),
+        1,
+    );
+    publisher
+        .publish_receive_offer(&recipient.public_key(), provider, offer)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), barrier.wait())
+        .await
+        .expect("old provider fetch started");
+    assert_eq!(old_blob.in_flight.load(Ordering::SeqCst), 1);
+    let new_app = offer_app(
+        recipient,
+        Arc::new(MemoryStore::default()),
+        receiver,
+        Arc::new(OfferBlobService::new(
+            Arc::new(MemoryBlobService::default()),
+        )),
+    );
+    new_app.start_account_receive_offers().await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        while old_blob.in_flight.load(Ordering::SeqCst) != 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("superseded owner's pending fetch must be canceled");
+    assert_eq!(old_blob.writes.load(Ordering::SeqCst), 0);
+    old_app.shutdown().await;
     new_app.shutdown().await;
 }
 

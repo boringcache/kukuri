@@ -17,7 +17,7 @@ use kukuri_docs_sync::{
 use kukuri_iroh_node::IrohDocsNode;
 use kukuri_transport::{
     ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, EndpointAddr, HintStream,
-    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveOfferLease, ReceiveOfferStream,
+    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveOfferLease, ReceiveOfferSubscription,
     SeedPeer, Transport, TransportNetworkConfig, TransportRelayConfig,
 };
 #[cfg(test)]
@@ -114,7 +114,8 @@ reloadable_service! {
         async fn subscribe_hints(topic: &TopicId) -> Result<HintStream>;
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
-        async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<(ReceiveOfferLease, ReceiveOfferStream)>;
+        async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferSubscription>;
+        async fn resubscribe_receive_offers_if_current(recipient: &Pubkey, expected: ReceiveOfferLease) -> Result<Option<ReceiveOfferSubscription>>;
         async fn unsubscribe_receive_offers(recipient: &Pubkey, lease: ReceiveOfferLease) -> Result<()>;
         async fn publish_receive_offer(
             recipient: &Pubkey, destination: EndpointAddr, offer: SealedReceiveOfferV1,

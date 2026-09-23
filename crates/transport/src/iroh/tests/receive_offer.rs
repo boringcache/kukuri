@@ -21,7 +21,7 @@ async fn account_receive_offer_crosses_real_gossip_with_one_recipient_route() {
     right.discovery.add_endpoint_info(left.endpoint.addr());
     let sender = KukuriKeys::generate();
     let recipient = KukuriKeys::generate();
-    let (lease, mut incoming) = right
+    let (lease, mut incoming, _) = right
         .subscribe_receive_offers(&recipient.public_key())
         .await
         .unwrap();
@@ -93,8 +93,8 @@ async fn account_receive_route_replaces_the_previous_account_subscription() {
     let mut transport = IrohGossipTransport::bind_local().await.unwrap();
     let old = KukuriKeys::generate().public_key();
     let current = KukuriKeys::generate().public_key();
-    let (old_lease, _old_stream) = transport.subscribe_receive_offers(&old).await.unwrap();
-    let (current_lease, mut current_stream) =
+    let (old_lease, _old_stream, _) = transport.subscribe_receive_offers(&old).await.unwrap();
+    let (current_lease, mut current_stream, _) =
         transport.subscribe_receive_offers(&current).await.unwrap();
     assert_eq!(
         transport
@@ -132,11 +132,11 @@ async fn account_receive_route_replaces_the_previous_account_subscription() {
 async fn stale_same_account_lease_cannot_unsubscribe_a_new_receiver() {
     let mut transport = IrohGossipTransport::bind_local().await.unwrap();
     let recipient = KukuriKeys::generate().public_key();
-    let (old_lease, mut old_stream) = transport
+    let (old_lease, mut old_stream, _) = transport
         .subscribe_receive_offers(&recipient)
         .await
         .unwrap();
-    let (new_lease, mut new_stream) = transport
+    let (new_lease, mut new_stream, _) = transport
         .subscribe_receive_offers(&recipient)
         .await
         .unwrap();
@@ -152,13 +152,38 @@ async fn stale_same_account_lease_cannot_unsubscribe_a_new_receiver() {
         .await
         .unwrap();
     assert!(transport.receive_offer_topic.lock().await.is_some());
+    assert!(
+        transport
+            .resubscribe_receive_offers_if_current(&recipient, old_lease)
+            .await
+            .unwrap()
+            .is_none(),
+        "superseded receiver cannot reclaim the route"
+    );
+    let (next_lease, mut next_stream, _) = transport
+        .resubscribe_receive_offers_if_current(&recipient, new_lease)
+        .await
+        .unwrap()
+        .expect("current receiver may restart");
+    assert_ne!(new_lease, next_lease);
     transport
         .unsubscribe_receive_offers(&recipient, new_lease)
+        .await
+        .unwrap();
+    assert!(transport.receive_offer_topic.lock().await.is_some());
+    transport
+        .unsubscribe_receive_offers(&recipient, next_lease)
         .await
         .unwrap();
     assert!(transport.receive_offer_topic.lock().await.is_none());
     assert!(
         timeout(Duration::from_millis(100), new_stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        timeout(Duration::from_millis(100), next_stream.next())
             .await
             .unwrap()
             .is_none()
