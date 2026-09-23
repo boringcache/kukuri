@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use kukuri_core::BlobHash;
+use kukuri_core::{BlobHash, VerifiedReceiveOffer};
 use kukuri_iroh_node::{IrohDocsNode, remote_fetch};
-use kukuri_transport::{PeerAddrBook, RemoteFetchRetryState, SeedPeer, parse_endpoint_ticket};
+use kukuri_transport::{
+    EndpointAddr, PeerAddrBook, RemoteFetchRetryState, SeedPeer, parse_endpoint_ticket,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
@@ -56,6 +58,15 @@ pub trait BlobService: Send + Sync {
         _max_bytes: u64,
     ) -> Result<Option<Vec<u8>>> {
         anyhow::bail!("bounded ephemeral blob fetch is not supported")
+    }
+    /// Only the signed provider may serve this offer's bounded manifest. The
+    /// caller must check scope/mutual/epoch before starting this network I/O.
+    async fn fetch_verified_receive_offer_payload(
+        &self,
+        _offer: &VerifiedReceiveOffer,
+        _provider: EndpointAddr,
+    ) -> Result<Vec<u8>> {
+        anyhow::bail!("verified receive offer payload fetch is not supported")
     }
     async fn pin_blob(&self, hash: &BlobHash) -> Result<()>;
     async fn unpin_blob(&self, _hash: &BlobHash) -> Result<()> {
@@ -308,6 +319,13 @@ impl BlobService for IrohBlobService {
             );
         }
         Ok(result)
+    }
+    async fn fetch_verified_receive_offer_payload(
+        &self,
+        offer: &VerifiedReceiveOffer,
+        provider: EndpointAddr,
+    ) -> Result<Vec<u8>> {
+        remote_fetch::fetch_verified_receive_offer_payload(&self.node, offer, provider).await
     }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         let byte_len = data.len() as u64;
