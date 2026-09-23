@@ -41,7 +41,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N25 `runtime/mod.rs` の通知event転送、`host/mod.rs::replace_event_task/restore_desired_subscriptions` | account起動/restart、notify event | host転送taskは置換/shutdownでabort。runtime通知転送もruntimeが所有しshutdown完了待ち・Drop中止 | desired購読全件復元はP3残件。旧runtime task寿命はP3 ownerへ接続 | NW-7/8/10 |
 | N26 `iroh-node/src/node.rs::apply_relay_config/shutdown`、`transport/src/discovery.rs/iroh/discovery.rs` | 起動/relay設定、endpoint.online待機 | node shutdownは所有付き。online待機はdetached | endpoint世代単位。P3で監視taskを所有し重複設定をno-op | NW-6/7、既存node終了契約 |
 | N27 `cn-runtime/requests_support.rs/session_runtime_support.rs` | auth/consent要求、token/heartbeat/rendezvous/metadataの期限、設定変更 | HTTP timeoutと401再認証。ready node/seed集合を再適用 | 全ready node/購読/seedの再合成。P3差分/due索引 | NW-5/6、mixed node auth/consent |
-| N28 `cn-core/src/rendezvous.rs::heartbeat`、`cn-user-api/handlers/bootstrap.rs::topic_rendezvous_heartbeat` | 認証・同意後のjoins/refreshes/leaves | request期限。Redis TTL、期限切れpeerを照会中に削除 | topicごとのSMEMBERS/sort/peer GETが全登録peer比例。P3有界cursorとTTL索引 | NW-2/5/8、auth/endpoint binding |
+| N28 `cn-core/src/rendezvous.rs::heartbeat`、`cn-user-api/handlers/bootstrap.rs::topic_rendezvous_heartbeat` | 認証・同意後のjoins/refreshes/leaves | request期限。15秒のtopic窓4件とtopic-peer TTL45秒、窓key TTL60秒 | P3でSMEMBERS全件を撤去。各窓16件を標本し最大64件だけ検証、候補返却は最大8件。旧SETはTTLで自然退役 | NW-2/5/8、auth/endpoint binding |
 | N35 Tauri `LinkPreviewState::request/spawn_fetch`、`commands/link_preview.rs` | URL表示/操作。cache成功10分・失敗1分、connect3秒/request6秒 | 32 in-flight/4実行、cache128件/16MiB。caller取消後も取得継続、task handleは未所有 | 件数/bytesは既存で有界。P3の共通容量・task寿命へ接続し、SSRF/redirect/本文上限を維持 | NW-2/4、ADR0051 |
 | N36 UI `useDesktopShellDataEffects/useAuthorTrustGateLookup/useTimelineContentAdvisoryLookup/useRuntimeEventBridge` | 表示/DM3秒、通知60秒、trust sweep30秒・debounce300ms。advisory300ms、500件batch | effect cleanupでtimer解除。表示/DMはhidden時抑止。mediaは最短retry時刻のtimer | 読込済み行/author/URLの全体処理とeventごとの通知読取りをP3で窓・差分・coalesce | UI-AC群、NW-1/8 |
 | N37 `IndexerWorker::{spawn,run,full_pass,spawn_subscription}`、`cn-indexer/src/worker.rs` | 全scope再確認300秒、event debounce2秒、backoff5〜300秒 | watch停止、shutdown待ち10秒。timeout後のJoinHandle放棄は実停止を保証しない | unbounded event channel、scope/task/backoff全体、full pass。P4で有界queue/due cursor/owned停止 | CN-AC群、NW-2/7/10 |
@@ -242,3 +242,13 @@ N50〜52のsensitive sinkは選択された既存`PeerAddrBook`内のendpointへ
 
 N56の保存sinkは通知rowと同一INSERT transaction内のsequence/索引だけで、本文や既存inboxを複製しない。
 N57はlocal OS通知のみを送る。新しいnetwork I/O、private参照の外部送信、通知の履歴backfillは行わない。
+
+## N28のCN rendezvous候補窓（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N59 | auth/consent済heartbeat → `TopicRendezvousStore::heartbeat` → Valkey topic窓/member/peer keyと候補JSON | 入力正規化後にValkey `TIME`で共通時刻。opaque topic keyのみ。15秒×直近4窓、窓TTL60秒・topic-peer/peer TTL45秒。窓ごと16件のdistinct標本、最大64候補のmembership/peerを検証し8件だけ返す。leaveは直近4窓とmemberを除去 | `rendezvous_candidates_do_not_grow_with_topic_membership`、`another_topic_cannot_extend_an_expired_membership`、`rendezvous_bucket_and_membership_have_finite_ttls`、`invalid_topic_is_rejected_before_valkey_io`、既存CN API auth/consent/privacy tests |
+
+N59はtopic presenceのephemeral stateだけを増減する。auth/consentとendpoint bindingの確認は
+`cn-user-api`の既存handlerを通し、rendezvous応答をaccountの証明にしない。旧`topic:` SETは
+新経路から参照せず従来TTLで消える。候補の完全列挙は目標にしない。
