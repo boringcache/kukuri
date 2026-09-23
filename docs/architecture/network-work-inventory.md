@@ -259,4 +259,12 @@ N59はtopic presenceのephemeral stateだけを増減する。auth/consentとend
 | --- | --- | --- | --- |
 | N60 | `HintTransport::{subscribe_receive_offers,publish_receive_offer}` → account別gossip topic → sealed offer受信stream | recipientからroute導出。送信前にofferの2,048byte上限を検証。受信は同時1accountだけ、旧account切替/明示解除/shutdown/Dropでtaskと旧streamを停止。送信後のtopic保持は30秒・最大32件。bootstrap候補は3source各4件だけを読む。taskは管理lock取得後に生成し同じ非await区間で登録。shutdownは先に受付を閉じ、join待ちを通知で止め、全holdをabortしてから待つ。account routeは通常topic診断へ混ぜない。Fakeも同じ世代終了を行う | `account_receive_offer_crosses_real_gossip_with_one_recipient_route`、`account_receive_route_replaces_the_previous_account_subscription`、`oversized_receive_offer_is_rejected_before_joining_a_route`、`account_route_bootstrap_window_is_independent_of_imported_history`、`cancelling_offer_subscribe_before_registration_leaves_no_receiver_task`、`cancelling_offer_publish_before_registration_leaves_no_hold_task`、`cancelled_offer_shutdown_aborts_every_detached_hold_before_waiting`、`offer_publish_waiting_for_registration_cannot_revive_after_shutdown`、`offer_subscribe_waiting_for_registration_cannot_revive_after_shutdown`、`offer_join_wait_stops_when_transport_shuts_down`、`fake_account_switch_stops_delivery_to_the_old_offer_stream` |
 
-N60のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip経路の観測であり署名senderやproviderの証明ではない。受信後のAEAD/署名、binding、scope・mutual・private epoch、blob取得、永続反映、再送所有、D2全受信範囲への接続は未完了。既存hint経路は残す。
+N60単独のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip経路の観測であり署名senderやproviderの証明ではない。受信後のAEAD/署名、binding、scope・mutual・private epoch、blob取得、永続反映、再送所有、D2全受信範囲への接続はこの段階で未完了。既存hint経路は残す。
+
+## 署名provider限定のoffer payload取得（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N61 | `BlobService::fetch_verified_receive_offer_payload` → node共通受付 → receive-binding ALPN → 同じendpointのblob ALPN → memory bytes | `VerifiedReceiveOffer`の署名済みprovider IDと候補ID一致、offer期限をI/O前に検査。受付待機後とblob要求前にもoffer/binding期限を確認。QUIC相手とsender accountのbindingを確認してからblobを要求。宣言byte数最大65,536をstream中に制限し、完了時に実長/BLAKE3/両期限を再確認。保存せず、接続は結果・取消で閉じる。共通8実行枠と受付時から30秒期限を使用 | `signed_provider_offer_fetches_only_its_bounded_manifest_without_storing_it`、`offer_fetch_rejects_wrong_endpoint_missing_binding_and_declared_length`、`retained_expired_offer_is_rejected_before_provider_io`、`bounded_offer_blob_work_shares_the_display_slot_and_stops_on_close` |
+
+N61はprovider bindingを公開accountへ結ぶだけで、public source参加・DM mutual・private epoch/capabilityの許可を証明しない。アプリ側でこれらをI/O前と反映直前に確認し、失効時に要求futureを中止するまで受信経路として有効化しない。
