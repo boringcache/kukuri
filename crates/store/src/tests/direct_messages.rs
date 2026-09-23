@@ -101,6 +101,74 @@ async fn due_dm_outbox_lanes_keep_new_and_old_work_bounded() {
     assert_due_outbox_lanes_remain_bounded_during_new_inserts(&sqlite).await;
 }
 
+async fn assert_candidate_cursor_reaches_old_rows_during_new_inserts<S: DirectMessageStore>(
+    store: &S,
+) {
+    for index in 0..15 {
+        DirectMessageStore::put_direct_message_outbox(
+            store,
+            DirectMessageOutboxRow {
+                dm_id: format!("candidate-dm-{index:02}"),
+                message_id: format!("candidate-old-{index:02}"),
+                peer_pubkey: format!("candidate-peer-{index:02}"),
+                frame_blob_hash: BlobHash::new("candidate-hash"),
+                created_at: 1,
+                last_attempt_at: Some(index as i64),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let mut after = None;
+    let mut cycle_end = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for tick in 0..4 {
+        let page = DirectMessageStore::list_direct_message_outbox_candidate_page(
+            store,
+            after.as_ref(),
+            cycle_end.as_ref(),
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(page.items.len() <= 4);
+        seen.extend(page.items.iter().map(|row| row.peer_pubkey.clone()));
+        DirectMessageStore::put_direct_message_outbox(
+            store,
+            DirectMessageOutboxRow {
+                dm_id: format!("candidate-new-dm-{tick}"),
+                message_id: format!("candidate-new-{tick}"),
+                peer_pubkey: format!("candidate-new-peer-{tick}"),
+                frame_blob_hash: BlobHash::new("candidate-hash"),
+                created_at: 100 + tick,
+                last_attempt_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        after = page.next_cursor;
+        cycle_end = after.as_ref().and(page.cycle_end);
+    }
+    assert_eq!(
+        seen.len(),
+        15,
+        "new rows must not starve the cycle's old tail"
+    );
+    assert!(seen.iter().all(|peer| peer.starts_with("candidate-peer-")));
+    let next = DirectMessageStore::list_direct_message_outbox_candidate_page(store, None, None, 4)
+        .await
+        .unwrap();
+    assert_eq!(next.items.len(), 4);
+}
+
+#[tokio::test]
+async fn account_candidate_pages_advance_independently_of_retry_attempts() {
+    let memory = MemoryStore::default();
+    assert_candidate_cursor_reaches_old_rows_during_new_inserts(&memory).await;
+    let sqlite = SqliteStore::connect_memory().await.unwrap();
+    assert_candidate_cursor_reaches_old_rows_during_new_inserts(&sqlite).await;
+}
+
 async fn assert_due_indexes_forget_removed_protected_rows<S: DirectMessageStore>(store: &S) {
     for (dm_id, message_id, attempted_at) in [
         ("dm-new", "new", None),
@@ -420,6 +488,37 @@ async fn due_direct_message_outbox_uses_both_sqlite_lane_indexes() {
             "{details:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn account_candidate_page_uses_stable_sqlite_cursor_index() {
+    use sqlx::Row;
+    let store = SqliteStore::connect_memory().await.unwrap();
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT dm_id FROM dm_outbox \
+         WHERE (created_at, message_id, dm_id) > (1, 'a', 'a') \
+         AND (created_at, message_id, dm_id) <= (999, 'z', 'z') \
+         ORDER BY created_at, message_id, dm_id LIMIT 5",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    let details = plan
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>();
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("idx_dm_outbox_candidate_cursor")),
+        "candidate cursor must use its index: {details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE")),
+        "candidate page must not sort the full outbox: {details:?}"
+    );
 }
 
 #[tokio::test]

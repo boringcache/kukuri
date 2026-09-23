@@ -117,7 +117,7 @@ fn rendezvous_window_does_not_starve_known_peer_cursor() {
         })
         .collect::<Vec<_>>();
     let mut state = DestinationWindow::default();
-    state.observe_rendezvous(&recipient, cn);
+    state.observe_rendezvous("cn-a", &recipient, cn);
     let mut observed_known = BTreeSet::new();
     for _ in 0..500 {
         let (candidates, _) =
@@ -403,14 +403,29 @@ async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
             ReceiveBindingProtocol::new(receiver.id(), binding).unwrap(),
         )
         .spawn();
+    let fence = transport.receive_candidate_fence().await.unwrap();
     assert!(
         transport
-            .offer_receive_candidates(&recipient.public_key(), vec![receiver.addr(); 9])
+            .offer_receive_candidates(
+                "cn-a",
+                &recipient.public_key(),
+                vec![receiver.addr(); 9],
+                fence
+            )
             .await
             .is_err()
     );
     transport
-        .offer_receive_candidates(&recipient.public_key(), vec![receiver.addr()])
+        .offer_receive_candidates(
+            "cn-a",
+            &recipient.public_key(),
+            vec![receiver.addr()],
+            fence,
+        )
+        .await
+        .unwrap();
+    transport
+        .offer_receive_candidates("cn-b", &recipient.public_key(), Vec::new(), fence)
         .await
         .unwrap();
     assert!(transport.imported_peers.lock().await.is_empty());
@@ -430,7 +445,36 @@ async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
             .id,
         receiver.id()
     );
-    transport.clear_receive_candidates().await.unwrap();
+    transport
+        .clear_receive_candidates(Some("cn-b"))
+        .await
+        .unwrap();
+    assert_eq!(
+        transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        receiver.id(),
+        "revoking another CN must preserve this CN's verified destination"
+    );
+    assert!(
+        transport
+            .offer_receive_candidates(
+                "cn-b",
+                &recipient.public_key(),
+                vec![receiver.addr()],
+                fence
+            )
+            .await
+            .is_err(),
+        "a response from before CN deactivation must not recreate candidates"
+    );
+    transport
+        .clear_receive_candidates(Some("cn-a"))
+        .await
+        .unwrap();
     assert!(
         transport
             .resolve_receive_destination(&recipient.public_key())
@@ -439,6 +483,27 @@ async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
             .is_none(),
         "CN consent removal must also clear a previously verified destination"
     );
+    let mut replacement = IrohGossipTransport::bind_local().await.unwrap();
+    assert!(
+        replacement
+            .offer_receive_candidates(
+                "cn-a",
+                &recipient.public_key(),
+                vec![receiver.addr()],
+                fence
+            )
+            .await
+            .is_err(),
+        "a candidate response from an old transport cannot enter its replacement"
+    );
+    replacement.shutdown().await;
+    replacement
+        ._router
+        .take()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
     router.shutdown().await.unwrap();
     transport.shutdown().await;
     transport._router.take().unwrap().shutdown().await.unwrap();

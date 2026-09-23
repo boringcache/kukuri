@@ -213,7 +213,11 @@ impl DesktopRuntime {
         }
         save_community_node_config(&self.db_path, &next_config)?;
         *self.community_node_config.lock().await = next_config.clone();
-        self.iroh_stack.transport.clear_receive_candidates().await?;
+        *self.account_candidate_selected_node.lock().await = None;
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(None)
+            .await?;
         self.content_advisory_issuer_cache.lock().await.clear();
         self.community_node_sessions.lock().await.clear();
         self.invalidate_author_trust_gate_cache().await;
@@ -251,7 +255,11 @@ impl DesktopRuntime {
         }
         save_community_node_config(&self.db_path, &CommunityNodeConfig::default())?;
         *self.community_node_config.lock().await = CommunityNodeConfig::default();
-        self.iroh_stack.transport.clear_receive_candidates().await?;
+        *self.account_candidate_selected_node.lock().await = None;
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(None)
+            .await?;
         self.content_advisory_issuer_cache.lock().await.clear();
         self.invalidate_author_trust_gate_cache().await;
         self.community_node_rendezvous_seed_peers
@@ -419,7 +427,10 @@ impl DesktopRuntime {
                 ..Default::default()
             },
         );
-        self.iroh_stack.transport.clear_receive_candidates().await?;
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(Some(base_url.as_str()))
+            .await?;
         *self.community_node_reconnect_state.lock().await = Default::default();
         let node = self
             .community_node_config

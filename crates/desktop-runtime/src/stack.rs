@@ -17,8 +17,8 @@ use kukuri_docs_sync::{
 use kukuri_iroh_node::IrohDocsNode;
 use kukuri_transport::{
     ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, EndpointAddr, HintStream,
-    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveOfferLease, ReceiveOfferSubscription,
-    SeedPeer, Transport, TransportNetworkConfig, TransportRelayConfig,
+    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveCandidateFence, ReceiveOfferLease,
+    ReceiveOfferSubscription, SeedPeer, Transport, TransportNetworkConfig, TransportRelayConfig,
 };
 #[cfg(test)]
 use tokio::sync::oneshot;
@@ -115,8 +115,9 @@ reloadable_service! {
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
         async fn resolve_receive_destination(recipient: &Pubkey) -> Result<Option<EndpointAddr>>;
-        async fn offer_receive_candidates(recipient: &Pubkey, candidates: Vec<EndpointAddr>) -> Result<()>;
-        async fn clear_receive_candidates() -> Result<()>;
+        async fn receive_candidate_fence() -> Result<ReceiveCandidateFence>;
+        async fn offer_receive_candidates(source: &str, recipient: &Pubkey, candidates: Vec<EndpointAddr>, fence: ReceiveCandidateFence) -> Result<()>;
+        async fn clear_receive_candidates(source: Option<&str>) -> Result<()>;
         async fn invalidate_receive_destination(recipient: &Pubkey, endpoint_id: &str) -> Result<()>;
         async fn verify_receive_provider(sender: &Pubkey, provider: EndpointAddr) -> Result<()>;
         async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferSubscription>;

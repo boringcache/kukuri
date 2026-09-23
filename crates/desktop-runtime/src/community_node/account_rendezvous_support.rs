@@ -23,27 +23,55 @@ impl DesktopRuntime {
                 "account rendezvous requires active local consent"
             )));
         }
+        let candidate_fence = self
+            .iroh_stack
+            .transport
+            .receive_candidate_fence()
+            .await
+            .map_err(CommunityNodeRequestError::Other)?;
         let own_route = receive_route_for_account(&self.author_keys.public_key())
             .map_err(CommunityNodeRequestError::Other)?;
         let own_key = public_topic_rendezvous_key(&own_route);
-        let recipients = self
-            .app_service
-            .pending_receive_destination_recipients()
+        let (after, cycle_end) = self
+            .community_node_sessions
+            .lock()
             .await
-            .map_err(CommunityNodeRequestError::Other)?;
-        if recipients.len() > MAX_ACCOUNT_QUERY_RECIPIENTS {
+            .get(base_url)
+            .map(|session| {
+                (
+                    session.account_candidate_after.clone(),
+                    session.account_candidate_cycle_end.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let query_recipient_routes =
+            self.account_candidate_selected_node.lock().await.as_deref() == Some(base_url);
+        let page = if query_recipient_routes {
+            Some(
+                self.app_service
+                    .pending_receive_destination_recipients(after.as_ref(), cycle_end.as_ref())
+                    .await
+                    .map_err(CommunityNodeRequestError::Other)?,
+            )
+        } else {
+            None
+        };
+        if page
+            .as_ref()
+            .is_some_and(|page| page.recipients.len() > MAX_ACCOUNT_QUERY_RECIPIENTS)
+        {
             return Err(CommunityNodeRequestError::Other(anyhow!(
                 "account receive demand exceeds bounded rendezvous window"
             )));
         }
         let mut by_key = BTreeMap::<String, Pubkey>::new();
-        for recipient in recipients {
-            if recipient == self.author_keys.public_key() {
+        for recipient in page.iter().flat_map(|page| &page.recipients) {
+            if *recipient == self.author_keys.public_key() {
                 continue;
             }
             let route =
-                receive_route_for_account(&recipient).map_err(CommunityNodeRequestError::Other)?;
-            by_key.insert(public_topic_rendezvous_key(&route), recipient);
+                receive_route_for_account(recipient).map_err(CommunityNodeRequestError::Other)?;
+            by_key.insert(public_topic_rendezvous_key(&route), recipient.clone());
         }
         let mut refreshes = Vec::with_capacity(by_key.len() + 1);
         refreshes.push(own_key);
@@ -160,11 +188,27 @@ impl DesktopRuntime {
             }
             self.iroh_stack
                 .transport
-                .offer_receive_candidates(recipient, candidates)
+                .offer_receive_candidates(base_url, recipient, candidates, candidate_fence)
                 .await
                 .map_err(CommunityNodeRequestError::Other)?;
         }
+        if self
+            .iroh_stack
+            .transport
+            .receive_candidate_fence()
+            .await
+            .map_err(CommunityNodeRequestError::Other)?
+            != candidate_fence
+        {
+            return Err(CommunityNodeRequestError::Other(anyhow!(
+                "account rendezvous candidate owner changed"
+            )));
+        }
         if let Some(session) = self.community_node_sessions.lock().await.get_mut(base_url) {
+            if let Some(page) = page {
+                session.account_candidate_after = page.next_cursor;
+                session.account_candidate_cycle_end = page.cycle_end;
+            }
             session.rendezvous_refresh_deadline = Utc::now().timestamp().saturating_add(
                 (response.expires_in_seconds.min(i64::MAX as u64) as i64)
                     .saturating_sub(COMMUNITY_NODE_TOPIC_RENDEZVOUS_REFRESH_MARGIN_SECONDS),

@@ -35,6 +35,12 @@ pub struct ReceiveOfferLease {
     transport_instance: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiveCandidateFence {
+    pub transport_instance: u64,
+    pub clear_epoch: u64,
+}
+
 static NEXT_RECEIVE_OFFER_LEASE: AtomicU64 = AtomicU64::new(1);
 
 impl ReceiveOfferLease {
@@ -137,19 +143,25 @@ pub trait HintTransport: Send + Sync {
         anyhow::bail!("authenticated receive destination resolution is not supported")
     }
 
-    /// Feed bounded rendezvous addresses as untrusted candidates for this
-    /// account. Resolution still requires a live signed binding on QUIC.
+    /// A token captured before CN I/O; a clear or transport rebuild makes it stale.
+    async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
+        anyhow::bail!("account receive candidate fence is not supported")
+    }
+
+    /// Feed bounded rendezvous addresses under their CN owner. Resolution
+    /// still requires a live signed binding on QUIC.
     async fn offer_receive_candidates(
         &self,
+        _source: &str,
         _recipient: &Pubkey,
         _candidates: Vec<EndpointAddr>,
+        _fence: ReceiveCandidateFence,
     ) -> Result<()> {
         anyhow::bail!("account receive candidate feed is not supported")
     }
 
-    /// Forget CN-derived addresses and any destination cached from them when
-    /// CN configuration or consent changes.
-    async fn clear_receive_candidates(&self) -> Result<()> {
+    /// Forget one CN owner's addresses (or all owners for a config reset).
+    async fn clear_receive_candidates(&self, _source: Option<&str>) -> Result<()> {
         anyhow::bail!("account receive candidate clear is not supported")
     }
 

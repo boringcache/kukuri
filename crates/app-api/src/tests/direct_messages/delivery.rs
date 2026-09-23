@@ -434,12 +434,27 @@ async fn account_candidate_demand_uses_only_bounded_mutual_due_rows() {
         Arc::new(MemoryBlobService::default()),
         sender,
     );
-    let actual = app.pending_receive_destination_recipients().await.unwrap();
+    let actual = app
+        .pending_receive_destination_recipients(None, None)
+        .await
+        .unwrap();
     let expected = [0usize, 1, 3]
         .into_iter()
         .map(|index| peers[index].public_key())
         .collect::<BTreeSet<_>>();
-    assert_eq!(actual.into_iter().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(
+        actual.recipients.into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+    let next = app
+        .pending_receive_destination_recipients(
+            actual.next_cursor.as_ref(),
+            actual.cycle_end.as_ref(),
+        )
+        .await
+        .unwrap();
+    assert!(next.recipients.is_empty());
+    assert!(next.next_cursor.is_none());
 }
 
 #[tokio::test]

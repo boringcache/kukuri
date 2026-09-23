@@ -49,8 +49,9 @@ use crate::tickets::{
     encode_endpoint_ticket, endpoint_addr_with_relays, parse_endpoint_ticket, ticket_network_config,
 };
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
-    ReceiveOfferStop, ReceiveOfferStream, ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveCandidateFence,
+    ReceiveOfferEnvelope, ReceiveOfferLease, ReceiveOfferStop, ReceiveOfferStream,
+    ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
 };
 
 struct HintTopicState {
@@ -244,17 +245,29 @@ impl HintTransport for IrohGossipTransport {
         self.resolve_receive_destination_impl(recipient).await
     }
 
+    async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
+        Ok(ReceiveCandidateFence {
+            transport_instance: self.receive_offer_instance,
+            clear_epoch: self.receive_destinations.lock().await.clear_epoch,
+        })
+    }
+
     async fn offer_receive_candidates(
         &self,
+        source: &str,
         recipient: &Pubkey,
         candidates: Vec<EndpointAddr>,
+        fence: ReceiveCandidateFence,
     ) -> Result<()> {
-        self.offer_receive_candidates_impl(recipient, candidates)
+        self.offer_receive_candidates_impl(source, recipient, candidates, fence)
             .await
     }
 
-    async fn clear_receive_candidates(&self) -> Result<()> {
-        self.receive_destinations.lock().await.clear_rendezvous();
+    async fn clear_receive_candidates(&self, source: Option<&str>) -> Result<()> {
+        self.receive_destinations
+            .lock()
+            .await
+            .clear_rendezvous(source);
         Ok(())
     }
 

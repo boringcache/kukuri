@@ -16,6 +16,7 @@
 
 mod community_index;
 mod direct_messages;
+pub use direct_messages::PendingReceiveDestinationPage;
 mod dome_connections;
 mod dome_delete;
 pub use dome_delete::{DeleteDomeInput, DeleteDomeView, PendingDomeDeletionView};

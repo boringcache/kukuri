@@ -42,6 +42,7 @@ type DirectMessageOutboxRetryKey = (i64, i64, String, String, String);
 #[derive(Default)]
 struct MemoryDirectMessageOutboxRows {
     rows: HashMap<(String, String), DirectMessageOutboxRow>,
+    by_created: BTreeSet<(i64, String, String)>,
     by_peer: BTreeSet<DirectMessageOutboxPeerKey>,
     never_attempted: BTreeSet<DirectMessageOutboxNewKey>,
     attempted: BTreeSet<DirectMessageOutboxRetryKey>,

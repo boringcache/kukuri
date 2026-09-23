@@ -444,6 +444,13 @@ pub trait DirectMessageStore: Send + Sync {
         message_id: &str,
     ) -> Result<Option<DirectMessageOutboxRow>>;
     async fn list_direct_message_outbox(&self) -> Result<Vec<DirectMessageOutboxRow>>;
+    /// Stable account-wide page for independent CN candidate discovery.
+    async fn list_direct_message_outbox_candidate_page(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage>;
     async fn list_direct_message_outbox_for_peer_page(
         &self,
         peer_pubkey: &str,

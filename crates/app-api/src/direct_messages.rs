@@ -1,17 +1,28 @@
 use crate::service::*;
+use kukuri_store::DirectMessageOutboxCursor;
+
+pub struct PendingReceiveDestinationPage {
+    pub recipients: Vec<Pubkey>,
+    pub next_cursor: Option<DirectMessageOutboxCursor>,
+    pub cycle_end: Option<DirectMessageOutboxCursor>,
+}
 
 impl AppService {
     /// Account-specific CN discovery demand; never materialize every outbox
     /// row or every mutual peer merely to choose a receive route candidate.
-    pub async fn pending_receive_destination_recipients(&self) -> Result<Vec<Pubkey>> {
-        let rows = self
+    pub async fn pending_receive_destination_recipients(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+    ) -> Result<PendingReceiveDestinationPage> {
+        let page = self
             .services
             .projection_store
-            .list_due_direct_message_outbox(Utc::now().timestamp_millis(), 3, 1)
+            .list_direct_message_outbox_candidate_page(after, cycle_end, 4)
             .await?;
         let local = self.current_author_pubkey();
         let mut unique = BTreeSet::new();
-        for row in rows {
+        for row in page.items {
             let Ok(peer) = normalize_author_pubkey(&row.peer_pubkey) else {
                 continue;
             };
@@ -26,7 +37,11 @@ impl AppService {
                 unique.insert(Pubkey::from(peer));
             }
         }
-        Ok(unique.into_iter().collect())
+        Ok(PendingReceiveDestinationPage {
+            recipients: unique.into_iter().collect(),
+            cycle_end: page.next_cursor.as_ref().and(page.cycle_end),
+            next_cursor: page.next_cursor,
+        })
     }
 
     pub async fn resume_direct_message_state(&self) -> Result<()> {

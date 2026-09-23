@@ -16,6 +16,7 @@ use kukuri_core::{
     Pubkey, TopicId, public_topic_rendezvous_key, receive_route_for_account,
     wire::{HINT_TOPIC_PREFIX, PRIVATE_CHANNEL_TOPIC_PREFIX},
 };
+use kukuri_store::DirectMessageOutboxCursor;
 use kukuri_transport::{HintTransport, SeedPeer, Transport, TransportRelayConfig, parse_seed_peer};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -373,6 +374,8 @@ pub(crate) struct CommunityNodeSessionState {
     pub(crate) heartbeat_deadline: i64,
     // default 0 = 即時 due。refresh 成功時のみ bump する(#572)。
     pub(crate) rendezvous_refresh_deadline: i64,
+    pub(crate) account_candidate_after: Option<DirectMessageOutboxCursor>,
+    pub(crate) account_candidate_cycle_end: Option<DirectMessageOutboxCursor>,
     pub(crate) metadata_refresh_deadline: i64,
     pub(crate) session_retry_deadline: i64,
     pub(crate) session_phase: CommunityNodeSessionPhase,
