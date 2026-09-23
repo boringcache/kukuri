@@ -5,6 +5,7 @@ use kukuri_transport::EndpointAddr;
 use std::time::Duration;
 
 const ACCOUNT_DM_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
+const LEGACY_DM_HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct AccountReceiveDestination {
@@ -512,9 +513,9 @@ impl AppService {
                 )
                 .await?;
         }
-        let legacy_result = services
-            .hint_transport
-            .publish_hint(
+        let legacy_result = tokio::time::timeout(
+            LEGACY_DM_HINT_TIMEOUT,
+            services.hint_transport.publish_hint(
                 topic,
                 GossipHint::DirectMessageFrame {
                     topic_id: topic.clone(),
@@ -522,8 +523,11 @@ impl AppService {
                     message_id: row.message_id.clone(),
                     frame_hash: row.frame_blob_hash.clone(),
                 },
-            )
-            .await;
+            ),
+        )
+        .await
+        .context("legacy DM hint publication timed out")
+        .and_then(|result| result);
         let account_result = if let Some(destination) = account_destination {
             Self::publish_account_receive_dm_frame(services, row, destination).await
         } else {

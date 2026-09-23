@@ -304,6 +304,87 @@ async fn account_dm_retry_owner_is_single_and_shutdown_cancels_active_lookup() {
 }
 
 #[tokio::test]
+async fn blocked_pairwise_publish_cannot_stop_other_peer_or_account_offer() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+    use kukuri_transport::EndpointAddr;
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let peers = [generate_keys(), generate_keys()];
+    let local = sender.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        peers
+            .iter()
+            .map(|peer| AuthorRelationshipProjectionRow {
+                local_author_pubkey: local.clone(),
+                author_pubkey: peer.public_key_hex(),
+                following: true,
+                followed_by: true,
+                mutual: true,
+                friend_of_friend: false,
+                friend_of_friend_via_pubkeys: Vec::new(),
+                derived_at: 1,
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+    for (index, peer) in peers.iter().enumerate() {
+        store
+            .put_direct_message_outbox(DirectMessageOutboxRow {
+                dm_id: direct_message_id_for_participants(&sender.public_key(), &peer.public_key()),
+                message_id: format!("blocked-pairwise-{index}"),
+                peer_pubkey: peer.public_key_hex(),
+                frame_blob_hash: BlobHash::new("aa".repeat(32)),
+                created_at: index as i64,
+                last_attempt_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut hint_double = TrackingHintTransport::default();
+    hint_double.publish_hint_barrier = Some(barrier.clone());
+    let hints = Arc::new(hint_double);
+    *hints.resolved_destination.lock().await = Some(EndpointAddr::new(
+        iroh::SecretKey::from_bytes(&[30; 32]).public(),
+    ));
+    let services = ServiceHandles::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(
+            StaticTransport::new(PeerSnapshot::default()).with_local_endpoint_id(
+                iroh::SecretKey::from_bytes(&[31; 32]).public().to_string(),
+            ),
+        ),
+        hints.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        sender,
+    );
+    let flush =
+        tokio::spawn(
+            async move { AppService::flush_due_direct_message_outbox(&services, 1_000).await },
+        );
+    timeout(Duration::from_secs(2), barrier.wait())
+        .await
+        .expect("first peer must enter the blocked pairwise publisher");
+    assert_eq!(
+        timeout(Duration::from_secs(7), flush)
+            .await
+            .expect("a blocked peer must not stall account retry owner")
+            .unwrap()
+            .unwrap(),
+        2
+    );
+    assert_eq!(hints.offers.lock().await.len(), 2);
+    assert_eq!(store.list_direct_message_outbox().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn dm_due_owner_processes_bounded_new_and_retry_lanes() {
     use kukuri_core::BlobHash;
     use kukuri_store::DirectMessageOutboxRow;

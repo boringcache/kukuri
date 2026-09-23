@@ -322,6 +322,6 @@ N67の既知peer窓はCN/著者制御stateからのaccount候補探索をまだ�
 
 | ID | 入口 → helper → sink | guard / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N69 | identity復元/関係再構築 → account単一ownerの2秒tick → `list_due_direct_message_outbox` → 最大4行のpairwise hint/account offer | 未試行3件と期限到来済み再試行1件を別indexから読む。各行の試行時刻を更新し、mutual/row現在性を再確認してから送信。送信失敗/失効でも保護row維持。新ownerは重複起動せず、shutdown/dropで実行中futureを取消。pairwise受信streamからtimerを除去し、遅い送信が受信を塞がない | `due_dm_outbox_lanes_keep_new_and_old_work_bounded`、`due_direct_message_outbox_uses_both_sqlite_lane_indexes`、`dm_due_owner_processes_bounded_new_and_retry_lanes`、`account_dm_retry_owner_is_single_and_shutdown_cancels_active_lookup`、既存DM restart/mutual tests |
+| N69 | identity復元/関係再構築 → account単一ownerの2秒tick → `list_due_direct_message_outbox` → 最大4行のpairwise hint/account offer | 未試行3件と期限到来済み再試行1件を別indexから読む。各行の試行時刻を更新し、mutual/row現在性を再確認してから送信。旧pairwise hint・account offerは各2秒で取消し、遅いpeerが他laneを無期限に塞がない。送信失敗/失効でも保護row維持。新ownerは重複起動せず、shutdown/dropで実行中futureを取消。pairwise受信streamからtimerを除去 | `due_dm_outbox_lanes_keep_new_and_old_work_bounded`、`due_direct_message_outbox_uses_both_sqlite_lane_indexes`、`all_generations_have_paired_down`、`dm_due_owner_processes_bounded_new_and_retry_lanes`、`blocked_pairwise_publish_cannot_stop_other_peer_or_account_offer`、`account_dm_retry_owner_is_single_and_shutdown_cancels_active_lookup`、既存DM restart/mutual tests |
 
 N69は周期再送の総peer数依存だけを減らす。起動時の全conversation/outboxと全mutual graph読取り、旧pairwiseの相手別受信task、既知peer外の宛先発見は未移行。

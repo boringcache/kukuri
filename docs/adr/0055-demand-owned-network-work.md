@@ -219,6 +219,8 @@ DM outboxの周期再送は相手ごとの購読taskから分離し、account ru
 これにより継続する新規送信が古い再試行を押し出さず、古い失敗が新規送信を塞がない。
 索引の先頭4行以外や全peer/全outboxの読取り、相手ごとのretry timerは通常tickで行わない。
 ownerは再起動時のprojection復元後に取得し、shutdown/予期しないowner dropで処理中の照合・送信を取消す。
+旧pairwise hint送信も1回2秒で打ち切る。保留したpeerのためにaccount ownerの残りのlaneや
+同じ行のaccount offerが無期限に止まらないようにし、失敗しても保護outboxを維持する。
 更新済み端末同士の未完了DMを保全するための移行であり、旧版との互換期間は設けない。
 
 private rotation/freeze/失効には投稿通知と別の制御capsuleを使う。
