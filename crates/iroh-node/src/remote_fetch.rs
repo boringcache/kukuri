@@ -114,12 +114,20 @@ pub async fn fetch_verified_receive_offer_payload(
         "invalid receive offer payload size"
     );
     let hash = iroh_blobs::Hash::from_str(reference.payload_hash.as_str())?;
+    anyhow::ensure!(
+        current_time_ms()? < offer.expires_at_ms(),
+        "receive offer expired before fetch"
+    );
     let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
     let lease = node
         .network_work
         .acquire_bounded_blob(*hash.as_bytes(), max_bytes, deadline)
         .await?;
     let work = async {
+        anyhow::ensure!(
+            current_time_ms()? < offer.expires_at_ms(),
+            "receive offer expired before fetch"
+        );
         let binding = fetch_receive_endpoint_binding(
             node.endpoint(),
             provider.clone(),
@@ -130,6 +138,11 @@ pub async fn fetch_verified_receive_offer_payload(
         anyhow::ensure!(
             binding.endpoint_id() == reference.provider_endpoint_id,
             "receive offer binding provider mismatch"
+        );
+        let now_ms = current_time_ms()?;
+        anyhow::ensure!(
+            now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
+            "receive offer or provider binding expired before payload request"
         );
         let connection = timeout(
             REMOTE_FETCH_CONNECT_TIMEOUT,
@@ -153,10 +166,7 @@ pub async fn fetch_verified_receive_offer_payload(
             iroh_blobs::Hash::new(&bytes) == hash,
             "receive offer payload hash mismatch"
         );
-        let now_ms: i64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
+        let now_ms = current_time_ms()?;
         anyhow::ensure!(
             now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
             "receive offer or provider binding expired"
@@ -172,6 +182,13 @@ pub async fn fetch_verified_receive_offer_payload(
     };
     anyhow::ensure!(lease.finish(), "receive offer payload fetch scope ended");
     result
+}
+
+fn current_time_ms() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?)
 }
 
 struct CloseOfferConnection(iroh::endpoint::Connection);

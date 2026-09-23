@@ -82,7 +82,7 @@ private manifestはさらにchannel/epoch別に暗号化する。DM frame・添�
 | OFFER-4: 一つの受信routeで四種の小さい参照を実gossipで送受信できる（NW-8/9） | `account_receive_offer_crosses_real_gossip_with_one_recipient_route`。4,096byteを超えるmanifestへの参照も2,048byte以内 |
 | OFFER-5: 暗号部品はnetwork/storeを起動せず、署名済み参照をscope許可と混同しない（NET-INVAR-2） | inventory N32〜34。provider binding・scope/mutual/失効guardとblob取得/保存は後続のreceiverが所有 |
 | OFFER-6: sealed offerをaccount別の単一受信routeへ渡し、切替時に旧account受信を止める（NW-7/8） | transport N60。実gossipで四種の参照、account切替/解除、送信後保持の容量を確認。復号後の認可とpayload取得は未接続 |
-| OFFER-7: 署名済みprovider以外へpayload取得を拡げず、binding・byte数・hashを照合する（NW-2/8/9） | N61。provider endpoint IDをI/O前に固定し、そのendpointのaccount bindingを確認。共通受付内の一時取得を65,536byteに制限。wrong endpoint、binding未設置/別account、宣言長不足、ローカル非保存を実Irohで確認。scope/mutual/epochと永続反映は未接続 |
+| OFFER-7: 署名済みprovider以外へpayload取得を拡げず、binding・byte数・hashを照合する（NW-2/8/9） | N61。provider endpoint IDとoffer期限をI/O前に固定し、そのendpointのaccount bindingを確認。共通受付内の一時取得を65,536byteに制限。wrong endpoint、binding未設置/別account、宣言長不足、保持後の期限切れ、ローカル非保存を実Irohで確認。scope/mutual/epochと永続反映は未接続 |
 
 OFFER-6の初回監査では、receiver/送信保持taskをspawnした後に管理lockの`await`があり、caller取消で登録前taskが残る不備と、Fakeの旧account streamが切替/解除後も配送する差を検出した。前者は登録lockを先に取得してspawnと登録を非await区間に置き、停止中はhandleを台帳に残してabort完了を待つ。後者はFakeにもaccount世代の終了signalを持たせた。両方を旧実装で失敗する局所testとして固定し、修正後の関連7件が成功した。固定headの再監査とCI前にはblocker解消扱いにしない。
 

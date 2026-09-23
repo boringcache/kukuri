@@ -265,6 +265,6 @@ N60単独のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip�
 
 | ID | 入口 → helper → sink | guard / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N61 | `BlobService::fetch_verified_receive_offer_payload` → node共通受付 → receive-binding ALPN → 同じendpointのblob ALPN → memory bytes | `VerifiedReceiveOffer`の署名済みprovider IDと候補ID一致をI/O前に検査。QUIC相手とsender accountのbindingを確認してからblobを要求。宣言byte数最大65,536をstream中に制限し、完了時に実長/BLAKE3/offer・binding期限を再確認。保存せず、接続は結果・取消で閉じる。共通8実行枠と受付時から30秒期限を使用 | `signed_provider_offer_fetches_only_its_bounded_manifest_without_storing_it`、`offer_fetch_rejects_wrong_endpoint_missing_binding_and_declared_length`、`bounded_offer_blob_work_shares_the_display_slot_and_stops_on_close` |
+| N61 | `BlobService::fetch_verified_receive_offer_payload` → node共通受付 → receive-binding ALPN → 同じendpointのblob ALPN → memory bytes | `VerifiedReceiveOffer`の署名済みprovider IDと候補ID一致、offer期限をI/O前に検査。受付待機後とblob要求前にもoffer/binding期限を確認。QUIC相手とsender accountのbindingを確認してからblobを要求。宣言byte数最大65,536をstream中に制限し、完了時に実長/BLAKE3/両期限を再確認。保存せず、接続は結果・取消で閉じる。共通8実行枠と受付時から30秒期限を使用 | `signed_provider_offer_fetches_only_its_bounded_manifest_without_storing_it`、`offer_fetch_rejects_wrong_endpoint_missing_binding_and_declared_length`、`retained_expired_offer_is_rejected_before_provider_io`、`bounded_offer_blob_work_shares_the_display_slot_and_stops_on_close` |
 
 N61はprovider bindingを公開accountへ結ぶだけで、public source参加・DM mutual・private epoch/capabilityの許可を証明しない。アプリ側でこれらをI/O前と反映直前に確認し、失効時に要求futureを中止するまで受信経路として有効化しない。

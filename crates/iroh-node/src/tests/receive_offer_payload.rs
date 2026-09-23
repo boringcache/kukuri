@@ -179,3 +179,42 @@ async fn offer_fetch_rejects_wrong_endpoint_missing_binding_and_declared_length(
     receiver.shutdown().await.unwrap();
     other.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn retained_expired_offer_is_rejected_before_provider_io() {
+    let provider = IrohDocsNode::memory().await.unwrap();
+    let receiver = IrohDocsNode::memory().await.unwrap();
+    let sender = KukuriKeys::generate();
+    let recipient = KukuriKeys::generate();
+    let now: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    let issued_at = now - 2_000;
+    let sealed = seal_receive_offer(
+        &sender,
+        &recipient.public_key(),
+        ReceiveOfferReferenceV1 {
+            provider_endpoint_id: provider.endpoint().id().to_string(),
+            payload_hash: BlobHash("11".repeat(32)),
+            payload_bytes: 1,
+            scope: ReceiveOfferScopeV1::PublicSource,
+        },
+        issued_at,
+        now - 1,
+    )
+    .unwrap();
+    let verified = sealed.open(&recipient, issued_at).unwrap();
+    let error = remote_fetch::fetch_verified_receive_offer_payload(
+        &receiver,
+        &verified,
+        provider.endpoint().addr(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("expired before fetch"));
+    provider.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
