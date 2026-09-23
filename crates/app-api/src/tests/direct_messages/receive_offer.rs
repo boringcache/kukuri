@@ -6,6 +6,26 @@ use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferStream};
 struct ProbeOfferTransport {
     unsubscribes: AtomicUsize,
     subscribe_barrier: Option<Arc<tokio::sync::Barrier>>,
+    stream_drops: Arc<AtomicUsize>,
+}
+
+struct CountedPendingOfferStream(Arc<AtomicUsize>);
+
+impl futures_util::Stream for CountedPendingOfferStream {
+    type Item = ReceiveOfferEnvelope;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for CountedPendingOfferStream {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -27,7 +47,9 @@ impl HintTransport for ProbeOfferTransport {
             barrier.wait().await;
             barrier.wait().await;
         }
-        Ok(Box::pin(futures_util::stream::pending()))
+        Ok(Box::pin(CountedPendingOfferStream(Arc::clone(
+            &self.stream_drops,
+        ))))
     }
 
     async fn unsubscribe_receive_offers(&self, _recipient: &Pubkey) -> Result<()> {
@@ -442,7 +464,7 @@ async fn account_offer_rechecks_mutual_after_provider_io_before_reflection() {
 }
 
 #[tokio::test]
-async fn dropping_account_owner_unsubscribes_receive_route() {
+async fn dropping_account_owner_aborts_offer_stream() {
     let store = Arc::new(MemoryStore::default());
     let transport = Arc::new(ProbeOfferTransport::default());
     let app = AppService::from_handles(ServiceHandles::new(
@@ -457,12 +479,12 @@ async fn dropping_account_owner_unsubscribes_receive_route() {
     app.start_account_receive_offers().await.unwrap();
     drop(app);
     timeout(Duration::from_secs(1), async {
-        while transport.unsubscribes.load(Ordering::SeqCst) != 1 {
+        while transport.stream_drops.load(Ordering::SeqCst) != 1 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("drop should unsubscribe account route");
+    .expect("drop should cancel account offer processing");
 }
 
 #[tokio::test]
@@ -472,6 +494,7 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
     let transport = Arc::new(ProbeOfferTransport {
         unsubscribes: AtomicUsize::new(0),
         subscribe_barrier: Some(barrier.clone()),
+        stream_drops: Arc::new(AtomicUsize::new(0)),
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),

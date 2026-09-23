@@ -34,36 +34,25 @@ pub(crate) struct SubscriptionRegistry {
     pub(crate) replica_sync_restart_deadlines: Arc<Mutex<HashMap<String, i64>>>,
 }
 
-pub(crate) struct AbortOnDropTask {
-    handle: Option<JoinHandle<()>>,
-    account_route: Option<(Arc<dyn HintTransport>, Pubkey)>,
-}
+pub(crate) struct AbortOnDropTask(Option<JoinHandle<()>>);
 
 impl AbortOnDropTask {
-    pub(crate) fn new_account_route(
-        handle: JoinHandle<()>,
-        transport: Arc<dyn HintTransport>,
-        recipient: Pubkey,
-    ) -> Self {
-        Self {
-            handle: Some(handle),
-            account_route: Some((transport, recipient)),
-        }
+    pub(crate) fn new(handle: JoinHandle<()>) -> Self {
+        Self(Some(handle))
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+        self.0.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     pub(crate) fn abort(&self) {
-        if let Some(handle) = &self.handle {
+        if let Some(handle) = &self.0 {
             handle.abort();
         }
     }
 
     pub(crate) async fn wait(mut self) {
-        self.account_route.take();
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.0.take() {
             let _ = handle.await;
         }
     }
@@ -72,12 +61,5 @@ impl AbortOnDropTask {
 impl Drop for AbortOnDropTask {
     fn drop(&mut self) {
         self.abort();
-        if let Some((transport, recipient)) = self.account_route.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            runtime.spawn(async move {
-                let _ = transport.unsubscribe_receive_offers(&recipient).await;
-            });
-        }
     }
 }

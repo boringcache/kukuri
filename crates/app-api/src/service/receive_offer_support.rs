@@ -83,17 +83,14 @@ impl AppService {
         let closed = Arc::clone(closed);
         let last_sync = Arc::clone(&self.last_sync_ts);
         let notification_inserted = Arc::clone(&self.notification_inserted_notify);
-        let unsubscribe_transport = Arc::clone(&services.hint_transport);
-        let unsubscribe_recipient = recipient.clone();
-        *owner = Some(AbortOnDropTask::new_account_route(
-            tokio::spawn(async move {
-                let mut stream = Some(stream);
-                loop {
-                    if let Some(active_stream) = stream.take() {
-                        let active_services = services.clone();
-                        let active_last_sync = Arc::clone(&last_sync);
-                        let active_notification = Arc::clone(&notification_inserted);
-                        active_stream
+        *owner = Some(AbortOnDropTask::new(tokio::spawn(async move {
+            let mut stream = Some(stream);
+            loop {
+                if let Some(active_stream) = stream.take() {
+                    let active_services = services.clone();
+                    let active_last_sync = Arc::clone(&last_sync);
+                    let active_notification = Arc::clone(&notification_inserted);
+                    active_stream
                         .for_each_concurrent(RECEIVE_OFFER_MAX_IN_FLIGHT, move |envelope| {
                             let services = active_services.clone();
                             let last_sync = Arc::clone(&active_last_sync);
@@ -112,29 +109,26 @@ impl AppService {
                             }
                         })
                         .await;
-                    }
-                    if closed.load(Ordering::Acquire) {
-                        return;
-                    }
-                    tokio::time::sleep(RECEIVE_OFFER_RESTART_DELAY).await;
-                    if closed.load(Ordering::Acquire) {
-                        return;
-                    }
-                    match services
-                        .hint_transport
-                        .subscribe_receive_offers(&recipient)
-                        .await
-                    {
-                        Ok(next) => stream = Some(next),
-                        Err(error) => {
-                            tracing::debug!(%error, "account receive route retry deferred");
-                        }
+                }
+                if closed.load(Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(RECEIVE_OFFER_RESTART_DELAY).await;
+                if closed.load(Ordering::Acquire) {
+                    return;
+                }
+                match services
+                    .hint_transport
+                    .subscribe_receive_offers(&recipient)
+                    .await
+                {
+                    Ok(next) => stream = Some(next),
+                    Err(error) => {
+                        tracing::debug!(%error, "account receive route retry deferred");
                     }
                 }
-            }),
-            unsubscribe_transport,
-            unsubscribe_recipient,
-        ));
+            }
+        })));
         Ok(())
     }
 
