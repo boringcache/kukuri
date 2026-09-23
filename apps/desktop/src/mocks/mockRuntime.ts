@@ -282,6 +282,7 @@ export function createMockRuntime(options?: DesktopMockApiOptions): MockRuntime 
       send_enabled: author.mutual,
       peer_count: author.mutual ? 1 : 0,
       pending_outbox_count: 0,
+      pending_outbox_has_more: false,
     };
   }
 

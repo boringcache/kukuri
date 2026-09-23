@@ -24,7 +24,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N08 `spawn_subscription_task/ensure_joined_private_channel_subscriptions`、`service/private_channels_support.rs` | private参加/表示/restart。recovery tick 1秒 | audience/epoch確認、event/hint/復旧。channel退出で停止 | 全joined/各channelの周期/期限。P3/P4 | NW-3/7/9 |
 | N09 `ensure_author_subscriptions_for_rows/spawn_author_subscription`、`service/social_runtime_support.rs` | row表示、author操作、1秒catchup、bootstrap recovery | docs/hint receiverとbootstrap task。著者購読registry | 著者登録累積/各author周期。P3/P4 | NW-1/5、author署名/権限 |
 | N10 `rebuild_author_relationships/current_mutual_direct_message_peers/schedule_direct_message_reconcile`、`social_runtime_support.rs/social_helpers.rs` | social変更/startup/DM操作 | 全following/followerとFoF確認→DM reconcile | graph全体の列挙と全subscription差分。P3対象別索引 | NW-8、mutual未確認時拒否 |
-| N11 `reconcile_direct_message_subscriptions/spawn_direct_message_subscription/direct_message_topic_snapshot`、`service/direct_messages_subscription_support.rs` | mutual peer単位、2秒outbox tick | pairwise hints、peer別outbox64行ページのcursorと1巡の固定終点をtaskが保持。registryで停止 | 再送tickのoutbox全件filterはN64で撤去。DM相手数×task/timer、起動時/DM statusの全件読取りと全peers snapshotはP3残件 | NW-8/9、ACK/tombstone |
+| N11 `reconcile_direct_message_subscriptions/spawn_direct_message_subscription/direct_message_topic_snapshot`、`service/direct_messages_subscription_support.rs` | mutual peer単位、2秒outbox tick | pairwise hints、peer別outbox64行ページのcursorと1巡の固定終点をtaskが保持。registryで停止 | 再送tickのoutbox全件filterはN64、DM statusの全件読取りはN65で撤去。DM相手数×task/timer、起動時の全件読取りと全peers snapshotはP3残件 | NW-8/9、ACK/tombstone |
 | N12 `session_projection.rs`、`session_display.rs`、UI `SessionVisibility/useSessionDisplay` | 表示observer、window/columnの非表示 | 対象64/observer64、表示futureをcancel、保存前再guard | 既存の有界需要をP3へ接続。参加sessionの寿命とは別 | NW-4/7、既存session manifest tests |
 | N13 `run_community_node_session_maintenance_once/start_community_node_session_scheduler`、`cn-runtime/scheduler_support.rs` | runtime起動、15秒、設定node全体 | `MaintenanceTasks`がjobごとのfutureを所有、Skip、shutdown停止 | 所有は既存。node全体再列挙とstatusからselfheal。P3due索引 | NW-6、mixed認証/同意 |
 | N14 `maybe_self_heal_community_node_connectivity/repair_community_node_connectivity`、`cn-runtime/reconnect_support.rs` | sync status不健全、期限付きbackoff | reconnect成功でreset、seed/購読再適用へ連鎖 | 全active/全ready nodeへ波及。P3差分と観測 | NW-5/6/7 |
@@ -292,3 +292,11 @@ N63はwarmup taskの停止所有を対象とし、topic全体やpeer全体の走
 | N64 | DM送信/相手別2秒tick → `DirectMessageStore::list_direct_message_outbox_for_peer_page` → 既存署名frame hashのpairwise hint | SQLiteの(peer,created_at,message_id,dm_id)索引を使い64行＋続き1行だけ読む。Memoryも同順索引を更新。1巡の開始時にpeerの末尾keyを固定し、tickごとにその終点までcursorを進めて先頭へ戻る。途中の新規DMは巡回を延ばさず、保存した1rowを直接送信する。mutual、ACK、tombstoneと保護rowは従来どおり | `direct_message_outbox_peer_pages_ignore_other_peer_history`、`new_outbox_rows_cannot_starve_older_unacked_rows`、`direct_message_outbox_peer_page_uses_the_sqlite_cursor_index`、`dm_outbox_retry_reads_only_one_peer_page_per_tick`、既存DM delivery/restart・migration roundtrip/backend parity |
 
 N64は再送tickと新規送信時のoutbox読取りだけを有限化する。`resume_direct_message_state`と`direct_message_status_view`はまだ全outboxを読み、DM peer/topicごとの常時taskと旧pairwise配送も残る。outboxは保護データであり、容量のために削除・成功扱いしない。新索引は端末内に留まり、外部送信は既存hintだけ。
+
+## DM状態表示のpeer別上限窓（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N65 | DM状態/会話表示 → `direct_message_status_view` → `list_direct_message_outbox_for_peer_page` | peer別索引の先頭64行だけを読み、続きがある場合は`pending_outbox_has_more`を立てて画面で`64+`と表示。0〜64件は正確な値を維持。CLIの厳格出力schemaにもflagを登録。保護outboxを削除せず、送信・ACK判定へ計数を流用しない | `dm_status_uses_a_bounded_peer_outbox_window`、`dm_status_and_conversation_outputs_accept_the_bounded_count_flag`、既存DM状態・送信待ち/restart・IPC型/表示契約 |
+
+N65は個別状態表示の全outbox走査だけを除く。会話一覧全件、起動時の全outbox/会話/相互peer走査、peerごとの常時taskは残る。N64の「未完了」記録は当時の状態として残し、この欄で差分を示す。

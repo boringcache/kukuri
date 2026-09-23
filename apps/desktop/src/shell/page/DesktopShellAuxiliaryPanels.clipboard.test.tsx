@@ -20,7 +20,8 @@ test('auxiliary Conversation composer forwards clipboard images and leaves text 
         mutual: true,
         send_enabled: true,
         peer_count: 1,
-        pending_outbox_count: 0,
+        pending_outbox_count: 64,
+        pending_outbox_has_more: true,
       },
     },
   });
@@ -37,7 +38,9 @@ test('auxiliary Conversation composer forwards clipboard images and leaves text 
   render(
     <DesktopShellStoreContext.Provider value={store}>
       <DesktopShellMessagesSurface
-        t={(key) => key}
+        t={(key, options) =>
+          key === 'shell:messages.pendingOutbox' ? String(options?.count) : key
+        }
         locale='en'
         viewModels={viewModels}
         openDirectMessageList={vi.fn()}
@@ -55,6 +58,7 @@ test('auxiliary Conversation composer forwards clipboard images and leaves text 
   );
 
   const textarea = screen.getByPlaceholderText('common:composer.writeMessage');
+  expect(screen.getByText('64+')).toBeTruthy();
   const image = new File(['image'], 'clipboard.png', { type: 'image/png' });
   expect(
     fireEvent.paste(textarea, {

@@ -224,3 +224,37 @@ pub(super) fn redact_protocol_error(
     error.details = None;
     error
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::validate_command_output;
+    use crate::registry::{CommandOutput, CommandRegistry};
+
+    #[test]
+    fn dm_status_and_conversation_outputs_accept_the_bounded_count_flag() {
+        let registry = CommandRegistry::builtin();
+        let status = json!({
+            "peer_pubkey": "a", "dm_id": "dm", "mutual": true,
+            "send_enabled": true, "peer_count": 1,
+            "pending_outbox_count": 64, "pending_outbox_has_more": true
+        });
+        let conversation = json!({
+            "dm_id": "dm", "peer_pubkey": "a", "peer_name": null,
+            "peer_display_name": null, "peer_picture_asset": null,
+            "updated_at": 1, "last_message_at": null,
+            "last_message_id": null, "last_message_preview": null,
+            "status": status
+        });
+        for (command, output) in [
+            ("get_direct_message_status", status),
+            ("open_direct_message", conversation.clone()),
+            ("list_direct_messages", json!([conversation])),
+        ] {
+            let metadata = &registry.get(command).expect("registered command").metadata;
+            validate_command_output(metadata, &CommandOutput::Unary(output), None)
+                .unwrap_or_else(|error| panic!("{command} output was rejected: {error}"));
+        }
+    }
+}

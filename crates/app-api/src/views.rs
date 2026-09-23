@@ -360,6 +360,7 @@ pub struct DirectMessageStatusView {
     pub send_enabled: bool,
     pub peer_count: usize,
     pub pending_outbox_count: usize,
+    pub pending_outbox_has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
