@@ -10,8 +10,9 @@ import {
 } from '@/shell/stateUpdates';
 
 describe('stateUpdates', () => {
-  it('setRecordEntry は 1 キーだけ差し替えた新オブジェクトを返す', () => {
+  it('setRecordEntry は変更時だけ新オブジェクトを返す', () => {
     const current = { a: 1, b: 2 };
+    expect(setRecordEntry('a', 1)(current)).toBe(current);
     const next = setRecordEntry('a', 10)(current);
     expect(next).toEqual({ a: 10, b: 2 });
     expect(next).not.toBe(current);
@@ -20,6 +21,7 @@ describe('stateUpdates', () => {
 
   it('updateRecordEntry は現在値(未定義含む)から導出する', () => {
     const current: Record<string, number> = { a: 1 };
+    expect(updateRecordEntry<number>('a', (prev) => prev ?? 0)(current)).toBe(current);
     expect(updateRecordEntry<number>('a', (prev) => (prev ?? 0) + 1)(current)).toEqual({ a: 2 });
     expect(updateRecordEntry<number>('b', (prev) => (prev ?? 0) + 1)(current)).toEqual({
       a: 1,

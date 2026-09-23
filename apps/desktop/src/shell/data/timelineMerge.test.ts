@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 
 import type { PostView } from '@/lib/api';
+import { updateRecordEntry } from '@/shell/stateUpdates';
 
 import { buildPaginatedPost } from '../DesktopShellPage.testHelpers';
 import {
@@ -208,6 +209,31 @@ describe('hasLoadedOlderAuthoritativePosts', () => {
 });
 
 describe('mergeRefreshedVisiblePosts', () => {
+  test('unchanged head refresh keeps the displayed timeline and store snapshot', () => {
+    const current = [post('new-1'), post('new-2')];
+    const snapshot = { topic: current };
+    const refresh = [post('new-1'), post('new-2')];
+    const apply = (incoming: PostView[]) =>
+      updateRecordEntry<PostView[]>('topic', (visible) =>
+        mergeRefreshedVisiblePosts(visible ?? [], incoming, true)
+      )(snapshot);
+
+    expect(apply(refresh)).toBe(snapshot);
+    const changed = apply([post('new-1', { created_at: 999 }), refresh[1]]);
+    expect(changed).not.toBe(snapshot);
+    expect(ids(changed.topic)).toEqual(['new-1', 'new-2']);
+    expect(changed.topic[0]?.created_at).toBe(999);
+  });
+
+  test('refresh removes an optimistic echo after an unchanged head row', () => {
+    const current = [
+      post('server-1'),
+      post('local-1', { local_state: 'syncing', server_object_id: 'server-1' }),
+    ];
+    const result = mergeRefreshedVisiblePosts(current, [post('server-1')], true);
+    expect(ids(result)).toEqual(['server-1']);
+  });
+
   // preserveOlderPages 真偽 × optimistic post(local_state 付き)の保持 ×
   // server_object_id による同一視(postIdentityKey)の組合せ表。
   const cases: Array<{

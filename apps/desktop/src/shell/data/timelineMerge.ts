@@ -144,6 +144,21 @@ export function mergeRefreshedVisiblePosts(
   incoming: PostView[],
   preserveOlderPages: boolean
 ): PostView[] {
+  if (
+    current.length === incoming.length &&
+    new Set(incoming.map(postIdentityKey)).size === incoming.length &&
+    incoming.every((post, index) => {
+      const existing = current[index];
+      return (
+        !existing.local_state &&
+        !post.local_state &&
+        postIdentityKey(existing) === postIdentityKey(post) &&
+        JSON.stringify(existing) === JSON.stringify(post)
+      );
+    })
+  ) {
+    return current;
+  }
   const authoritativeIds = new Set(incoming.map((post) => postIdentityKey(post)));
   const localPosts = current.filter((post) => {
     if (!post.local_state) {

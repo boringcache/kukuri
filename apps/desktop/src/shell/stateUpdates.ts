@@ -5,7 +5,7 @@ import type { AsyncPanelState } from '@/shell/store';
 // setter にそのまま渡せる updater を返す。
 
 /**
- * 1 キーを値で差し替える updater。常に新しいオブジェクトを返す(従来の spread と同じ)。
+ * 1 キーを値で差し替える updater。同じ値なら元のオブジェクトを返す。
  *
  * `NoInfer` により V は渡した値からではなく setter の文脈(状態フィールドの型)から
  * 推論される(`null` やリテラルを渡したとき V が狭く固定されるのを防ぐ)。
@@ -14,7 +14,10 @@ export function setRecordEntry<V>(
   key: string,
   value: NoInfer<V>
 ): (current: Record<string, V>) => Record<string, V> {
-  return (current) => ({ ...current, [key]: value as V });
+  return (current) =>
+    Object.prototype.hasOwnProperty.call(current, key) && Object.is(current[key], value)
+      ? current
+      : { ...current, [key]: value as V };
 }
 
 /** 1 キーを「現在値からの導出」で差し替える updater。V は文脈から推論(上と同じ理由)。 */
@@ -22,7 +25,12 @@ export function updateRecordEntry<V>(
   key: string,
   update: (prev: NoInfer<V> | undefined) => NoInfer<V>
 ): (current: Record<string, V>) => Record<string, V> {
-  return (current) => ({ ...current, [key]: update(current[key]) as V });
+  return (current) => {
+    const nextValue = update(current[key]);
+    return Object.prototype.hasOwnProperty.call(current, key) && Object.is(current[key], nextValue)
+      ? current
+      : { ...current, [key]: nextValue as V };
+  };
 }
 
 /**
