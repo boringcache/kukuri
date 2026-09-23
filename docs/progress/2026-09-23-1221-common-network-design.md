@@ -120,7 +120,9 @@ N67の区分C preflight: ownerは呼出中のtransport、候補窓とcacheはそ
 | seed/ticket追加後の再試行 | configured/bootstrap/imported BTreeMap→最大4候補の窓 | 1,000既知peerと継続挿入/削除でも全件clone/sortなし、古い候補へ進む | `destination_window_rotates_through_large_peer_history_in_four_candidate_steps`、`destination_cursor_reaches_old_peer_during_new_inserts_and_deletes` |
 | 配送失敗時のcache失効、stack再構築 | account/endpoint一致のcacheだけ削除、新transportの空cache | 旧in-flight結果は世代不一致で採用しない。別endpointの成功cacheを消さず、上限1,024account・期限排他 | `invalidation_rejects_stale_lookup_and_state_has_a_fixed_account_cap`、`cache_expires_and_invalidating_another_endpoint_preserves_current_binding` |
 
-局所結果: `cargo test -p kukuri-transport receive_destination --lib` 6件成功、`cargo check -p kukuri-desktop-runtime -p kukuri-transport`、変更2crateの`cargo clippy --all-targets -- -D warnings`、format、`cargo xtask oversized-files`成功。全体testはPR CIで確認する。
+N67初回固定head `278d44d3` の独立監査は2blockerでFAIL。cache lock待機中のshutdown後に古い宛先を返すこと、進行中のbinding照合をshutdownで止めず次候補へ接続し得ること、別endpointのcacheを保持したまま旧照合結果の上書きを許すことを確認した。shutdown/cache lockと旧probe X・新cache Yの2契約testは修正前にFAIL。cache返却後と各probe開始前のclosed確認、shutdown通知による照合futureの取消、全失効での世代更新と該当endpointだけのcache削除に修正し、9件の局所testで成功。実QUICの停止中照合が即時終了し接続を閉じる負例も追加した。新固定headの監査とCIまで解消判定しない。
+
+局所結果: `cargo test -p kukuri-transport receive_destination --lib` 9件成功、`cargo check -p kukuri-desktop-runtime -p kukuri-transport`、変更2crateの`cargo clippy --all-targets -- -D warnings`、format、`cargo xtask oversized-files`成功。全体testはPR CIで確認する。
 
 N66初回固定head `83d691cb` の独立監査は2blockerでFAIL。添付fetch中のmutual失効では旧実装がDM rowを拒否してもplaintext blobを1件保存した。失敗testを置き、各添付のfetch後・plaintext保存前にmutualを再確認して保存0とした。旧ownerのaccount名だけのroute解除は同一account新ownerを止め、旧実装のhandoff testがtimeoutでFAIL。transportのprocess一意leaseへunsubscribeを束縛し、旧leaseでは新streamを解除できないことを実IrohとFakeで確認した。shutdownをcancelしてもleaseをregistryへ残し、再度のshutdownで解除を完了するcontractも追加。新固定headの監査とCIまで解消判定しない。
 

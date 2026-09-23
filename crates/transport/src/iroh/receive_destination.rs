@@ -124,16 +124,15 @@ impl DestinationWindow {
         let Some(entry) = self.entries.get_mut(recipient) else {
             return;
         };
+        self.tick = tick;
+        entry.revision = tick;
         if entry
             .verified
             .as_ref()
-            .is_some_and(|cached| cached.address.id.to_string() != endpoint_id)
+            .is_some_and(|cached| cached.address.id.to_string() == endpoint_id)
         {
-            return;
+            entry.verified = None;
         }
-        self.tick = tick;
-        entry.revision = tick;
-        entry.verified = None;
     }
 }
 
@@ -156,6 +155,9 @@ impl IrohGossipTransport {
         recipient: &Pubkey,
     ) -> Result<Option<EndpointAddr>> {
         receive_route_for_account(recipient)?;
+        let shutdown = self.offer_shutdown_notify.notified();
+        tokio::pin!(shutdown);
+        shutdown.as_mut().enable();
         anyhow::ensure!(
             !self.offer_closed.load(Ordering::Acquire),
             "account receive offer transport is closed"
@@ -167,7 +169,7 @@ impl IrohGossipTransport {
             .await
             .cached(recipient, now_ms)
         {
-            return Ok(Some(cached));
+            return Ok((!self.offer_closed.load(Ordering::Acquire)).then_some(cached));
         }
         // No queue of recipient lookups grows behind a busy transport.
         let Ok(_permit) = self.receive_destination_probes.try_acquire() else {
@@ -183,15 +185,20 @@ impl IrohGossipTransport {
             .select(recipient, [&configured, &bootstrap, &imported]);
         drop((configured, bootstrap, imported));
         for candidate in candidates {
+            if self.offer_closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
             let deadline = Instant::now() + BINDING_PROBE_TIMEOUT;
-            let Ok(binding) = fetch_receive_endpoint_binding(
-                &self.endpoint,
-                candidate.clone(),
-                recipient,
-                deadline,
-            )
-            .await
-            else {
+            let result = tokio::select! {
+                _ = &mut shutdown => return Ok(None),
+                result = fetch_receive_endpoint_binding(
+                    &self.endpoint,
+                    candidate.clone(),
+                    recipient,
+                    deadline,
+                ) => result,
+            };
+            let Ok(binding) = result else {
                 continue;
             };
             if self.offer_closed.load(Ordering::Acquire) {
@@ -209,6 +216,11 @@ impl IrohGossipTransport {
                 expires_at_ms,
                 Instant::now() + Duration::from_millis((expires_at_ms - now_ms) as u64),
             );
+            if self.offer_closed.load(Ordering::Acquire) {
+                self.invalidate_receive_destination_impl(recipient, &candidate.id.to_string())
+                    .await;
+                return Ok(None);
+            }
             return Ok(stored.then_some(candidate));
         }
         Ok(None)

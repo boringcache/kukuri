@@ -1,6 +1,25 @@
 use super::*;
 use crate::receive_binding::{RECEIVE_BINDING_ALPN, ReceiveBindingProtocol};
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler};
 use kukuri_core::{KukuriKeys, ReceiveEndpointBindingV1};
+
+#[derive(Debug)]
+struct StalledDestinationBinding {
+    requested: Arc<Notify>,
+    closed: Arc<Notify>,
+}
+
+impl ProtocolHandler for StalledDestinationBinding {
+    async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
+        let (_send, mut recv) = connection.accept_bi().await?;
+        recv.read_to_end(1).await.map_err(AcceptError::from_err)?;
+        self.requested.notify_one();
+        connection.closed().await;
+        self.closed.notify_one();
+        Ok(())
+    }
+}
 
 #[test]
 fn destination_window_rotates_through_large_peer_history_in_four_candidate_steps() {
@@ -103,6 +122,10 @@ fn cache_expires_and_invalidating_another_endpoint_preserves_current_binding() {
     );
     assert_eq!(state.cached(&recipient, 99).unwrap().id, id);
     assert!(state.cached(&recipient, 100).is_none());
+    let (_, revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
     assert!(state.store_verified(
         &recipient,
         revision,
@@ -111,6 +134,112 @@ fn cache_expires_and_invalidating_another_endpoint_preserves_current_binding() {
         Instant::now() - Duration::from_secs(1),
     ));
     assert!(state.cached(&recipient, 99).is_none());
+}
+
+#[test]
+fn invalidating_old_probe_cannot_replace_newer_verified_endpoint() {
+    let recipient = Pubkey::from("account-d");
+    let old_id = SecretKey::from_bytes(&[10; 32]).public();
+    let new_id = SecretKey::from_bytes(&[11; 32]).public();
+    let mut state = DestinationWindow::default();
+    let (_, old_revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    assert!(state.store_verified(
+        &recipient,
+        old_revision,
+        EndpointAddr::new(new_id),
+        i64::MAX,
+        Instant::now() + Duration::from_secs(1),
+    ));
+    state.invalidate(&recipient, &old_id.to_string());
+    assert!(!state.store_verified(
+        &recipient,
+        old_revision,
+        EndpointAddr::new(old_id),
+        i64::MAX,
+        Instant::now() + Duration::from_secs(1),
+    ));
+    assert_eq!(state.cached(&recipient, 0).unwrap().id, new_id);
+}
+
+#[tokio::test]
+async fn shutdown_during_cache_lock_wait_does_not_return_cached_destination() {
+    let transport = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+    let recipient = KukuriKeys::generate().public_key();
+    let id = SecretKey::from_bytes(&[12; 32]).public();
+    let mut state = transport.receive_destinations.lock().await;
+    let (_, revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    assert!(state.store_verified(
+        &recipient,
+        revision,
+        EndpointAddr::new(id),
+        i64::MAX,
+        Instant::now() + Duration::from_secs(10),
+    ));
+    let resolving = Arc::clone(&transport);
+    let account = recipient.clone();
+    let mut task =
+        tokio::spawn(async move { resolving.resolve_receive_destination(&account).await });
+    assert!(timeout(Duration::from_millis(20), &mut task).await.is_err());
+    transport.shutdown().await;
+    drop(state);
+    assert!(task.await.unwrap().unwrap().is_none());
+    let mut transport = Arc::try_unwrap(transport).ok().unwrap();
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_cancels_active_binding_probe_and_closes_connection() {
+    let transport = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+    let receiver = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let requested = Arc::new(Notify::new());
+    let closed = Arc::new(Notify::new());
+    let router = Router::builder(receiver.clone())
+        .accept(
+            RECEIVE_BINDING_ALPN,
+            StalledDestinationBinding {
+                requested: requested.clone(),
+                closed: closed.clone(),
+            },
+        )
+        .spawn();
+    transport
+        .imported_peers
+        .lock()
+        .await
+        .insert(receiver.id().to_string(), receiver.addr());
+    let recipient = KukuriKeys::generate().public_key();
+    let resolving = Arc::clone(&transport);
+    let task = tokio::spawn(async move { resolving.resolve_receive_destination(&recipient).await });
+    timeout(Duration::from_secs(5), requested.notified())
+        .await
+        .unwrap();
+    transport.shutdown().await;
+    assert!(
+        timeout(Duration::from_millis(500), task)
+            .await
+            .expect("shutdown must cancel lookup before candidate deadline")
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    timeout(Duration::from_secs(2), closed.notified())
+        .await
+        .expect("shutdown must close the active binding connection");
+    router.shutdown().await.unwrap();
+    let mut transport = Arc::try_unwrap(transport).ok().unwrap();
+    transport._router.take().unwrap().shutdown().await.unwrap();
 }
 
 #[tokio::test]
