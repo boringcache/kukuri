@@ -135,6 +135,8 @@ CNのtopic presenceは15秒の時間窓を直近4個だけ候補探索し、topi
 各窓から最大16件を標本し、topic所属期限とpeer情報を最大64件だけ検証して最大8件を返す。
 Redis `SRANDMEMBER`の正のcountは[返却数に比例する操作](https://redis.io/docs/latest/commands/srandmember/)であり、
 topic全参加者の`SMEMBERS`は使わない。候補の完全列挙や応答だけによるaccount認証は行わない。
+bucketへの追加とTTL設定は[Valkey互換の`MULTI/EXEC` transaction](https://redis.io/docs/latest/develop/using-commands/transactions/)で
+一体に実行する。caller取消や応答喪失時にTTLなしの新bucketを残さない。
 CN不使用時は、既知の署名bindingからDHT解決するか、manual ticket/seedで到達したpeerとの
 binding交換および対象著者の制御stateの個別取得を使う。全author/全peerを探索しない。
 binding未取得/期限切れ/宛先不在は未解決として延期し、接続成功や配送成功を捏造しない。

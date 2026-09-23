@@ -114,15 +114,12 @@ impl TopicRendezvousStore {
                     self.ttl_seconds,
                 )
                 .await?;
-            let _: usize = connection
-                .sadd(key.as_str(), endpoint.endpoint_id.as_str())
-                .await?;
-            let _: bool = connection
-                .expire(
-                    key.as_str(),
-                    (self.ttl_seconds + RENDEZVOUS_BUCKET_SECONDS) as i64,
-                )
-                .await?;
+            let bucket_update = bucket_update(
+                key.as_str(),
+                endpoint.endpoint_id.as_str(),
+                (self.ttl_seconds + RENDEZVOUS_BUCKET_SECONDS) as i64,
+            );
+            let _: () = bucket_update.query_async(&mut connection).await?;
         }
 
         for topic_key in &leaves {
@@ -249,6 +246,21 @@ fn recent_buckets(current: u64) -> impl Iterator<Item = u64> {
     (0..RENDEZVOUS_BUCKETS_TO_READ).filter_map(move |offset| current.checked_sub(offset))
 }
 
+fn bucket_update(key: &str, endpoint_id: &str, ttl_seconds: i64) -> redis::Pipeline {
+    let mut update = redis::pipe();
+    update
+        .atomic()
+        .cmd("SADD")
+        .arg(key)
+        .arg(endpoint_id)
+        .ignore()
+        .cmd("EXPIRE")
+        .arg(key)
+        .arg(ttl_seconds)
+        .ignore();
+    update
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +281,18 @@ mod tests {
         let redis_url = std::env::var("COMMUNITY_NODE_RENDEZVOUS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:16379/".to_string());
         TopicRendezvousStore::new(redis_url.as_str(), prefix)
+    }
+
+    #[test]
+    fn bucket_insert_and_ttl_are_one_valkey_transaction() {
+        let update = bucket_update("bucket", "peer-a", 60);
+        assert!(update.is_transaction());
+        let packed = String::from_utf8(update.get_packed_pipeline()).unwrap();
+        let multi = packed.find("MULTI").unwrap();
+        let add = packed.find("SADD").unwrap();
+        let expiry = packed.find("EXPIRE").unwrap();
+        let exec = packed.find("EXEC").unwrap();
+        assert!(multi < add && add < expiry && expiry < exec);
     }
 
     #[tokio::test]

@@ -247,7 +247,7 @@ N57はlocal OS通知のみを送る。新しいnetwork I/O、private参照の外
 
 | ID | 入口 → helper → sink | guard / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N59 | auth/consent済heartbeat → `TopicRendezvousStore::heartbeat` → Valkey topic窓/member/peer keyと候補JSON | 入力正規化後にValkey `TIME`で共通時刻。opaque topic keyのみ。15秒×直近4窓、窓TTL60秒・topic-peer/peer TTL45秒。窓ごと16件のdistinct標本、最大64候補のmembership/peerを検証し8件だけ返す。leaveは直近4窓とmemberを除去 | `rendezvous_candidates_do_not_grow_with_topic_membership`、`another_topic_cannot_extend_an_expired_membership`、`rendezvous_bucket_and_membership_have_finite_ttls`、`invalid_topic_is_rejected_before_valkey_io`、既存CN API auth/consent/privacy tests |
+| N59 | auth/consent済heartbeat → `TopicRendezvousStore::heartbeat` → Valkey topic窓/member/peer keyと候補JSON | 入力正規化後にValkey `TIME`で共通時刻。opaque topic keyのみ。15秒×直近4窓、窓TTL60秒・topic-peer/peer TTL45秒。SADD+EXPIREは同じMULTI/EXEC。窓ごと16件のdistinct標本、最大64候補のmembership/peerを検証し8件だけ返す。leaveは直近4窓とmemberを除去 | `rendezvous_candidates_do_not_grow_with_topic_membership`、`another_topic_cannot_extend_an_expired_membership`、`rendezvous_bucket_and_membership_have_finite_ttls`、`bucket_insert_and_ttl_are_one_valkey_transaction`、`invalid_topic_is_rejected_before_valkey_io`、既存CN API auth/consent/privacy tests |
 
 N59はtopic presenceのephemeral stateだけを増減する。auth/consentとendpoint bindingの確認は
 `cn-user-api`の既存handlerを通し、rendezvous応答をaccountの証明にしない。旧`topic:` SETは

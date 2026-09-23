@@ -346,3 +346,8 @@ topic keyは公開/privateとも既存のopaque hashを使い、CN応答自体�
 Postgres+Valkeyを使う既存CN APIのfresh candidateとprivacyの2件も、integration flagを
 有効にして成功した。無効topic入力がValkey接続より先に拒否される負例1件も成功。
 全体・slowはPR/CI、固定headの認証/同意/秘密境界は独立監査に委ねる。
+
+固定head監査ではSADD成功後に別commandのEXPIREへ進む途中でcancel/通信失敗すると、
+新bucketがTTLなしで残るblockerを発見した。SADDとEXPIREをRedis pipelineのatomic transactionへ
+統合し、`MULTI→SADD→EXPIRE→EXEC`を固定するcontractと正常時のTTL testで確認する。
+旧headの監査FAILはこのdeltaがPASSするまでmerge根拠に使わない。
