@@ -104,6 +104,8 @@ N11のDM outbox再送は毎tickで全rowを読み、相手pubkeyをメモリ側�
 
 N65では`direct_message_status_view`が全outboxを読みpeerでfilterする経路をpeer別索引の先頭64行に変更する。130件の対象と1,000件の無関係なoutboxに対し、修正前の表示計数130件という失敗を再現。64件より多い場合は下限を示すflagをIPC/画面へ渡し`64+`と表示する。保護rowは維持し、正確な計数が必要なACK等の判断にこの表示値を使わない。起動時の全件走査・全会話表示とpeerごとの常時taskは残る。
 
+N65初回固定commitの独立監査では、CLIの`additionalProperties:false`なDM状態schemaに新flagがなく、状態・会話取得の出力が`INTERNAL_ERROR`になるblockerを検出。新flagを持つ3種類の出力を実dispatcher検証へ渡すtestは修正前に`get_direct_message_status`でFAIL。CLI schemaへ必須booleanを追加し、同testと関連CLI contractを再確認する。
+
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。

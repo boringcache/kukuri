@@ -297,6 +297,6 @@ N64は再送tickと新規送信時のoutbox読取りだけを有限化する。`
 
 | ID | 入口 → helper → sink | guard / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N65 | DM状態/会話表示 → `direct_message_status_view` → `list_direct_message_outbox_for_peer_page` | peer別索引の先頭64行だけを読み、続きがある場合は`pending_outbox_has_more`を立てて画面で`64+`と表示。0〜64件は正確な値を維持。保護outboxを削除せず、送信・ACK判定へ計数を流用しない | `dm_status_uses_a_bounded_peer_outbox_window`、既存DM状態・送信待ち/restart・IPC型/表示契約 |
+| N65 | DM状態/会話表示 → `direct_message_status_view` → `list_direct_message_outbox_for_peer_page` | peer別索引の先頭64行だけを読み、続きがある場合は`pending_outbox_has_more`を立てて画面で`64+`と表示。0〜64件は正確な値を維持。CLIの厳格出力schemaにもflagを登録。保護outboxを削除せず、送信・ACK判定へ計数を流用しない | `dm_status_uses_a_bounded_peer_outbox_window`、`dm_status_and_conversation_outputs_accept_the_bounded_count_flag`、既存DM状態・送信待ち/restart・IPC型/表示契約 |
 
 N65は個別状態表示の全outbox走査だけを除く。会話一覧全件、起動時の全outbox/会話/相互peer走査、peerごとの常時taskは残る。N64の「未完了」記録は当時の状態として残し、この欄で差分を示す。
