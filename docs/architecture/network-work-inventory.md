@@ -281,6 +281,6 @@ N62はper-peer warmupの増幅だけを除く。`ensure_hint_topic`の初回boot
 
 | ID | 入口 → helper → sink | guard / 停止 | 対応contract |
 | --- | --- | --- | --- |
-| N63 | 初回join/peer追加 → receiverまたはtopic stateのwarmup task → gossip dial | 初回warmupはreceiver取消時にDropでabort。更新は同一topic世代で最大1taskを登録し、旧taskをabort/awaitしてから置換。解除/shutdownではclosed通知と全task abortを先に発行し、終了を待つ。join待ちの旧世代は通知で取消し、shutdown後のsubscribe登録を拒否 | `unsubscribing_during_initial_join_stops_its_warmup_task`、`unsubscribing_stops_a_registered_peer_update_warmup`、`hint_subscribe_waiting_for_registration_cannot_revive_after_shutdown`、`cancelled_hint_shutdown_aborts_all_topic_tasks_before_waiting`、既存ticket/seed更新・timed-out再購読 |
+| N63 | 初回join/peer追加 → receiverまたはtopic stateのwarmup task → gossip dial | 初回warmupはreceiver取消時にDropでabort。更新は同一topic世代で最大1taskを登録し、旧taskをabort/awaitしてから置換。解除/shutdownではclosed通知と全task abortを先に発行し、終了を待つ。join待ちの旧世代は通知で取消し、古いtimeout判定はsnapshot世代が現stateと一致するときだけ置換する。shutdown後のsubscribe登録を拒否 | `unsubscribing_during_initial_join_stops_its_warmup_task`、`unsubscribing_stops_a_registered_peer_update_warmup`、`hint_subscribe_waiting_for_registration_cannot_revive_after_shutdown`、`cancelled_hint_shutdown_aborts_all_topic_tasks_before_waiting`、`stale_rejoin_decision_cannot_remove_a_new_topic_generation`、既存ticket/seed更新・timed-out再購読 |
 
 N63はwarmup taskの停止所有を対象とし、topic全体やpeer全体の走査量を削減したと主張しない。`ensure_hint_topic`のbootstrap全件materializeと `extend_active_topic_peers` の全topic更新は残る。D2の現在の受信対象を維持するため、active topic数を暗黙に切り捨てない。

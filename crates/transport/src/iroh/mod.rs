@@ -125,6 +125,8 @@ pub struct IrohGossipTransport {
     outbound_offer_holds: Mutex<VecDeque<OutboundOfferHold>>,
     offer_closed: AtomicBool,
     hint_closed: AtomicBool,
+    #[cfg(test)]
+    hint_existing_snapshot_observed: Arc<Notify>,
     offer_shutdown_notify: Notify,
     #[cfg(test)]
     offer_receiver_tasks: Arc<AtomicUsize>,

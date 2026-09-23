@@ -96,6 +96,10 @@ N03のwarmupで全peer分のtaskをspawnしてから2 permitを待つ経路を�
 
 N04の停止境界では、topic解除中も初回joinの子warmup taskが残る失敗を局所testで再現した。receiver Drop guard、同一topic世代の更新task単一handle、closed通知、shutdown時の全task先行abort、subscribe登録前の閉鎖確認で、解除・世代置換・終了後の復活を防ぐ。関連の初回解除、更新handle解除、登録待機とshutdown競合、複数topic shutdown中断、実ticket/seed接続・timed-out再購読を確認する。全topic/peerの合成とtopic数に比例するreceiver数は残件。
 
+N63初回固定headの監査では、既存stateのtimeout判定がlock外で待つ間に新世代へ置換されると、古い判定がtopic名だけで新stateを削除するblockerを検出した。旧実装で失敗する`stale_rejoin_decision_cannot_remove_a_new_topic_generation`を置き、snapshot世代と現stateの一致をregistry lock下で照合してから削除するよう修正した。新固定headのdelta監査まで解消扱いにしない。
+
+同修正で`transport/src/iroh/topics.rs`が1,061行となり、oversized-file検査が新規超過を検出した。既存のtest module 375行を機械的に`topics_tests.rs`へ移し、製品コードとtestの責務を分離した。baselineは増やさず、移動後の同module 13件と変更crateの静的検査で確認する。
+
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。
