@@ -326,3 +326,33 @@ shutdown後にもeventを受け取ってFAIL。task handleをruntimeへ保持し
 Dropでもabortする修正後に同testとDrop testが成功した。既存sync observer/wireと合わせた
 runtime event4件、共有資源lock分類1件が成功。変更crateのclippy/format/sizeを局所で確認し、
 全体とslowはPR/CI、固定headのaccount境界は独立監査に委ねる。
+
+## P3: N28のCN topic rendezvous候補を期限つき窓から返す
+
+現行`TopicRendezvousStore::heartbeat`はauth/consent後の各topicで`SMEMBERS`→全ID sort→
+各peerのGETを行う。topic参加者が65件のときrequesterに65候補を返すFAILをValkey実接続で再現。
+topic keyは公開/privateとも既存のopaque hashを使い、CN応答自体をaccount証明にはしない。
+
+- RENDEZVOUS-1: 15秒bucketの直近4窓から各16件だけ候補を標本し、最大64件のmembership/peerを
+  調べて最大8件返す。Redisの正count`SRANDMEMBER`はcountに比例し、総集合は読み出さない。
+- RENDEZVOUS-2: topic-peer所属とpeer metadataは45秒TTL、bucket keyは60秒TTL。
+  時刻はValkey `TIME`で共有し、複数CN API host間の時計差で別窓へ分かれない。
+  別topicで同じpeerのmetadataが更新されても、失効した旧topic所属を復活させない。
+  leaveは直近4窓と所属keyを除去する。旧SET keyは45秒の既存TTLで自然退役する。
+- RENDEZVOUS-3: `cn-user-api`のbearer endpoint/consent guard、opaque topic key、
+  relay URL付与とレスポンスwireを維持し、CN無しのP2P経路は変更しない。
+
+修正後は65参加者で8候補、cross-topic期限/leaveと窓/member TTLのValkey関連3件が成功。
+Postgres+Valkeyを使う既存CN APIのfresh candidateとprivacyの2件も、integration flagを
+有効にして成功した。無効topic入力がValkey接続より先に拒否される負例1件も成功。
+全体・slowはPR/CI、固定headの認証/同意/秘密境界は独立監査に委ねる。
+
+固定head監査ではSADD成功後に別commandのEXPIREへ進む途中でcancel/通信失敗すると、
+新bucketがTTLなしで残るblockerを発見した。SADDとEXPIREをRedis pipelineのatomic transactionへ
+統合し、`MULTI→SADD→EXPIRE→EXEC`を固定するcontractと正常時のTTL testで確認する。
+旧headの監査FAILはこのdeltaがPASSするまでmerge根拠に使わない。
+
+修正headのCN CIでは新Valkey実接続test3件が同時に`timed out`でFAILした。composeのValkeyは
+healthyで、失敗は約500ms後。pin済みredis clientの既定response timeoutは500msで、
+局所の単独実行では3件とも成功していた。rendezvous専用接続のconnect/response timeoutを
+2秒に明示し、無制限待機や再試行taskを増やさず、負荷時の関連testを再確認する。
