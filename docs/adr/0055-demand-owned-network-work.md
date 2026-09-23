@@ -112,6 +112,41 @@ UIには保存済み内容と取得待ち/取得不能を返し、空の結果�
 - ownerの状態lockを保持したままnetwork I/Oを待たない。command受付、worker完了、需要更新、
   次のdeadlineだけで進める。timerはdeadline索引の先頭を待ち、起動遅延分を連続実行しない。
 
+### 実装前に固定する境界と負例
+
+#1221の固定head監査では、登録中のcancel、旧世代の遅い終了、権限確認後の別helperによる保存、
+ページ処理中の継続挿入、IPC出力schemaの更新漏れが繰り返し見つかった。
+次のPRでは変更した入口からsinkまでを先に辿り、**該当する**境界をcontractと失敗testで固定する。
+全PRへ無関係なtestを追加したり、inventoryの全行を毎回読み直したりはしない。
+
+- **所有と世代:** taskをspawnする場合は同じ非await区間でownerへ登録する。受付終了を先に通知し、
+  登録待ち・実行中・終了待ちのどこでcallerがcancelされても、taskと解除待ちのleaseを失わない。
+  同じaccount/topicの旧ownerは新世代のrouteやhandleを解除・奪還できない。
+  比較と登録/解除は同じlockまたは同等の原子的境界で行う。
+  `superseded`とtransport/endpoint再構築による終了を別の理由として扱い、前者は再登録せず、
+  後者は新世代の空きrouteに限って復旧する。旧世代の実行中futureも停止する。
+- **権限と反映:** `入口 → helper → sink`にある全awaitと、外部送信、復号済みblob保存、
+  projection/通知/outbox変更を列挙する。scope・mutual・private epochとowner世代を
+  I/O前だけでなく、取得後および各永続化・外部送信の直前に確認する。
+  添付などの下位helperがcallerの最後のguardより前に保存しないことを負例で確認する。
+  失効中のfutureは結果を破棄し、保護outboxを成功扱い・容量削除しない。
+- **有限な窓と公平性:** `LIMIT`を付けただけで完了としない。無関係な履歴を10倍にしたときの
+  読取り/待機回数と、処理中に毎回新規rowが増えるときのcursorの終端・古い未処理rowへの再訪を確認する。
+  削除、同一時刻のtie、再起動後も索引順と再開位置を保つ。
+- **公開契約の伝播:** Rust DTOやstore schemaを変えるPRは、CLIの厳格な出力schema、生成TS型、
+  fixture、UI表示、migration/goldenを利用箇所ごとに逆引きする。
+  型検査だけでなく実際のCLI出力validatorと表示上の意味（例: 上限値を`64+`と示す）を確認する。
+
+既存の負例は`stale_same_account_lease_cannot_unsubscribe_a_new_receiver`、
+`app_account_listener_reclaims_vacant_route_after_stack_rebuild`、
+`revoked_mutual_during_attachment_fetch_never_persists_plaintext`、
+`new_outbox_rows_cannot_starve_older_unacked_rows`、
+`dm_status_and_conversation_outputs_accept_the_bounded_count_flag`を参照する。
+
+既存不具合は修正前に失敗testで再現する。新しい経路は許可/拒否、cancel、世代置換、再構築、
+連続挿入のうち該当する状態を実装前のcontractに置く。ローカルでは変更関連のtestだけを実行し、
+全体の確認はPR CIで行う。独立監査はこの事前確認の代わりではなく、固定headで別に実施する。
+
 ## 4. 画面外の通知とDMの受信（D2）
 
 [ADR 0023](0023-local-notification-inbox-v1.md) の通知一覧・未読は端末SQLiteを正本とする。

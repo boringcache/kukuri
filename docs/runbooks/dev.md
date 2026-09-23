@@ -83,6 +83,13 @@ cargo xtask desktop-visual-test
 [現行inventory](../architecture/network-work-inventory.md)を参照する。
 設計案はProposedであり、現行経路の移行済みを意味しない。
 
+#1221の次のPRからは、[ADR 0055の実装前の境界](../adr/0055-demand-owned-network-work.md#実装前に固定する境界と負例)を
+変更した入口とsinkに適用する。PRの着手時に該当する所有/世代、権限/保存、cursorの公平性、
+公開schemaの伝播を選び、旧実装の失敗testまたは新経路の拒否/停止contractを先に置く。
+未該当の項目は理由を短く記し、全項目の機械的な再検査を目的にしない。
+#1221ではユーザー指示に従ってローカルtestを変更関連箇所に限り、全suiteはPR CIで確認する。
+独立監査は従来どおり固定headで行う。
+
 irohのmapped address回収を変更・更新するときは
 `python tools/check_iroh_resource_contract.py`（Python 3.13）で固定SHAの回収contractを確認する。
 Cargoの共有source cacheを変更せず、`target/upstream-contracts`内の一時checkoutへtestだけを追加する。
