@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use kukuri_core::ReceiveOfferScopeV1;
+use kukuri_core::{DirectMessageAckV1, ReceiveOfferScopeV1};
 use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope, ReceiveOfferStop};
 
 use super::direct_messages_delivery_support::DirectMessageHintServices;
@@ -215,14 +215,93 @@ impl AppService {
         let verified = envelope
             .offer
             .open(services.keys.as_ref(), Utc::now().timestamp_millis())?;
-        if !matches!(
-            verified.reference().scope,
-            ReceiveOfferScopeV1::DirectMessage
-        ) {
-            return Ok(false);
-        }
         let local = services.keys.public_key_hex();
         let sender = verified.sender().as_str();
+        let topic = derive_direct_message_topic(services.keys.as_ref(), verified.sender())?;
+        match &verified.reference().scope {
+            ReceiveOfferScopeV1::DirectMessageAck {
+                dm_id,
+                message_id,
+                acked_at,
+                signature,
+            } => {
+                if !receive_offer_dm_is_mutual(services, local.as_str(), sender).await?
+                    || Utc::now().timestamp_millis() >= verified.expires_at_ms()
+                {
+                    return Ok(false);
+                }
+                let hint = GossipHint::DirectMessageAck {
+                    topic_id: topic.clone(),
+                    ack: DirectMessageAckV1 {
+                        dm_id: dm_id.clone(),
+                        message_id: message_id.clone(),
+                        sender: verified.sender().clone(),
+                        recipient: verified.recipient().clone(),
+                        acked_at: *acked_at,
+                        signature: signature.clone(),
+                    },
+                };
+                return Self::handle_direct_message_hint(
+                    DirectMessageHintServices {
+                        services,
+                        local_author_pubkey: local.as_str(),
+                        peer_pubkey: sender,
+                        topic: &topic,
+                        ack_destination: None,
+                    },
+                    &hint,
+                )
+                .await;
+            }
+            ReceiveOfferScopeV1::DirectMessageFrame {
+                dm_id,
+                message_id,
+                frame_hash,
+            } => {
+                if !receive_offer_dm_is_mutual(services, local.as_str(), sender).await? {
+                    return Ok(false);
+                }
+                let provider =
+                    EndpointAddr::new(verified.reference().provider_endpoint_id.parse()?);
+                services
+                    .hint_transport
+                    .verify_receive_provider(verified.sender(), provider.clone())
+                    .await?;
+                if Utc::now().timestamp_millis() >= verified.expires_at_ms()
+                    || !receive_offer_dm_is_mutual(services, local.as_str(), sender).await?
+                {
+                    return Ok(false);
+                }
+                services
+                    .blob_service
+                    .learn_peer(&verified.reference().provider_endpoint_id)
+                    .await?;
+                if Utc::now().timestamp_millis() >= verified.expires_at_ms()
+                    || !receive_offer_dm_is_mutual(services, local.as_str(), sender).await?
+                {
+                    return Ok(false);
+                }
+                let hint = GossipHint::DirectMessageFrame {
+                    topic_id: topic.clone(),
+                    dm_id: dm_id.clone(),
+                    message_id: message_id.clone(),
+                    frame_hash: frame_hash.clone(),
+                };
+                return Self::handle_direct_message_hint(
+                    DirectMessageHintServices {
+                        services,
+                        local_author_pubkey: local.as_str(),
+                        peer_pubkey: sender,
+                        topic: &topic,
+                        ack_destination: Some(provider),
+                    },
+                    &hint,
+                )
+                .await;
+            }
+            ReceiveOfferScopeV1::DirectMessage => {}
+            _ => return Ok(false),
+        }
         if !receive_offer_dm_is_mutual(services, local.as_str(), sender).await? {
             return Ok(false);
         }
@@ -242,7 +321,6 @@ impl AppService {
             .await?;
         let hint: GossipHint =
             serde_json::from_slice(&payload).context("invalid direct message receive manifest")?;
-        let topic = derive_direct_message_topic(services.keys.as_ref(), verified.sender())?;
         if !matches!(
             &hint,
             GossipHint::DirectMessageFrame { topic_id, .. }

@@ -296,6 +296,7 @@ pub(crate) struct TrackingHintTransport {
     pub(crate) published_count: Arc<AtomicUsize>,
     pub(crate) resolved_destination: Arc<TokioMutex<Option<EndpointAddr>>>,
     pub(crate) resolved_count: Arc<AtomicUsize>,
+    pub(crate) resolve_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(crate) offers:
         Arc<TokioMutex<Vec<(Pubkey, EndpointAddr, kukuri_core::SealedReceiveOfferV1)>>>,
     pub(crate) fail_offer_publish: Arc<std::sync::atomic::AtomicBool>,
@@ -345,6 +346,10 @@ impl HintTransport for TrackingHintTransport {
         _recipient: &Pubkey,
     ) -> Result<Option<EndpointAddr>> {
         self.resolved_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(barrier) = &self.resolve_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
         Ok(self.resolved_destination.lock().await.clone())
     }
 

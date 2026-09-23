@@ -254,6 +254,10 @@ impl HintTransport for IrohGossipTransport {
         Ok(())
     }
 
+    async fn verify_receive_provider(&self, sender: &Pubkey, provider: EndpointAddr) -> Result<()> {
+        self.verify_receive_provider_impl(sender, provider).await
+    }
+
     async fn subscribe_receive_offers(
         &self,
         recipient: &Pubkey,

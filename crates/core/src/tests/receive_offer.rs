@@ -39,6 +39,72 @@ fn receive_offer_only_recipient_can_open_and_sender_is_authenticated() {
 }
 
 #[test]
+fn inline_dm_frame_and_signed_ack_fit_without_a_manifest_blob() {
+    let sender = KukuriKeys::generate();
+    let recipient = KukuriKeys::generate();
+    let dm_id =
+        crate::direct_message_id_for_participants(&sender.public_key(), &recipient.public_key());
+    let message_id = "dm-message-1790000000000-0123456789abcdef";
+    let frame = ReceiveOfferReferenceV1::inline(
+        "ab".repeat(32),
+        ReceiveOfferScopeV1::DirectMessageFrame {
+            dm_id: dm_id.clone(),
+            message_id: message_id.into(),
+            frame_hash: BlobHash("cd".repeat(32)),
+        },
+    )
+    .unwrap();
+    let sealed = seal_receive_offer(
+        &sender,
+        &recipient.public_key(),
+        frame.clone(),
+        NOW,
+        NOW + 60_000,
+    )
+    .unwrap();
+    assert!(sealed.encode().unwrap().len() <= RECEIVE_OFFER_MAX_BYTES);
+    assert_eq!(sealed.open(&recipient, NOW).unwrap().reference(), &frame);
+
+    let ack = crate::build_direct_message_ack(
+        &recipient,
+        &dm_id,
+        message_id,
+        &sender.public_key(),
+        NOW + 100,
+    )
+    .unwrap();
+    let inline_ack = ReceiveOfferReferenceV1::inline(
+        String::new(),
+        ReceiveOfferScopeV1::DirectMessageAck {
+            dm_id: ack.dm_id.clone(),
+            message_id: ack.message_id.clone(),
+            acked_at: ack.acked_at,
+            signature: ack.signature.clone(),
+        },
+    )
+    .unwrap();
+    let sealed_ack = seal_receive_offer(
+        &recipient,
+        &sender.public_key(),
+        inline_ack.clone(),
+        NOW,
+        NOW + 60_000,
+    )
+    .unwrap();
+    assert!(sealed_ack.encode().unwrap().len() <= RECEIVE_OFFER_MAX_BYTES);
+    assert_eq!(
+        sealed_ack.open(&sender, NOW).unwrap().reference(),
+        &inline_ack
+    );
+
+    let mut invalid = inline_ack;
+    invalid.payload_bytes = 1;
+    assert!(
+        seal_receive_offer(&recipient, &sender.public_key(), invalid, NOW, NOW + 60_000).is_err()
+    );
+}
+
+#[test]
 fn receive_offer_tampering_and_excessive_input_are_rejected() {
     let sender = KukuriKeys::generate();
     let recipient = KukuriKeys::generate();

@@ -82,10 +82,10 @@ impl HintTransport for ProbeOfferTransport {
 pub(super) struct OfferBlobService {
     pub(super) inner: Arc<MemoryBlobService>,
     pub(super) fetches: Arc<AtomicUsize>,
+    pub(super) regular_fetches: Arc<AtomicUsize>,
     pub(super) barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(super) pause_blob_hash: Option<kukuri_core::BlobHash>,
     pub(super) attachment_barrier: Option<Arc<tokio::sync::Barrier>>,
-    pub(super) put_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(super) writes: Arc<AtomicUsize>,
     pub(super) in_flight: Arc<AtomicUsize>,
 }
@@ -103,10 +103,10 @@ impl OfferBlobService {
         Self {
             inner,
             fetches: Arc::new(AtomicUsize::new(0)),
+            regular_fetches: Arc::new(AtomicUsize::new(0)),
             barrier: None,
             pause_blob_hash: None,
             attachment_barrier: None,
-            put_barrier: None,
             writes: Arc::new(AtomicUsize::new(0)),
             in_flight: Arc::new(AtomicUsize::new(0)),
         }
@@ -117,15 +117,11 @@ impl OfferBlobService {
 impl BlobService for OfferBlobService {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        let stored = self.inner.put_blob(data, mime).await?;
-        if let Some(barrier) = &self.put_barrier {
-            barrier.wait().await;
-            barrier.wait().await;
-        }
-        Ok(stored)
+        self.inner.put_blob(data, mime).await
     }
 
     async fn fetch_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.regular_fetches.fetch_add(1, Ordering::SeqCst);
         if self.pause_blob_hash.as_ref() == Some(hash)
             && let Some(barrier) = &self.attachment_barrier
         {

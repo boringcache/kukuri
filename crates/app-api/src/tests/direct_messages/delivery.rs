@@ -41,7 +41,9 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
     let provider = iroh::SecretKey::from_bytes(&[24; 32]).public();
     let hints = Arc::new(TrackingHintTransport::default());
     *hints.resolved_destination.lock().await = Some(destination.clone());
-    let blobs = Arc::new(MemoryBlobService::default());
+    let blobs = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
     let services = ServiceHandles::new(
         store.clone(),
         store.clone(),
@@ -73,17 +75,13 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
         opened.reference().provider_endpoint_id,
         provider.to_string()
     );
-    assert_eq!(opened.reference().scope, ReceiveOfferScopeV1::DirectMessage);
-    let bytes = blobs
-        .fetch_local_blob(&opened.reference().payload_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    let hint: GossipHint = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(opened.reference().payload_bytes, 0);
+    assert!(opened.reference().payload_hash.as_str().is_empty());
     assert!(
-        matches!(hint, GossipHint::DirectMessageFrame { dm_id, message_id, frame_hash, .. }
-        if dm_id == row.dm_id && message_id == row.message_id && frame_hash == row.frame_blob_hash)
+        matches!(&opened.reference().scope, ReceiveOfferScopeV1::DirectMessageFrame { dm_id, message_id, frame_hash }
+        if dm_id == &row.dm_id && message_id == &row.message_id && frame_hash == &row.frame_blob_hash)
     );
+    assert_eq!(blobs.writes.load(Ordering::SeqCst), 0);
     assert!(
         store
             .get_direct_message_outbox(&row.dm_id, &row.message_id)
@@ -129,7 +127,7 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
 }
 
 #[tokio::test]
-async fn revoked_mutual_after_manifest_write_sends_no_account_dm_offer() {
+async fn revoked_mutual_after_destination_lookup_sends_no_account_dm_offer() {
     use kukuri_core::BlobHash;
     use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
     use kukuri_transport::EndpointAddr;
@@ -157,20 +155,23 @@ async fn revoked_mutual_after_manifest_write_sends_no_account_dm_offer() {
     .unwrap();
     let row = DirectMessageOutboxRow {
         dm_id: direct_message_id_for_participants(&sender.public_key(), &recipient.public_key()),
-        message_id: "revoked-while-creating-manifest".into(),
+        message_id: "revoked-while-resolving-destination".into(),
         peer_pubkey: peer.clone(),
         frame_blob_hash: BlobHash::new("bb".repeat(32)),
         created_at: 42,
         last_attempt_at: None,
     };
     store.put_direct_message_outbox(row.clone()).await.unwrap();
-    let hints = Arc::new(TrackingHintTransport::default());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut hint_double = TrackingHintTransport::default();
+    hint_double.resolve_barrier = Some(barrier.clone());
+    let hints = Arc::new(hint_double);
     *hints.resolved_destination.lock().await = Some(EndpointAddr::new(
         iroh::SecretKey::from_bytes(&[26; 32]).public(),
     ));
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let mut blob = OfferBlobService::new(Arc::new(MemoryBlobService::default()));
-    blob.put_barrier = Some(barrier.clone());
+    let blob = Arc::new(OfferBlobService::new(
+        Arc::new(MemoryBlobService::default()),
+    ));
     let services = ServiceHandles::new(
         store.clone(),
         store.clone(),
@@ -181,7 +182,7 @@ async fn revoked_mutual_after_manifest_write_sends_no_account_dm_offer() {
         ),
         hints.clone(),
         Arc::new(MemoryDocsSync::default()),
-        Arc::new(blob),
+        blob.clone(),
         sender,
     );
     let local_for_revoke = local.clone();
@@ -191,15 +192,16 @@ async fn revoked_mutual_after_manifest_write_sends_no_account_dm_offer() {
     });
     timeout(Duration::from_secs(5), barrier.wait())
         .await
-        .expect("manifest write must reach the pause");
+        .expect("destination lookup must reach the pause");
     SocialProjectionStore::rebuild_author_relationships(store.as_ref(), &local_for_revoke, vec![])
         .await
         .unwrap();
     timeout(Duration::from_secs(5), barrier.wait())
         .await
-        .expect("manifest write must resume");
+        .expect("destination lookup must resume");
     flush.await.unwrap().unwrap();
     assert!(hints.offers.lock().await.is_empty());
+    assert_eq!(blob.writes.load(Ordering::SeqCst), 0);
     assert!(
         store
             .get_direct_message_outbox(&row.dm_id, &row.message_id)

@@ -281,6 +281,16 @@ async fn destination_requires_live_binding_for_the_exact_account_and_invalidates
         .unwrap()
         .unwrap();
     assert_eq!(resolved.id, receiver.id());
+    transport
+        .verify_receive_provider(&recipient.public_key(), receiver.addr())
+        .await
+        .unwrap();
+    assert!(
+        transport
+            .verify_receive_provider(&other.public_key(), receiver.addr())
+            .await
+            .is_err()
+    );
     assert_eq!(
         transport
             .resolve_receive_destination(&recipient.public_key())

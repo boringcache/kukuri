@@ -4,8 +4,6 @@ use kukuri_core::{ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_off
 use kukuri_transport::EndpointAddr;
 use std::time::Duration;
 
-const DIRECT_MESSAGE_RECEIVE_MANIFEST_MIME: &str =
-    "application/vnd.kukuri.direct-message-receive-manifest+json";
 const ACCOUNT_DM_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct AccountReceiveDestination {
@@ -400,22 +398,10 @@ impl AppService {
         let Ok(_permit) = services.account_dm_offer_permits.try_acquire() else {
             return Ok(false);
         };
-        let manifest = serde_json::to_vec(hint)?;
-        let blob = services
-            .blob_service
-            .put_blob(manifest, DIRECT_MESSAGE_RECEIVE_MANIFEST_MIME)
-            .await?;
+        let GossipHint::DirectMessageAck { ack, .. } = hint else {
+            anyhow::bail!("account DM ACK helper received a non-ACK hint")
+        };
         let local = services.keys.public_key_hex();
-        if !services
-            .projection_store
-            .get_author_relationship(&local, peer_pubkey)
-            .await?
-            .as_ref()
-            .is_some_and(|relationship| relationship.mutual)
-        {
-            return Ok(false);
-        }
-        let provider_endpoint_id = services.transport.discovery().await?.local_endpoint_id;
         if !services
             .projection_store
             .get_author_relationship(&local, peer_pubkey)
@@ -429,12 +415,15 @@ impl AppService {
         let offer = seal_receive_offer(
             services.keys.as_ref(),
             &Pubkey::from(peer_pubkey),
-            ReceiveOfferReferenceV1 {
-                provider_endpoint_id,
-                payload_hash: blob.hash,
-                payload_bytes: u32::try_from(blob.bytes)?,
-                scope: ReceiveOfferScopeV1::DirectMessage,
-            },
+            ReceiveOfferReferenceV1::inline(
+                String::new(),
+                ReceiveOfferScopeV1::DirectMessageAck {
+                    dm_id: ack.dm_id.clone(),
+                    message_id: ack.message_id.clone(),
+                    acked_at: ack.acked_at,
+                    signature: ack.signature.clone(),
+                },
+            )?,
             now,
             now + 60_000,
         )?;
@@ -541,7 +530,7 @@ impl AppService {
             )
             .await;
         let account_result = if let Some(destination) = account_destination {
-            Self::publish_account_receive_dm_frame(services, topic, row, destination).await
+            Self::publish_account_receive_dm_frame(services, row, destination).await
         } else {
             Ok(false)
         };
@@ -589,7 +578,6 @@ impl AppService {
 
     async fn publish_account_receive_dm_frame(
         services: &ServiceHandles,
-        topic: &TopicId,
         row: &DirectMessageOutboxRow,
         destination: &AccountReceiveDestination,
     ) -> Result<bool> {
@@ -599,29 +587,18 @@ impl AppService {
         if !Self::account_dm_outbox_row_can_send(services, row).await? {
             return Ok(false);
         }
-        let manifest = serde_json::to_vec(&GossipHint::DirectMessageFrame {
-            topic_id: topic.clone(),
-            dm_id: row.dm_id.clone(),
-            message_id: row.message_id.clone(),
-            frame_hash: row.frame_blob_hash.clone(),
-        })?;
-        let blob = services
-            .blob_service
-            .put_blob(manifest, DIRECT_MESSAGE_RECEIVE_MANIFEST_MIME)
-            .await?;
-        if !Self::account_dm_outbox_row_can_send(services, row).await? {
-            return Ok(false);
-        }
         let now = Utc::now().timestamp_millis();
         let offer = seal_receive_offer(
             services.keys.as_ref(),
             &Pubkey::from(row.peer_pubkey.as_str()),
-            ReceiveOfferReferenceV1 {
-                provider_endpoint_id: destination.provider_endpoint_id.clone(),
-                payload_hash: blob.hash,
-                payload_bytes: u32::try_from(blob.bytes)?,
-                scope: ReceiveOfferScopeV1::DirectMessage,
-            },
+            ReceiveOfferReferenceV1::inline(
+                destination.provider_endpoint_id.clone(),
+                ReceiveOfferScopeV1::DirectMessageFrame {
+                    dm_id: row.dm_id.clone(),
+                    message_id: row.message_id.clone(),
+                    frame_hash: row.frame_blob_hash.clone(),
+                },
+            )?,
             now,
             now + 60_000,
         )?;
