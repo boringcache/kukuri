@@ -84,6 +84,8 @@ private manifestはさらにchannel/epoch別に暗号化する。DM frame・添�
 | OFFER-6: sealed offerをaccount別の単一受信routeへ渡し、切替時に旧account受信を止める（NW-7/8） | transport N60。実gossipで四種の参照、account切替/解除、送信後保持の容量を確認。復号後の認可とpayload取得は未接続 |
 | OFFER-7: 署名済みprovider以外へpayload取得を拡げず、binding・byte数・hashを照合する（NW-2/8/9） | N61。provider endpoint IDとoffer期限をI/O前に固定し、そのendpointのaccount bindingを確認。共通受付内の一時取得を65,536byteに制限。wrong endpoint、binding未設置/別account、宣言長不足、保持後の期限切れ、ローカル非保存を実Irohで確認。scope/mutual/epochと永続反映は未接続 |
 
+N61の初回PR CI `linux-rust-static` は、`crates/blob-service/src/lib.rs` が1,016行となり、1,000行の新規超過を検出した。N61追加で既存のinline test moduleと製品コードの責務境界が閾値を越えたため、既存test 409行を`src/tests.rs`へ移す。移動直後の本文一致を機械的に確認し、rustfmt後の差は3か所の改行調整のみ。baselineは拡張しない。移動後は変更crateの局所test/静的検査と新head CIで確認する。
+
 OFFER-6の初回監査では、receiver/送信保持taskをspawnした後に管理lockの`await`があり、caller取消で登録前taskが残る不備と、Fakeの旧account streamが切替/解除後も配送する差を検出した。前者は登録lockを先に取得してspawnと登録を非await区間に置き、停止中はhandleを台帳に残してabort完了を待つ。後者はFakeにもaccount世代の終了signalを持たせた。両方を旧実装で失敗する局所testとして固定し、修正後の関連7件が成功した。固定headの再監査とCI前にはblocker解消扱いにしない。
 
 delta監査ではさらに、shutdownが複数のholdをdrainした後で1件ずつabort/awaitすると、途中cancelで残りの未abort taskがdetachすること、join中の送信/購読がshutdown後に再登録できることを検出した。全holdへ先にabortを発行してからawaitし、offer transportの閉鎖fenceをshutdown開始時に立てて登録直前・broadcast後も確認する。複数holdの途中cancelと送信/購読のshutdown競合を関連testへ追加した。最新headの再監査前にはblocker解消扱いにしない。
