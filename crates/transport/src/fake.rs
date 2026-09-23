@@ -322,13 +322,11 @@ impl HintTransport for FakeTransport {
         let route = receive_route_for_account(recipient)?;
         let sender = self.offer_sender(recipient).await?;
         let mut active = self.active_offer_route.lock().await;
-        let mut topics = self.subscribed_topics.lock().await;
         let stop = match active.as_ref() {
             Some(current) if current.route == route.as_str() => current.stop.clone(),
             _ => {
                 if let Some(old) = active.take() {
                     let _ = old.stop.send(true);
-                    topics.remove(&old.route);
                 }
                 let (stop, _) = watch::channel(false);
                 *active = Some(FakeOfferRoute {
@@ -338,7 +336,6 @@ impl HintTransport for FakeTransport {
                 stop
             }
         };
-        topics.insert(route.as_str().to_string());
         let stream = stream::unfold(
             (sender.subscribe(), stop.subscribe()),
             |(mut receiver, mut stop)| async move {
@@ -373,7 +370,6 @@ impl HintTransport for FakeTransport {
         {
             let old = active.take().expect("matching offer route");
             let _ = old.stop.send(true);
-            self.subscribed_topics.lock().await.remove(route.as_str());
         }
         Ok(())
     }

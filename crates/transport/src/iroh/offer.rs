@@ -49,23 +49,30 @@ impl IrohGossipTransport {
         &self,
         recipient: &Pubkey,
     ) -> Result<ReceiveOfferStream> {
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         let route = receive_route_for_account(recipient)?;
         let mut current = self.receive_offer_topic.lock().await;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         if let Some(state) = current.as_ref()
             && state.route == route.as_str()
             && !state.closing
             && !state.receiver_task.is_finished()
         {
-            return Ok(stream_from_offer_sender(&state.broadcaster));
+            return Ok(stream_from_offer_sender(&state.broadcaster, &state.stop));
         }
         if current.is_some() {
-            let mut subscribed = self.subscribed_topics.lock().await;
             let old = current.as_mut().expect("offer route exists");
             old.closing = true;
+            let _ = old.stop.send(true);
             old.receiver_task.abort();
             let _ = (&mut old.receiver_task).await;
-            let old = current.take().expect("closed offer route exists");
-            subscribed.remove(&old.route);
+            current.take();
         }
 
         let peers = self.offer_bootstrap_window().await;
@@ -74,6 +81,10 @@ impl IrohGossipTransport {
                 self.discovery.add_endpoint_info(peer.clone());
             }
         }
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         let topic = self
             .gossip
             .subscribe(
@@ -83,9 +94,13 @@ impl IrohGossipTransport {
             .await?;
         let (sender, mut receiver) = topic.split();
         let (broadcaster, _) = broadcast::channel(64);
+        let (stop, _) = watch::channel(false);
         let forward = broadcaster.clone();
         // Registration cannot suspend after the receiver task is spawned.
-        let mut subscribed = self.subscribed_topics.lock().await;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         #[cfg(test)]
         let task_guard = CountedOfferTask::new(Arc::clone(&self.offer_receiver_tasks));
         let task = tokio::spawn(async move {
@@ -104,15 +119,15 @@ impl IrohGossipTransport {
                 }
             }
         });
-        subscribed.insert(route.as_str().to_string());
         *current = Some(ReceiveOfferTopicState {
             route: route.as_str().to_string(),
             closing: false,
             broadcaster: broadcaster.clone(),
+            stop: stop.clone(),
             _sender: sender,
             receiver_task: task,
         });
-        Ok(stream_from_offer_sender(&broadcaster))
+        Ok(stream_from_offer_sender(&broadcaster, &stop))
     }
 
     pub(super) async fn unsubscribe_receive_offers_impl(&self, recipient: &Pubkey) -> Result<()> {
@@ -122,13 +137,12 @@ impl IrohGossipTransport {
             .as_ref()
             .is_some_and(|state| state.route == route.as_str())
         {
-            let mut subscribed = self.subscribed_topics.lock().await;
             let old = current.as_mut().expect("matching offer route");
             old.closing = true;
+            let _ = old.stop.send(true);
             old.receiver_task.abort();
             let _ = (&mut old.receiver_task).await;
-            let old = current.take().expect("closed offer route");
-            subscribed.remove(&old.route);
+            current.take();
         }
         Ok(())
     }
@@ -141,6 +155,10 @@ impl IrohGossipTransport {
     ) -> Result<()> {
         let payload = offer.encode()?;
         let route = receive_route_for_account(recipient)?;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         let mut peer_ids = vec![destination.id];
         if !destination.is_empty() {
             self.discovery.add_endpoint_info(destination);
@@ -153,15 +171,41 @@ impl IrohGossipTransport {
                 peer_ids.push(peer.id);
             }
         }
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         let mut topic = self
             .gossip
             .subscribe(topics::topic_to_gossip_id(&route), peer_ids)
             .await?;
-        timeout(Duration::from_secs(10), topic.joined())
-            .await
-            .context("account receive route join timed out")??;
+        let stopped = self.offer_shutdown_notify.notified();
+        tokio::pin!(stopped);
+        stopped.as_mut().enable();
+        #[cfg(test)]
+        self.offer_publish_join_started.notify_one();
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        tokio::select! {
+            result = timeout(Duration::from_secs(10), topic.joined()) => {
+                result.context("account receive route join timed out")??;
+            }
+            _ = &mut stopped => anyhow::bail!("account receive offer transport is closed"),
+        }
+        #[cfg(test)]
+        self.offer_publish_joined.notify_one();
         let mut holds = self.outbound_offer_holds.lock().await;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
         topic.broadcast(payload.into()).await?;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
 
         // Keep the sending subscription alive briefly after the gossip actor
         // accepts the message. Eviction and transport shutdown abort every hold.
@@ -192,15 +236,16 @@ impl IrohGossipTransport {
     }
 
     pub(super) async fn shutdown_receive_offers(&self) {
+        self.offer_closed.store(true, Ordering::Release);
+        self.offer_shutdown_notify.notify_waiters();
         let mut current = self.receive_offer_topic.lock().await;
         if current.is_some() {
-            let mut subscribed = self.subscribed_topics.lock().await;
             let state = current.as_mut().expect("offer route exists");
             state.closing = true;
+            let _ = state.stop.send(true);
             state.receiver_task.abort();
             let _ = (&mut state.receiver_task).await;
-            let state = current.take().expect("closed offer route");
-            subscribed.remove(&state.route);
+            current.take();
         }
         let holds = self
             .outbound_offer_holds
@@ -208,8 +253,10 @@ impl IrohGossipTransport {
             .await
             .drain(..)
             .collect::<Vec<_>>();
-        for hold in holds {
+        for hold in &holds {
             hold.task.abort();
+        }
+        for hold in holds {
             let _ = hold.task.await;
         }
     }
@@ -217,8 +264,29 @@ impl IrohGossipTransport {
 
 fn stream_from_offer_sender(
     sender: &broadcast::Sender<ReceiveOfferEnvelope>,
+    stop: &watch::Sender<bool>,
 ) -> ReceiveOfferStream {
-    let stream =
-        BroadcastStream::new(sender.subscribe()).filter_map(|event| async move { event.ok() });
+    let stream = stream::unfold(
+        (sender.subscribe(), stop.subscribe()),
+        |(mut receiver, mut stop)| async move {
+            loop {
+                if *stop.borrow() {
+                    return None;
+                }
+                tokio::select! {
+                    biased;
+                    changed = stop.changed() => {
+                        let _ = changed;
+                        return None;
+                    }
+                    event = receiver.recv() => match event {
+                        Ok(envelope) => return Some((envelope, (receiver, stop))),
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    },
+                }
+            }
+        },
+    );
     Box::pin(stream)
 }
