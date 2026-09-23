@@ -54,6 +54,7 @@ impl IrohGossipTransport {
         if let Some(state) = current.as_ref()
             && state.route == route.as_str()
             && !state.closing
+            && !state.receiver_task.is_finished()
         {
             return Ok(stream_from_offer_sender(&state.broadcaster));
         }
