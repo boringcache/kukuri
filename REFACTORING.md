@@ -26,7 +26,7 @@
 - 一つの成果に必要なrename / move / extractionと処理の置換・削除をまとめ、機械的な移動と責務変更を追えるようにする。独立した目的だけを別PRにし、差分の小ささを理由に二重経路を残さない。
 - public API、protocol、storage、正本等を変更する場合は、合意した目的と利用条件に必要かを確認し、移行・互換性の条件を固定する。承認済み範囲の実装方法は担当者が判断し、未承認の製品契約変更だけをユーザーへ確認する。
 - 重複・未使用・廃止経路のtestは統合・削除し、受入条件に必要な検証が残ることを示す。必要な検証の削除・弱体化によって成功扱いにしない。
-- 振る舞いが変わる可能性がある場合は、先に characterization test / contract / scenario を追加する。
+- 合意した挙動の検証を先に定め、既存test・証拠が不足する場合だけ必要なcharacterization test等を追加する。同じ条件の検証を重複させない。
 - 大きな抽象化を導入する前に、現在の責務境界と呼び出し方向を調査する。
 - 同じ状態・判断の重複は共通の責務へ集約する。所有と依存を明示し、将来用途だけの抽象化や同じ検証の個別追加で総量を増やさない。
 
@@ -58,8 +58,8 @@
 ## 定期監査と個別実行
 
 定期監査は原則として product code を変更せず、有限の範囲で候補を収集し、根拠を確認して分類する。
-監査結果をそのまま一つの大型リファクタリング PR にしてはならない。実施する候補は、一つの構造上の
-成果を持ち、単独で検証・review・差し戻しできる個別 Issue / PR として扱う。
+監査結果の候補を自動的に実装範囲へ加えない。実施する範囲は目的・受入条件・終了条件を先に固定し、
+一つの成果を検証・review・差し戻しできる単位で扱う。Issue数やPRの小ささのために同一責務を分断しない。
 
 ### 監査を開始する trigger
 
@@ -111,7 +111,7 @@ PR が一つも発生しなくても正常な完了とする。
 
 - 観測した問題と、それを示す path、symbol、参照、履歴、test などがある。
 - 現在の責務、依存、外部挙動、互換性境界、互換パスを特定している。
-- 目標とする構造上の成果と、その before / after の成功判定がある。
+- 目標とする構造上の成果を有限個の受入条件にし、有界に判定できないものは実装前に子項目へ分解している。
 - 維持する挙動と、それを証明する最小の validation がある。
 - 対象と対象外が固定され、一つの意図として review・検証・差し戻しできる。
 
@@ -130,9 +130,9 @@ PR が一つも発生しなくても正常な完了とする。
 
 - 観測した問題と、実施前後の構造上の変化が path、symbol、依存、責務などの証拠へ対応している。
 - 状態の正本数、重複経路、依存、公開 symbol、境界横断、未参照経路など、目的に合う指標が改善している。
-- public API、protocol、storage、config、event、UI など対象領域の外部挙動が維持されている。
+- 本作業で維持すると定めたpublic API、protocol、storage、config、event、UIの外部挙動が保たれている。意図した変更は承認された受入条件と移行に対応している。
 - 変更前後の必要な validation が記録され、既知の失敗を除いて新しい failure / warning がない。
-- test / contract / scenario の削除、skip、弱体化で成功させていない。
+- 必要な検証の削除・skip・弱体化で成功させていない。重複・廃止testの統合や削除は受入条件との対応を保っている。
 - code の移動や分割だけでなく、定義した責務、依存、正本の問題が実際に改善している。
 - 必要な ADR、runbook、comment、本書が現行実装と一致している。
 - PR が一つの意図に限定され、単独で review・差し戻しできる。
@@ -143,36 +143,11 @@ PR が一つも発生しなくても正常な完了とする。
 
 ## PR種別
 
-PRタイトルまたはタスク概要では、以下のラベル / prefix のいずれかを使う。
+PRタイトルまたは概要は、主目的を `refactor` / `fix` / `feature` / `migration` / `deps` / `docs` 等で示す。
+テストのみなら `contract` / `scenario` とできるが、分類によって実装・test・置換・削除を別PRへ強制しない。
+純粋な構造整理に機能変更を隠さず、合意した一つの成果に必要な変更をまとめる。
 
-- `refactor:rename`: 名前変更のみ。ロジック変更禁止。
-- `refactor:move`: ファイル移動のみ。ロジック変更禁止。
-- `refactor:extract`: 関数・型・モジュール抽出。外部挙動変更禁止。
-- `refactor:boundary`: crate / module 境界整理。先に計画を書く。
-- `refactor:delete`: dead code 削除。参照経路調査を添える。
-- `contract`: 仕様固定テスト追加。実装変更禁止。
-- `scenario`: harness scenario 追加/更新。プロダクト実装変更は別PR。
-- `fix`: バグ修正。修正前の証拠は `docs/runbooks/issue-lifecycle.md` の「修正前の再現」に従う。
-- `deps`: 依存更新。リファクタリングと混ぜない。
-- `docs`: ドキュメント更新。実装変更と混ぜる場合は理由を書く。
-
-PR を作成または説明するときは、タスク種別を明確にする。リファクタリングPRに機能追加や挙動変更を隠さない。
-
-推奨 PRタイトル prefix:
-
-```text
-[codex][refactor:rename] ...
-[codex][refactor:extract] ...
-[codex][refactor:boundary] ...
-[codex][refactor:delete] ...
-[codex][contract] ...
-[codex][scenario] ...
-[codex][fix] ...
-[codex][deps] ...
-[codex][docs] ...
-```
-
-PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録テンプレート」にある構造上の成果・挙動維持の証拠へリンクする。テンプレートを別々に複製しない。
+PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、必要な構造上の成果・検証証拠を参照する。雛形を重複して埋め直さない。
 
 ## PRの境界
 
@@ -181,7 +156,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 
 ## 互換性境界
 
-以下は変更時に互換性を確認する対象である。合意した目的に必要な変更は、該当する移行条件を先に固定する。
+以下は合意済みの利用場面に影響する変更で互換性を確認する対象であり、全項目を毎回検査する一覧ではない。必要な変更は該当する移行条件を先に固定する。
 既存形式の維持自体を目的にせず、必要な互換性と最小の最終実装を両立する。contractの失敗は、
 合意した挙動への影響と照合し、意図した契約変更と回帰を区別する。
 判断に必要な根拠と検出 test は本節へ集約し、repository 外や非追跡の計画を前提にしない。
@@ -205,21 +180,20 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 5. **docs エントリ key スキーム**(`objects/{id}/state` 等): app-api の `stable_key` 生成と
    cn-indexer の prefix 走査の暗黙契約。固定: cn-indexer の ingestion_contracts(常時実行)。
 6. **永続スキーマと identity**: SQLite / Postgres の migration 済みスキーマ、identity ファイル群
-   (keyring account は db パス依存 — パス変更 = 鍵ロスト)、endpoint secret(iroh::SecretKey の
-   serde 表現に直結)。固定: migration テスト(拡充は後続 WP)。
+   (keyring accountはDB pathに依存するため、変更時は既存鍵の読取り・移行を確認する)、endpoint secretの
+   version付き保存形式。検証は該当するmigration・identity保存/復元のtestから選ぶ。
 7. **community-node HTTP 契約と manifest**: cn-user-api の endpoint 群と `CommunityNodeManifest`
-   (server 完全版 ⇔ client slim 版)。変更は後方互換な optional フィールド追加のみ可。
-   固定: `crates/cn-user-api/tests/`、round-trip は
-   `crates/desktop-runtime/src/community_node/manifest_support.rs` +
-   `crates/cn-operator/tests/manifest_golden.rs`(**この 2 ファイルを触る PR は
-   `cargo xtask rust-test` の round-trip テストと `cn-test` の golden の両方を実行する**)。
+   (server完全版とclient読取り側)。対象clientが使う契約を特定し、項目追加・置換・削除を含む最終形と
+   必要な版/移行条件を選ぶ。変更方法をoptional項目の追加だけに制限しない。
+   `crates/cn-user-api/tests/`、`crates/desktop-runtime/src/community_node/manifest_support.rs`、
+   `crates/cn-operator/tests/manifest_golden.rs`の関連testを選び、全suiteをpathだけで要求しない。
 8. **cn-operator の capability 提供状態と公開条件**: `community_index` / `moderation` /
    `community_local_trust` は #616 の readiness / fail-closed gate を経て #617 で
    `Availability::Available` へ移行済み（[ADR 0025](docs/adr/0025-community-node-indexing-foundation.md)
    2026-08-16改訂、`crates/cn-operator/src/capability.rs::availability`）。提供可能であることと
    個々の配備で有効・公開であることは区別し、設定と有効な readiness 記録の条件を維持する。
-   ADR 0027 §2.9 の昇格条件は当時の判断として保持する。将来向けの `Planned` 区分を削除せず、
-   リファクタで availability、manifest の表明、operator の有効化条件を変えない。
+   ADR 0027 §2.9は当時の判断記録として参照する。将来用途だけを理由に未使用区分を恒久維持せず、
+   現行config・consumerと合意した公開条件への影響を確認して統合・削除を判断する。未提供を提供済みと表明しない。
 9. **Tauri IPC 契約**(`crates/app-api/src/views.rs` ⇔ `apps/desktop/src/lib/api/types.ts`):
    同一バイナリ内契約のため両側同時変更なら改名可能だが、片側変更は silent break。
    固定: 高頻度 8 型グループは共有 fixture(apps/desktop/src/lib/api/__fixtures__/views/)を
@@ -228,7 +202,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
    WP-B6 で codegen 対象になり、runtimeApi.ts の request literal が生成型への `satisfies` で
    拘束される(再生成 diff + tsc の二重検出)。CommunityNode 系 view の fixture 化は未。
 
-## 地雷リスト(直したくなるが、してはいけない)
+## 誤った削除判断を避ける具体例
 
 互換性境界とは別に、「一見 dead code / 不整合 / 冗長に見えるが、消す・揃える・golden 化すると
 壊れる」ものを挙げる。判断に必要な理由と検出経路は各項目へ集約し、repository 外や非追跡の
@@ -257,14 +231,13 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 
 ## 互換パスと sunset 条件
 
-以下は後方互換のために残している経路で、「いつ削除してよいか」を明文化せずに消すと既存データ・
-既存ユーザーが壊れる。撤去条件は WP-C8(2026-07-07)で確定した。条件を満たすまで削除しない
-(このリストが「消してよいか」の判断入口。コード側の該当箇所にも同じ条件をコメントで明記している)。
+以下はWP-C8(2026-07-07)で整理した互換経路の記録である。撤去前に現行実装と合意した利用条件を確認し、
+必要な読取り・移行・明示的な拒否を残した最終形を定める。過去の一覧だけで恒久維持やデータ喪失を許可しない。
 
 | 互換パス | 所在 | 誤削除の影響 | sunset 条件(WP-C8 で確定) |
 |---|---|---|---|
 | 旧 `.nsec` 鍵ファイル読込 | `crates/desktop-runtime/src/identity.rs`(`legacy_key_file_path`。テスト `legacy_nsec_file_still_loads` が固定) | **利用者が気づかないまま別人の鍵になる**: 旧ファイルは読み込んでも新形式へ再保存されず残り続け、鍵が見つからないと `load_or_create_keys` が黙って新しい鍵を生成するため | **撤去する際は、`.nsec` ファイルを検知したら起動を止めて案内を出す処理(fail-loud)とセットで行うこと**。黙って新しい鍵を生成する現状のまま読込パスだけを消してはならない。鍵は preview 段階でも黙って失ってよいものではない |
-| epoch `"legacy"` 互換 | `crates/app-api/src/service/projection_support.rs`(`legacy_epoch_id` / `private_channel_replica_for_epoch` / `joined_private_channel_state_from_capability`) | epoch 導入前に保存されたプライベートチャンネル capability(epoch_id が空)のチャンネル履歴が読めなくなる。現行ビルドが空の epoch_id を新規に書くことはない | **正式リリースの節目で削除可**(preview データの保全は保証しない方針)。削除時は空の epoch_id を持つ capability をエラーで拒否すること(黙って読めなくならないようにする) |
+| epoch `"legacy"` 互換 | `crates/app-api/src/service/projection_support.rs`(`legacy_epoch_id` / `private_channel_replica_for_epoch` / `joined_private_channel_state_from_capability`) | epoch 導入前に保存されたプライベートチャンネル capability(epoch_id が空)のチャンネル履歴が読めなくなる。現行ビルドが空の epoch_id を新規に書くことはない | 既存capabilityの読取りまたは明示的な移行を保つ受入条件を先に定める。非対応形式は明示して拒否し、リリース時期や過去のpreview方針だけで黙って読めなくしない |
 | ~~CRLF checksum 自己修復~~ | ~~`crates/store/src/sqlite/connection.rs`~~ | - | **撤去済み**(2026-07-06、WP-C6 / PR #485)。checksum 不一致は fail-loud で起動失敗し、回帰テストで固定済み |
 
 **互換パスではないと再分類したもの(WP-C8):**
@@ -272,7 +245,10 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 - `resolved_urls` の未解決時の扱い(`crates/desktop-runtime/src/community_node/requests_support.rs`。
   認証時に base_url で代用する fallback と、解決されるまで再取得を繰り返す判定)は、旧設定の互換では
   なく**恒常経路**。コミュニティノードを新規追加した直後は必ず未解決(None)であり、この経路が初回接続
-  そのものを支えている。削除対象ではないため sunset 条件は持たない。
+  そのものに必要な状態である。ただし当時の再取得実装を恒久維持する条件ではない。必要な初回接続を
+  保ちながら、期限・上限・需要に基づく共通処理へ置換できる。未解決を表示できるようにし、成功するまでの無制限再試行を要求しない。
+
+件数に比例する既存の走査・再同期を、挙動維持の名目で複製・温存しない。利用者が必要とする結果を保ち、差分・索引・有限窓と上限/削除を持つ共通処理へ置換する。対象外の利用条件や保証の追加が必要なら、作業を増やす前に完了範囲を再定義する。
 
 ## 真実の置き場所ルール
 
@@ -326,7 +302,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 - 明示的な正当化(= baseline 更新コミット)なしに、1000行以上の新規手書きファイルを追加しない。
 - 大型ファイルでも最終コード量の最小化を優先し、重複の統合・置換・削除を検討する。行数が増える場合は既存ratchetのbaseline更新と、受入条件に必要な理由を示す。
 - 大型ファイルで複数責務に触る場合は、変更の理解・検証・差し戻しを妨げる具体的な構造問題を確認する。分割が必要なら別の構造整理として計画し、行数だけで分割を必須にしたり、依頼外の分割を混ぜたりしない。ratchetのCIゲートは維持する。
-- formatting-only change と semantic change を混ぜない。
+- 無関係な大量整形を混ぜず、一つの成果に必要な置換・統合の差分をreviewできる形で示す。
 - generated file、lock file、icon は明示的に対象化されない限り、この方針の対象外とする。
 
 ## AI利用時の証拠規範
@@ -338,7 +314,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
   保護する test を可能な限り添える。
 - 新しいhelper、wrapper、抽象化を作る前に既存の同一責務を確認し、統合・置換後の総量を比較する。現行様式の温存を最終コード量より優先しない。
 - 一般的な clean code 論や将来拡張だけを根拠に、新しい層、型、ファイルを増やさない。
-- 提案した API、command、dependency が実在することを確認する。リファクタリング PR で dependency を追加しない。
+- 提案したAPI、command、dependencyが実在することを確認する。依存の採用は目的に必要かと保守対象の総量で判断し、既存依存の利用・削除・置換と比較する。未依頼の用途のために追加しない。
 - test は観測可能な挙動を固定する。実装順序や source 構造の変更検知だけを目的とする test は追加しない。
   既存 wire / serialization / visual contract を固定する snapshot はこの限りではない。
 - 変更と同時に追加した test だけを挙動維持の証拠にせず、変更前の挙動、既存 contract、fixture、scenario と照合する。
@@ -358,7 +334,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 
 ## 候補一覧
 
-| 候補 | 観測した問題と根拠 | 目標成果 | 優先順位 | 分類 | 理由 / 個別Issue |
+| 候補 | 観測した問題と根拠 | 目標成果 | 優先順位 | 分類 | 理由 / 対応する条件 |
 |---|---|---|---|---|---|
 
 ## 監査終了判定
@@ -390,7 +366,7 @@ PR共通欄は `.github/PULL_REQUEST_TEMPLATE.md` を使い、本書の「記録
 
 ## 差し戻し手順
 
-## 見送った候補・別Issue
+## 見送った候補と理由
 ```
 
 ## 必須AIワークフロー
