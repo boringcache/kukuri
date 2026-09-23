@@ -241,6 +241,36 @@ fn revoking_evicted_source_fences_its_in_flight_binding_probe() {
 }
 
 #[test]
+fn clear_then_invalidate_never_reuses_an_older_probe_revision() {
+    let recipient = Pubkey::from("account-revision-aba");
+    let address = EndpointAddr::new(SecretKey::from_bytes(&[20; 32]).public());
+    let mut state = DestinationWindow::default();
+    let _ = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    state.clear_rendezvous(Some("cn-a"));
+    state.clear_rendezvous(Some("cn-a"));
+    let (_, old_revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    state.clear_rendezvous(Some("cn-a"));
+    state.invalidate(&recipient, &address.id.to_string());
+    assert!(
+        !state.store_verified(
+            &recipient,
+            old_revision,
+            address,
+            None,
+            i64::MAX,
+            Instant::now() + Duration::from_secs(10),
+        ),
+        "clear and invalidate must share a non-reusable revision sequence"
+    );
+}
+
+#[test]
 fn invalidating_old_probe_cannot_replace_newer_verified_endpoint() {
     let recipient = Pubkey::from("account-d");
     let old_id = SecretKey::from_bytes(&[10; 32]).public();

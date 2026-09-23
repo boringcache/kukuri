@@ -172,6 +172,7 @@ impl DestinationWindow {
 
     pub(super) fn clear_rendezvous(&mut self, source: Option<&str>) {
         self.clear_epoch = self.clear_epoch.wrapping_add(1);
+        let mut tick = self.tick;
         for entry in self.entries.values_mut() {
             match source {
                 Some(source) => {
@@ -206,8 +207,10 @@ impl DestinationWindow {
             // The source may already have expired or been evicted while a
             // binding probe still holds its old candidate. Fence that probe
             // even when this account has no current entry for the source.
-            entry.revision = entry.revision.wrapping_add(1);
+            tick = tick.wrapping_add(1);
+            entry.revision = tick;
         }
+        self.tick = tick;
     }
 
     fn store_verified(
