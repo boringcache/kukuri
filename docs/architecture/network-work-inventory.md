@@ -16,7 +16,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | --- | --- | --- | --- | --- |
 | N01 `PeerAddrBook::{merged_peers,ranked_peers,set_seed_peers,record_learned_peer}`、`transport/src/peers.rs` | ticket/learn/seed/取得。各serviceのpeer全体 | 各service寿命。docs側はreapplyへ進む | merge/clone/sortが全peer、mapに件数上限なし。P3共通owner | scope別候補、NW-5/6 |
 | N02 `RemoteFetchRetryState::{begin,finish}`、`iroh-node/src/remote_fetch.rs` の取得入口 | local miss、retry。全候補。30秒は実行時、接続5秒/転送15秒 | 通常walkは待機者cancel後も継続。in-flight task→permit待機→接続 | 実行8の外に無制限の待機とcooldown走査。P3受付 | NW-2/3/4、LocalOnly |
-| N03 `TopicWarmupCoordinator::warmup_peers_once/warmup_peer`、`transport/src/iroh/topics.rs` | topic join/peer追加。direct 250ms〜5秒、relay 1〜10秒 | deadline/neighbor成立。peerごとspawnして並列2のpermit待機 | 候補数に比例するtask。P3所有/停止 | NW-2/5/6 |
+| N03 `TopicWarmupCoordinator::warmup_peers_once/warmup_peer`、`transport/src/iroh/topics.rs` | topic join/peer追加。direct 250ms〜5秒、relay 1〜10秒 | deadline/neighbor成立。移動する4候補窓だけを走査し、同時2future・共有2dial枠を超える試行は待機せず延期 | peerごとのspawn/permit待機を撤去。topicごとのretry taskと初回bootstrap全件materializeはN04残件 | NW-2/5/6 |
 | N04 `ensure_hint_topic/extend_active_topic_peers/remove_topic_state`、同上 | hint subscribe/publish、peer変化。全topicへ追加 | receiverはabort、warmupの所有を別途解消する必要。bootstrap集合変化で再join | 全topic×peer、再購読。P3差分 | NW-5/7 |
 | N05 docs `reapply_sync_peers` とopen/start/subscribe、`docs-sync/src/iroh_sync.rs` | seed/学習/restore。cached replica集合 | local-onlyはsync昇格しない。registry guard内で再適用 | replica×peer、同期requested全体。P3差分/P4bucket | NW-3/5、LIFE契約 |
 | N06 `close_replica_owned/close_replica_under_guard`、`iroh_sync_lifecycle.rs`、`iroh_local_source.rs` | close/revoke/既存source読取り。最大32所有task | caller cancel後も所有。leave失敗隔離、停止task完了 | P1で有界な停止基盤。再監査し直さずP3接続 | NW-7、P1監査/CI |
@@ -268,3 +268,11 @@ N60単独のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip�
 | N61 | `BlobService::fetch_verified_receive_offer_payload` → node共通受付 → receive-binding ALPN → 同じendpointのblob ALPN → memory bytes | `VerifiedReceiveOffer`の署名済みprovider IDと候補ID一致、offer期限をI/O前に検査。受付待機後とblob要求前にもoffer/binding期限を確認。QUIC相手とsender accountのbindingを確認してからblobを要求。宣言byte数最大65,536をstream中に制限し、完了時に実長/BLAKE3/両期限を再確認。保存せず、接続は結果・取消で閉じる。共通8実行枠と受付時から30秒期限を使用 | `signed_provider_offer_fetches_only_its_bounded_manifest_without_storing_it`、`offer_fetch_rejects_wrong_endpoint_missing_binding_and_declared_length`、`retained_expired_offer_is_rejected_before_provider_io`、`bounded_offer_blob_work_shares_the_display_slot_and_stops_on_close` |
 
 N61はprovider bindingを公開accountへ結ぶだけで、public source参加・DM mutual・private epoch/capabilityの許可を証明しない。アプリ側でこれらをI/O前と反映直前に確認し、失効時に要求futureを中止するまで受信経路として有効化しない。
+
+## Gossip warmupのpeer窓（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N62 | topic join/retry → `TopicWarmupCoordinator::warmup_peers_once` → gossip ALPN dial | peer履歴100/1,000でも4候補だけを巡回してclone。`for_each_concurrent(2)`はtaskをspawnせず、共有dial slot2件が満杯ならin-flight台帳を増やさず即時延期。既存direct優先とrelay fallbackはwarmup先のaddress構築を維持 | `warmup_samples_a_moving_four_peer_window_from_large_history`、`warmup_does_not_queue_peer_state_when_shared_dial_slots_are_full`、`transport_import_ticket_updates_existing_topic_subscription`、`transport_seed_update_updates_existing_topic_subscription` |
+
+N62はper-peer warmupの増幅だけを除く。`ensure_hint_topic`の初回bootstrap合成とtopic全体のretry task、`extend_active_topic_peers`の全topic更新、SDK内部のgossip viewはN04/U07のまま残る。D2の現在の受信対象を減らすために購読を切り捨てない。

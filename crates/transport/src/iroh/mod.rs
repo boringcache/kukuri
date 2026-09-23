@@ -85,6 +85,7 @@ struct OutboundOfferHold {
 struct TopicWarmupCoordinator {
     permits: Arc<Semaphore>,
     in_flight_peers: Arc<StdRwLock<BTreeSet<String>>>,
+    warmup_cursor: Arc<AtomicU64>,
 }
 
 impl Default for TopicWarmupCoordinator {
@@ -92,6 +93,7 @@ impl Default for TopicWarmupCoordinator {
         Self {
             permits: Arc::new(Semaphore::new(2)),
             in_flight_peers: Arc::new(StdRwLock::new(BTreeSet::new())),
+            warmup_cursor: Arc::new(AtomicU64::new(0)),
         }
     }
 }
