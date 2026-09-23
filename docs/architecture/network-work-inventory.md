@@ -252,3 +252,11 @@ N57はlocal OS通知のみを送る。新しいnetwork I/O、private参照の外
 N59はtopic presenceのephemeral stateだけを増減する。auth/consentとendpoint bindingの確認は
 `cn-user-api`の既存handlerを通し、rendezvous応答をaccountの証明にしない。旧`topic:` SETは
 新経路から参照せず従来TTLで消える。候補の完全列挙は目標にしない。
+
+## Account受信routeのtransport境界（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N60 | `HintTransport::{subscribe_receive_offers,publish_receive_offer}` → account別gossip topic → sealed offer受信stream | recipientからroute導出。送信前にofferの2,048byte上限を検証。受信は同時1accountだけ、旧account切替/明示解除/shutdown/Dropでtaskを停止。送信後のtopic保持は30秒・最大32件。bootstrap候補は3source各4件だけを読む | `account_receive_offer_crosses_real_gossip_with_one_recipient_route`、`account_receive_route_replaces_the_previous_account_subscription`、`oversized_receive_offer_is_rejected_before_joining_a_route`、`account_route_bootstrap_window_is_independent_of_imported_history` |
+
+N60のsinkは暗号化offerの一時配送のみ。`source_peer`はgossip経路の観測であり署名senderやproviderの証明ではない。受信後のAEAD/署名、binding、scope・mutual・private epoch、blob取得、永続反映、再送所有、D2全受信範囲への接続は未完了。既存hint経路は残す。

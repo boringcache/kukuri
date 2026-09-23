@@ -17,7 +17,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::StreamExt;
-use kukuri_core::{GossipHint, TopicId};
+use iroh::EndpointAddr;
+use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId, receive_route_for_account};
 use tokio::sync::{Mutex, broadcast};
 #[cfg(test)]
 use tokio::time::timeout;
@@ -26,12 +27,14 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
+    ReceiveOfferStream, TopicPeerSnapshot, Transport,
 };
 
 #[derive(Clone, Default)]
 pub struct FakeNetwork {
     hints: Arc<Mutex<HashMap<String, broadcast::Sender<HintEnvelope>>>>,
+    offers: Arc<Mutex<HashMap<String, broadcast::Sender<ReceiveOfferEnvelope>>>>,
     topic_subscribers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
     known_peers: Arc<Mutex<BTreeSet<String>>>,
 }
@@ -68,6 +71,18 @@ impl FakeTransport {
             .entry(topic.0.clone())
             .or_insert_with(|| broadcast::channel(128).0)
             .clone()
+    }
+
+    async fn offer_sender(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<broadcast::Sender<ReceiveOfferEnvelope>> {
+        let route = receive_route_for_account(recipient)?;
+        let mut topics = self.network.offers.lock().await;
+        Ok(topics
+            .entry(route.0)
+            .or_insert_with(|| broadcast::channel(64).0)
+            .clone())
     }
 }
 
@@ -290,6 +305,37 @@ impl HintTransport for FakeTransport {
         let sender = self.hint_sender(topic).await;
         let _ = sender.send(HintEnvelope {
             hint,
+            received_at: Utc::now().timestamp_millis(),
+            source_peer: self.local_id.clone(),
+        });
+        Ok(())
+    }
+
+    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+        let route = receive_route_for_account(recipient)?;
+        self.subscribed_topics.lock().await.insert(route.0);
+        let sender = self.offer_sender(recipient).await?;
+        let stream =
+            BroadcastStream::new(sender.subscribe()).filter_map(|event| async move { event.ok() });
+        Ok(Box::pin(stream))
+    }
+
+    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
+        let route = receive_route_for_account(recipient)?;
+        self.subscribed_topics.lock().await.remove(route.as_str());
+        Ok(())
+    }
+
+    async fn publish_receive_offer(
+        &self,
+        recipient: &Pubkey,
+        _destination: EndpointAddr,
+        offer: SealedReceiveOfferV1,
+    ) -> Result<()> {
+        offer.encode()?;
+        let sender = self.offer_sender(recipient).await?;
+        let _ = sender.send(ReceiveOfferEnvelope {
+            offer,
             received_at: Utc::now().timestamp_millis(),
             source_peer: self.local_id.clone(),
         });

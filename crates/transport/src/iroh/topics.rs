@@ -451,6 +451,7 @@ impl IrohGossipTransport {
     }
 
     pub async fn shutdown(&self) {
+        self.shutdown_receive_offers().await;
         let topics = self
             .subscribed_topics
             .lock()

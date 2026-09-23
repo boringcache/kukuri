@@ -6,16 +6,18 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use kukuri_blob_service::{BlobService, BlobStatus, IrohBlobService, StoredBlob};
-use kukuri_core::{BlobHash, GossipHint, KukuriKeys, ReplicaId, TopicId};
+use kukuri_core::{
+    BlobHash, GossipHint, KukuriKeys, Pubkey, ReplicaId, SealedReceiveOfferV1, TopicId,
+};
 use kukuri_docs_sync::{
     DocEventStream, DocFetchPolicy, DocKeyPage, DocKeyQuery, DocOp, DocQuery, DocRecord, DocsSync,
     IrohDocsSync, ReplicaNoticeStream,
 };
 use kukuri_iroh_node::IrohDocsNode;
 use kukuri_transport::{
-    ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, HintStream, HintTransport,
-    IrohGossipTransport, PeerSnapshot, SeedPeer, Transport, TransportNetworkConfig,
-    TransportRelayConfig,
+    ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, EndpointAddr, HintStream,
+    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveOfferStream, SeedPeer, Transport,
+    TransportNetworkConfig, TransportRelayConfig,
 };
 #[cfg(test)]
 use tokio::sync::oneshot;
@@ -111,6 +113,11 @@ reloadable_service! {
         async fn subscribe_hints(topic: &TopicId) -> Result<HintStream>;
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
+        async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferStream>;
+        async fn unsubscribe_receive_offers(recipient: &Pubkey) -> Result<()>;
+        async fn publish_receive_offer(
+            recipient: &Pubkey, destination: EndpointAddr, offer: SealedReceiveOfferV1,
+        ) -> Result<()>;
     }
 }
 

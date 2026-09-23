@@ -2,8 +2,7 @@ use super::*;
 
 use kukuri_core::{
     BlobHash, KukuriKeys, RECEIVE_OFFER_MAX_BYTES, ReceiveOfferReferenceV1, ReceiveOfferScopeV1,
-    SealedReceiveOfferV1, receive_epoch_key_id, receive_route_for_account,
-    seal_private_receive_payload, seal_receive_offer,
+    SealedReceiveOfferV1, receive_epoch_key_id, seal_private_receive_payload, seal_receive_offer,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14,24 +13,10 @@ async fn account_receive_offer_crosses_real_gossip_with_one_recipient_route() {
     right.discovery.add_endpoint_info(left.endpoint.addr());
     let sender = KukuriKeys::generate();
     let recipient = KukuriKeys::generate();
-    let route = receive_route_for_account(&recipient.public_key()).unwrap();
-    let topic = topic_to_gossip_id(&route);
-    let mut outgoing = left
-        .gossip
-        .subscribe(topic, vec![right.endpoint.id()])
-        .await
-        .unwrap();
     let mut incoming = right
-        .gossip
-        .subscribe(topic, vec![left.endpoint.id()])
+        .subscribe_receive_offers(&recipient.public_key())
         .await
         .unwrap();
-    timeout(Duration::from_secs(10), async {
-        tokio::try_join!(outgoing.joined(), incoming.joined())
-    })
-    .await
-    .unwrap()
-    .unwrap();
 
     let epoch_secret = [7; 32];
     let private_payload =
@@ -69,26 +54,117 @@ async fn account_receive_offer_crosses_real_gossip_with_one_recipient_route() {
         .unwrap();
         let wire = offer.encode().unwrap();
         assert!(wire.len() <= RECEIVE_OFFER_MAX_BYTES);
-        outgoing.broadcast(wire.into()).await.unwrap();
-        let received = timeout(Duration::from_secs(5), async {
-            for _ in 0..8 {
-                if let Some(Ok(GossipEvent::Received(message))) = incoming.next().await {
-                    return message.content;
-                }
-            }
-            panic!("receive offer was not delivered within the event budget");
-        })
-        .await
-        .unwrap();
-        let sealed = SealedReceiveOfferV1::decode(&received).unwrap();
+        left.publish_receive_offer(&recipient.public_key(), right.endpoint.addr(), offer)
+            .await
+            .unwrap();
+        let received = timeout(Duration::from_secs(5), incoming.next())
+            .await
+            .expect("receive offer timeout")
+            .expect("receive offer stream ended");
+        assert_eq!(received.source_peer, left.endpoint.id().to_string());
+        let sealed = SealedReceiveOfferV1::decode(&received.offer.encode().unwrap()).unwrap();
         let opened = sealed.open(&recipient, now).unwrap();
         assert_eq!(opened.sender(), &sender.public_key());
         assert_eq!(opened.reference(), &reference);
         assert!(sealed.open(&KukuriKeys::generate(), now).is_err());
     }
 
-    drop(outgoing);
+    right
+        .unsubscribe_receive_offers(&recipient.public_key())
+        .await
+        .unwrap();
     drop(incoming);
+    left.shutdown().await;
+    right.shutdown().await;
     left._router.take().unwrap().shutdown().await.unwrap();
     right._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_receive_route_replaces_the_previous_account_subscription() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let old = KukuriKeys::generate().public_key();
+    let current = KukuriKeys::generate().public_key();
+    let _old_stream = transport.subscribe_receive_offers(&old).await.unwrap();
+    let mut current_stream = transport.subscribe_receive_offers(&current).await.unwrap();
+    assert_eq!(
+        transport
+            .receive_offer_topic
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .route,
+        kukuri_core::receive_route_for_account(&current)
+            .unwrap()
+            .as_str()
+    );
+    transport.unsubscribe_receive_offers(&old).await.unwrap();
+    assert!(transport.receive_offer_topic.lock().await.is_some());
+    transport
+        .unsubscribe_receive_offers(&current)
+        .await
+        .unwrap();
+    assert!(transport.receive_offer_topic.lock().await.is_none());
+    assert!(
+        timeout(Duration::from_millis(100), current_stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn oversized_receive_offer_is_rejected_before_joining_a_route() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let sender = KukuriKeys::generate();
+    let recipient = KukuriKeys::generate();
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut offer = seal_receive_offer(
+        &sender,
+        &recipient.public_key(),
+        ReceiveOfferReferenceV1 {
+            provider_endpoint_id: transport.endpoint.id().to_string(),
+            payload_hash: BlobHash("11".repeat(32)),
+            payload_bytes: 1,
+            scope: ReceiveOfferScopeV1::PublicSource,
+        },
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    offer.ciphertext_hex = "ab".repeat(RECEIVE_OFFER_MAX_BYTES);
+    assert!(
+        transport
+            .publish_receive_offer(&recipient.public_key(), transport.endpoint.addr(), offer,)
+            .await
+            .is_err()
+    );
+    assert!(transport.outbound_offer_holds.lock().await.is_empty());
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_route_bootstrap_window_is_independent_of_imported_history() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    for history in [100_usize, 1_000] {
+        let start = transport.imported_peers.lock().await.len();
+        for index in start..history {
+            let mut secret = [0_u8; 32];
+            secret[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+            let peer = iroh::SecretKey::from_bytes(&secret).public();
+            transport
+                .imported_peers
+                .lock()
+                .await
+                .insert(peer.to_string(), EndpointAddr::new(peer));
+        }
+        let selected = transport.offer_bootstrap_window().await;
+        assert_eq!(selected.len(), 4, "history={history}");
+    }
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
 }
