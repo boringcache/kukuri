@@ -479,9 +479,16 @@ async fn signed_locator_page_requires_fresh_binding_on_its_actual_endpoint() {
     forged.endpoint_id = transport.endpoint.id().to_string();
     assert!(
         transport
-            .resolve_receive_locator_page(&recipient.public_key(), vec![forged])
+            .resolve_receive_locator_page(&recipient.public_key(), vec![forged.clone()])
             .await
             .is_err()
+    );
+    assert!(
+        transport
+            .resolve_receive_locator_page(&recipient.public_key(), vec![locator.clone(), forged])
+            .await
+            .is_err(),
+        "a valid first candidate must not hide a later invalid locator"
     );
     assert!(
         transport
