@@ -245,6 +245,15 @@ impl HintTransport for IrohGossipTransport {
         self.resolve_receive_destination_impl(recipient).await
     }
 
+    async fn resolve_receive_locator_page(
+        &self,
+        recipient: &Pubkey,
+        locators: Vec<kukuri_core::ReceiveEndpointLocatorV1>,
+    ) -> Result<Option<EndpointAddr>> {
+        self.resolve_receive_locator_page_impl(recipient, locators)
+            .await
+    }
+
     async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
         Ok(ReceiveCandidateFence {
             transport_instance: self.receive_offer_instance,

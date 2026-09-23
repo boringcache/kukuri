@@ -2,7 +2,7 @@ use super::*;
 use crate::receive_binding::{RECEIVE_BINDING_ALPN, ReceiveBindingProtocol};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use kukuri_core::{KukuriKeys, ReceiveEndpointBindingV1};
+use kukuri_core::{KukuriKeys, ReceiveEndpointBindingV1, ReceiveEndpointLocatorV1};
 
 #[derive(Debug)]
 struct StalledDestinationBinding {
@@ -449,6 +449,75 @@ async fn destination_requires_live_binding_for_the_exact_account_and_invalidates
             .await
             .cached(&recipient.public_key(), Utc::now().timestamp_millis())
             .is_none()
+    );
+    router.shutdown().await.unwrap();
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_locator_page_requires_fresh_binding_on_its_actual_endpoint() {
+    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let receiver = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    transport.discovery.add_endpoint_info(receiver.addr());
+    let recipient = KukuriKeys::generate();
+    let other = KukuriKeys::generate();
+    let locator = ReceiveEndpointLocatorV1::sign(&recipient, &receiver.id().to_string()).unwrap();
+    assert!(
+        transport
+            .resolve_receive_locator_page(&other.public_key(), vec![locator.clone()])
+            .await
+            .is_err()
+    );
+    let mut forged = locator.clone();
+    forged.endpoint_id = transport.endpoint.id().to_string();
+    assert!(
+        transport
+            .resolve_receive_locator_page(&recipient.public_key(), vec![forged])
+            .await
+            .is_err()
+    );
+    assert!(
+        transport
+            .resolve_receive_locator_page(
+                &recipient.public_key(),
+                vec![locator.clone(); CANDIDATES_PER_LOOKUP + 1],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        transport
+            .resolve_receive_locator_page(&recipient.public_key(), vec![locator.clone()])
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let now = Utc::now().timestamp_millis();
+    let binding =
+        ReceiveEndpointBindingV1::sign(&recipient, &receiver.id().to_string(), now, now + 60_000)
+            .unwrap();
+    let router = Router::builder(receiver.clone())
+        .accept(
+            RECEIVE_BINDING_ALPN,
+            ReceiveBindingProtocol::new(receiver.id(), binding).unwrap(),
+        )
+        .spawn();
+    assert_eq!(
+        transport
+            .resolve_receive_locator_page(&recipient.public_key(), vec![locator])
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        receiver.id()
     );
     router.shutdown().await.unwrap();
     transport.shutdown().await;

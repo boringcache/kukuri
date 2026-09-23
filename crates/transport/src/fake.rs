@@ -416,6 +416,27 @@ impl HintTransport for FakeTransport {
         }))
     }
 
+    async fn resolve_receive_locator_page(
+        &self,
+        recipient: &Pubkey,
+        locators: Vec<kukuri_core::ReceiveEndpointLocatorV1>,
+    ) -> Result<Option<EndpointAddr>> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(locators.len() <= 4, "too many fake receive locators");
+        let verified = self.network.verified_receive_providers.lock().await;
+        for locator in locators {
+            locator.verify_signature_for(recipient)?;
+            let endpoint_id = locator.endpoint_id.parse()?;
+            if verified
+                .get(recipient.as_str())
+                .is_some_and(|ids| ids.contains(&locator.endpoint_id))
+            {
+                return Ok(Some(EndpointAddr::new(endpoint_id)));
+            }
+        }
+        Ok(None)
+    }
+
     async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
         Ok(ReceiveCandidateFence {
             transport_instance: 0,
