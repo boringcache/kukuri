@@ -451,6 +451,9 @@ impl IrohGossipTransport {
     }
 
     pub async fn shutdown(&self) {
+        self.offer_closed.store(true, Ordering::Release);
+        self.offer_shutdown_notify.notify_waiters();
+        self.shutdown_receive_offers().await;
         let topics = self
             .subscribed_topics
             .lock()

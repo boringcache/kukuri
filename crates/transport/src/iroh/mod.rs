@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(not(test))]
 use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 #[cfg(test)]
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
@@ -12,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 #[cfg(test)]
 use iroh::RelayMode;
 use iroh::address_lookup::{AddrFilter, AddressLookup, Item as AddressLookupItem, MemoryLookup};
@@ -28,10 +30,10 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayUrl, SecretKey}
 use iroh_gossip::api::{Event as GossipEvent, GossipSender};
 use iroh_gossip::{ALPN as GOSSIP_ALPN, Gossip, TopicId as GossipTopicId};
 use iroh_mainline_address_lookup::DhtAddressLookup;
-use kukuri_core::{GossipHint, TopicId};
+use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId};
 #[cfg(test)]
 use kukuri_core::{HintObjectRef, KukuriEnvelope, build_post_envelope, generate_keys};
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::BroadcastStream;
@@ -47,7 +49,8 @@ use crate::tickets::{
     encode_endpoint_ticket, endpoint_addr_with_relays, parse_endpoint_ticket, ticket_network_config,
 };
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
+    ReceiveOfferStream, TopicPeerSnapshot, Transport,
 };
 
 struct HintTopicState {
@@ -62,6 +65,20 @@ struct HintTopicState {
     #[cfg_attr(not(test), allow(dead_code))]
     invalid_hint_count: Arc<AtomicU64>,
     _receiver_task: JoinHandle<()>,
+}
+
+struct ReceiveOfferTopicState {
+    route: String,
+    closing: bool,
+    broadcaster: broadcast::Sender<ReceiveOfferEnvelope>,
+    stop: watch::Sender<bool>,
+    _sender: GossipSender,
+    receiver_task: JoinHandle<()>,
+}
+
+struct OutboundOfferHold {
+    expires_at: tokio::time::Instant,
+    task: JoinHandle<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +112,18 @@ pub struct IrohGossipTransport {
     imported_peers: Arc<Mutex<BTreeMap<String, EndpointAddr>>>,
     subscribed_topics: Arc<Mutex<BTreeSet<String>>>,
     topic_states: Arc<Mutex<HashMap<String, HintTopicState>>>,
+    receive_offer_topic: Mutex<Option<ReceiveOfferTopicState>>,
+    outbound_offer_holds: Mutex<VecDeque<OutboundOfferHold>>,
+    offer_closed: AtomicBool,
+    offer_shutdown_notify: Notify,
+    #[cfg(test)]
+    offer_receiver_tasks: Arc<AtomicUsize>,
+    #[cfg(test)]
+    offer_hold_tasks: Arc<AtomicUsize>,
+    #[cfg(test)]
+    offer_publish_joined: Arc<Notify>,
+    #[cfg(test)]
+    offer_publish_join_started: Arc<Notify>,
     topic_warmups: Arc<TopicWarmupCoordinator>,
     last_error: Arc<Mutex<Option<String>>>,
     discovery_mode: Arc<Mutex<DiscoveryMode>>,
@@ -105,6 +134,7 @@ pub struct IrohGossipTransport {
 
 mod discovery;
 mod endpoint;
+mod offer;
 mod peer_state;
 mod relay;
 #[cfg(test)]
@@ -119,6 +149,8 @@ pub(crate) use topics::{initial_topic_join_timeout, topic_to_gossip_id};
 
 impl Drop for IrohGossipTransport {
     fn drop(&mut self) {
+        self.offer_closed.store(true, Ordering::Release);
+        self.offer_shutdown_notify.notify_waiters();
         if let Ok(mut topics) = self.topic_states.try_lock() {
             for (_, state) in topics.drain() {
                 state._receiver_task.abort();
@@ -126,6 +158,13 @@ impl Drop for IrohGossipTransport {
         }
         if let Ok(mut subscribed_topics) = self.subscribed_topics.try_lock() {
             subscribed_topics.clear();
+        }
+        if let Some(offer) = self.receive_offer_topic.get_mut().take() {
+            let _ = offer.stop.send(true);
+            offer.receiver_task.abort();
+        }
+        for hold in self.outbound_offer_holds.get_mut().drain(..) {
+            hold.task.abort();
         }
     }
 }
@@ -171,5 +210,23 @@ impl HintTransport for IrohGossipTransport {
     }
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()> {
         self.hint_publish_hint_impl(topic, hint).await
+    }
+
+    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+        self.subscribe_receive_offers_impl(recipient).await
+    }
+
+    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
+        self.unsubscribe_receive_offers_impl(recipient).await
+    }
+
+    async fn publish_receive_offer(
+        &self,
+        recipient: &Pubkey,
+        destination: EndpointAddr,
+        offer: SealedReceiveOfferV1,
+    ) -> Result<()> {
+        self.publish_receive_offer_impl(recipient, destination, offer)
+            .await
     }
 }

@@ -16,9 +16,10 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::StreamExt;
-use kukuri_core::{GossipHint, TopicId};
-use tokio::sync::{Mutex, broadcast};
+use futures_util::{StreamExt, stream};
+use iroh::EndpointAddr;
+use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId, receive_route_for_account};
+use tokio::sync::{Mutex, broadcast, watch};
 #[cfg(test)]
 use tokio::time::timeout;
 use tokio_stream::wrappers::BroadcastStream;
@@ -26,14 +27,21 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, TopicPeerSnapshot, Transport,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope,
+    ReceiveOfferStream, TopicPeerSnapshot, Transport,
 };
 
 #[derive(Clone, Default)]
 pub struct FakeNetwork {
     hints: Arc<Mutex<HashMap<String, broadcast::Sender<HintEnvelope>>>>,
+    offers: Arc<Mutex<HashMap<String, broadcast::Sender<ReceiveOfferEnvelope>>>>,
     topic_subscribers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
     known_peers: Arc<Mutex<BTreeSet<String>>>,
+}
+
+struct FakeOfferRoute {
+    route: String,
+    stop: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -44,6 +52,7 @@ pub struct FakeTransport {
     bootstrap_seed_peers: Arc<Mutex<BTreeSet<String>>>,
     imported_peers: Arc<Mutex<BTreeSet<String>>>,
     subscribed_topics: Arc<Mutex<BTreeSet<String>>>,
+    active_offer_route: Arc<Mutex<Option<FakeOfferRoute>>>,
     discovery_mode: Arc<Mutex<DiscoveryMode>>,
     env_locked: Arc<Mutex<bool>>,
 }
@@ -57,6 +66,7 @@ impl FakeTransport {
             bootstrap_seed_peers: Arc::new(Mutex::new(BTreeSet::new())),
             imported_peers: Arc::new(Mutex::new(BTreeSet::new())),
             subscribed_topics: Arc::new(Mutex::new(BTreeSet::new())),
+            active_offer_route: Arc::new(Mutex::new(None)),
             discovery_mode: Arc::new(Mutex::new(DiscoveryMode::StaticPeer)),
             env_locked: Arc::new(Mutex::new(false)),
         }
@@ -68,6 +78,18 @@ impl FakeTransport {
             .entry(topic.0.clone())
             .or_insert_with(|| broadcast::channel(128).0)
             .clone()
+    }
+
+    async fn offer_sender(
+        &self,
+        recipient: &Pubkey,
+    ) -> Result<broadcast::Sender<ReceiveOfferEnvelope>> {
+        let route = receive_route_for_account(recipient)?;
+        let mut topics = self.network.offers.lock().await;
+        Ok(topics
+            .entry(route.0)
+            .or_insert_with(|| broadcast::channel(64).0)
+            .clone())
     }
 }
 
@@ -295,15 +317,164 @@ impl HintTransport for FakeTransport {
         });
         Ok(())
     }
+
+    async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
+        let route = receive_route_for_account(recipient)?;
+        let sender = self.offer_sender(recipient).await?;
+        let mut active = self.active_offer_route.lock().await;
+        let stop = match active.as_ref() {
+            Some(current) if current.route == route.as_str() => current.stop.clone(),
+            _ => {
+                if let Some(old) = active.take() {
+                    let _ = old.stop.send(true);
+                }
+                let (stop, _) = watch::channel(false);
+                *active = Some(FakeOfferRoute {
+                    route: route.as_str().to_string(),
+                    stop: stop.clone(),
+                });
+                stop
+            }
+        };
+        let stream = stream::unfold(
+            (sender.subscribe(), stop.subscribe()),
+            |(mut receiver, mut stop)| async move {
+                loop {
+                    if *stop.borrow() {
+                        return None;
+                    }
+                    tokio::select! {
+                        biased;
+                        changed = stop.changed() => {
+                            let _ = changed;
+                            return None;
+                        }
+                        event = receiver.recv() => match event {
+                            Ok(envelope) => return Some((envelope, (receiver, stop))),
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        },
+                    }
+                }
+            },
+        );
+        Ok(Box::pin(stream))
+    }
+
+    async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
+        let route = receive_route_for_account(recipient)?;
+        let mut active = self.active_offer_route.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|current| current.route == route.as_str())
+        {
+            let old = active.take().expect("matching offer route");
+            let _ = old.stop.send(true);
+        }
+        Ok(())
+    }
+
+    async fn publish_receive_offer(
+        &self,
+        recipient: &Pubkey,
+        _destination: EndpointAddr,
+        offer: SealedReceiveOfferV1,
+    ) -> Result<()> {
+        offer.encode()?;
+        let sender = self.offer_sender(recipient).await?;
+        let _ = sender.send(ReceiveOfferEnvelope {
+            offer,
+            received_at: Utc::now().timestamp_millis(),
+            source_peer: self.local_id.clone(),
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kukuri_core::{
+        BlobHash, KukuriKeys, ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer,
+    };
 
     use crate::test_support::{
         HintRoundtripParticipant, format_peer_snapshot, wait_for_hint_roundtrip,
     };
+
+    #[tokio::test]
+    async fn fake_account_switch_stops_delivery_to_the_old_offer_stream() {
+        let transport = FakeTransport::new("sender", FakeNetwork::default());
+        let sender = KukuriKeys::generate();
+        let old = KukuriKeys::generate();
+        let current = KukuriKeys::generate();
+        let mut old_stream = transport
+            .subscribe_receive_offers(&old.public_key())
+            .await
+            .unwrap();
+        let mut current_stream = transport
+            .subscribe_receive_offers(&current.public_key())
+            .await
+            .unwrap();
+        let now = Utc::now().timestamp_millis();
+        let offer = seal_receive_offer(
+            &sender,
+            &old.public_key(),
+            ReceiveOfferReferenceV1 {
+                provider_endpoint_id: "11".repeat(32),
+                payload_hash: BlobHash("22".repeat(32)),
+                payload_bytes: 1,
+                scope: ReceiveOfferScopeV1::PublicSource,
+            },
+            now,
+            now + 60_000,
+        )
+        .unwrap();
+        let endpoint = iroh::SecretKey::from_bytes(&[3; 32]).public();
+        transport
+            .publish_receive_offer(&old.public_key(), EndpointAddr::new(endpoint), offer)
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), old_stream.next())
+                .await
+                .unwrap()
+                .is_none(),
+            "switch must close the old account stream before further delivery"
+        );
+        transport
+            .unsubscribe_receive_offers(&current.public_key())
+            .await
+            .unwrap();
+        let current_offer = seal_receive_offer(
+            &sender,
+            &current.public_key(),
+            ReceiveOfferReferenceV1 {
+                provider_endpoint_id: "11".repeat(32),
+                payload_hash: BlobHash("22".repeat(32)),
+                payload_bytes: 1,
+                scope: ReceiveOfferScopeV1::PublicSource,
+            },
+            now,
+            now + 60_000,
+        )
+        .unwrap();
+        transport
+            .publish_receive_offer(
+                &current.public_key(),
+                EndpointAddr::new(endpoint),
+                current_offer,
+            )
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), current_stream.next())
+                .await
+                .unwrap()
+                .is_none(),
+            "unsubscribe must close the current account stream"
+        );
+    }
 
     fn initial_topic_join_timeout() -> Duration {
         if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
