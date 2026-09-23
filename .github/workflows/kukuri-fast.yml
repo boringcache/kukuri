@@ -12,6 +12,7 @@ on:
       - 'crates/**'
       - 'apps/**'
       - 'harness/**'
+      - 'tools/check_iroh_resource_contract.py'
       - '.github/workflows/kukuri-fast.yml'
       - '.github/workflows/kukuri-nightly.yml'
       - '.github/workflows/kukuri-release.yml'
@@ -27,6 +28,7 @@ on:
       - 'crates/**'
       - 'apps/**'
       - 'harness/**'
+      - 'tools/check_iroh_resource_contract.py'
       - '.github/workflows/kukuri-fast.yml'
       - '.github/workflows/kukuri-nightly.yml'
       - '.github/workflows/kukuri-release.yml'
@@ -78,7 +80,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -86,7 +88,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -154,7 +156,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -162,7 +164,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -183,6 +185,17 @@ jobs:
           elif command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
           fi
+      - name: Setup Python for upstream resource contract
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Pinned iroh resource contract
+        run: python tools/check_iroh_resource_contract.py
+
+      # #1120: workspace crate の成果物は checkout ごとに再 compile されるため、Cache Volume に残さない。
+      - name: Prune workspace build artifacts
+        run: cargo xtask-lite ci-prune-target
 
   linux-desktop-ui:
     runs-on: ubuntu-latest
@@ -231,7 +244,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -239,7 +252,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -313,7 +326,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -321,7 +334,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -397,7 +410,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -405,7 +418,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -461,7 +474,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -469,7 +482,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -522,7 +535,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -530,7 +543,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -591,7 +604,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -599,7 +612,7 @@ jobs:
           diagnostics: summary
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache
@@ -672,7 +685,7 @@ jobs:
           version: v0.17.0
 
       - name: Cache the Rust directories with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: archive
@@ -682,7 +695,7 @@ jobs:
           save-always: true
 
       - name: Cache Rust compilation with BoringCache
-        uses: boringcache/one@1039999c65011be670f5655e0e48ad556188ab12 # v1.30.4
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
         with:
           trust-policy: auto
           mode: sccache

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type {
   BookmarkedCustomReactionView,
   CommunityNodeManifestFetch,
+  CommunityNodePoliciesResponse,
   CustomReactionAssetView,
   ReactionKeyInput,
   RecentReactionView,
@@ -15,6 +16,7 @@ import type { InternalSmartReference } from '@/lib/internalLinks';
 import { Button } from '@/components/ui/button';
 
 import { buildThreadTree } from './buildThreadTree';
+import { UnavailablePostsNotice } from './UnavailablePostsNotice';
 import { PostCard } from './PostCard';
 import { type PostCardView } from './types';
 import { useInfiniteScrollSentinel } from './useInfiniteScrollSentinel';
@@ -45,6 +47,8 @@ type ThreadTreeProps = {
   onCopyPostLink?: (link: string) => void;
   focusedPostObjectId?: string | null;
   hasMore?: boolean;
+  /** 読んだ範囲にあるが、まだ取得できていない返信の数(#1239 AC-4)。 */
+  unavailableCount?: number;
   loadingMore?: boolean;
   onLoadMore?: () => void;
   onSubmitReport?: (
@@ -52,6 +56,8 @@ type ThreadTreeProps = {
   ) => Promise<SubmitCommunityNodeReportResult>;
   onCopyReportContact?: (value: string) => void;
   onFetchReportManifest?: (baseUrl: string) => Promise<CommunityNodeManifestFetch>;
+  /// #1192: 権利侵害を選んだときに提示する権利侵害申出ポリシーの取得(読み取りのみ)。
+  onFetchNodePolicies?: (baseUrl: string, language?: string) => Promise<CommunityNodePoliciesResponse>;
   onMuteReportAuthor?: (authorPubkey: string) => Promise<void> | void;
 };
 
@@ -79,11 +85,13 @@ export function ThreadTree({
   onCopyPostLink,
   focusedPostObjectId,
   hasMore = false,
+  unavailableCount = 0,
   loadingMore = false,
   onLoadMore,
   onSubmitReport,
   onCopyReportContact,
   onFetchReportManifest,
+  onFetchNodePolicies,
   onMuteReportAuthor,
 }: ThreadTreeProps) {
   const { t } = useTranslation('common');
@@ -94,7 +102,8 @@ export function ThreadTree({
     onLoadMore,
   });
 
-  if (nodes.length === 0) {
+  // 行が 0 件でも、続きがある(`hasMore`)あいだは、続きを読む手段を描く(#1239。`TimelineFeed` と同じ)。
+  if (nodes.length === 0 && !hasMore && unavailableCount <= 0) {
     return <p className='empty'>{emptyCopy}</p>;
   }
 
@@ -121,6 +130,7 @@ export function ThreadTree({
             ) : null}
             <div className='thread-tree-body'>
             <PostCard
+              enableLinkPreview
               view={view}
               onOpenAuthor={onOpenAuthor}
               onOpenThread={onOpenThread}
@@ -145,12 +155,18 @@ export function ThreadTree({
               onSubmitReport={onSubmitReport}
               onCopyReportContact={onCopyReportContact}
               onFetchReportManifest={onFetchReportManifest}
+              onFetchNodePolicies={onFetchNodePolicies}
               onMuteReportAuthor={onMuteReportAuthor}
             />
             </div>
           </li>
         );
       })}
+      {unavailableCount > 0 ? (
+        <li className='thread-tree-item' data-depth={0}>
+          <UnavailablePostsNotice count={unavailableCount} />
+        </li>
+      ) : null}
       {hasMore ? (
         <li className='thread-tree-item' data-depth={0}>
           {canAutoLoad ? <div ref={loadMoreRef} aria-hidden='true' /> : null}

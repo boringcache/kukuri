@@ -4,11 +4,11 @@
 
 ## この文書の位置づけ
 
-- 本書はUIの規範となる設計契約である。作り方、証跡、変更種別ごとの検証は[`docs/adr/0014-uiux-dev-flow.md`](docs/adr/0014-uiux-dev-flow.md)に置く。
+- 本書は[AGENTS.md](AGENTS.md)の作業原則・設計原則に従うUIの設計契約である。関連する作り方・証跡は[`docs/adr/0014-uiux-dev-flow.md`](docs/adr/0014-uiux-dev-flow.md)を参照し、原則に反する既存規則は維持理由にしない。
 - CSSとstateの配置、import順、実装境界は[`docs/architecture/desktop-ui-implementation.md`](docs/architecture/desktop-ui-implementation.md)に置く。
-- `apps/desktop/src/styles/tokens.css`は実際に実行される値、StorybookのFoundationsは描画確認面である。本書、実行値、確認面の食い違いは不具合として扱い、どれかを黙って正とせず同じ変更内で意図を明らかにして解消する。
-- 本書の「現行契約」は実装に適用する。「提案」は追跡Issue、導入条件、移行範囲を持つ場合だけ記載でき、導入までは現行契約として扱わない。
-- 変更判断の優先順位は、安全性・データ整合性・Accessibility、操作結果・状態継続・回復可能性、P2P／非同期状態、platform別のlayout／入力、性能、視覚的一貫性とkukuri固有性、motion／装飾の順とする。
+- `apps/desktop/src/styles/tokens.css`は実行値、StorybookのFoundationsは描画確認面である。変更対象の契約について本書・実行値・確認面を照合する。対象外の不一致や将来案を見つけても、自動的に今回の実装へ追加しない。
+- 本書は達成すべき結果を定める。文書の更新だけで実装済みとは扱わず、現在の挙動は実装と検証で確認する。提案は明示的に依頼された目的・導入条件・移行範囲を持つ場合だけ記録し、採用前に実装・token・wrapperを先行追加しない。
+- 作業前に対象surface・主操作・入力/環境・期待結果と終了条件を有限に定める。本書の合意済み契約のうち対象へ適用する条件を選び、未依頼のエッジケースや全状態の直積を追加しない。必要な操作・状態継続・Accessibility・データ境界を満たす候補の中で、完成後の実装・テスト・補助コードの総量を最小にする。変更差分の小ささは優先しない。
 
 ## 1. 利用者、利用文脈、画面目的
 
@@ -47,13 +47,14 @@ kukuriの通常画面は、コンテンツを継続して閲覧・作成・操�
 - darkはNeutral / Teal（Issue #1001）とし、背景`#121212`、Column本文・パネル`#292929`、本文`#ffffff`を基盤とする。focus・selected・activeと通知の局所的アクセントに`#03dac5`を使い、その塗り上の文字は`#00332e`とする。primary塗りボタンは`#d77d45`と文字`#20160e`を使う（Issue #1003）。補助文字は`#b3b3b3`、装飾境界と操作識別境界は別tokenにする。lightはGraphite / Orange（Issue #996）の白・中立グレー・warm-orangeを維持する。大面積の有彩色や色付き光彩を追加せず、Column Canvasとtopic-firstの情報構造、dark既定と明示的なtheme選択を維持する。
 - 装飾用の弱い境界と操作識別用の強い境界を分ける。成功・警告・エラー・接続状態は意味色とlabel／iconを維持し、ブランド色に一括置換しない。
 - 半透明gradient、過剰なcard nesting、装飾目的の巨大見出しで階層を作らず、solid surface、境界、余白、弱い拡散影で表す。
-- 外部trendや一般的な禁止リストより、既存brief、token、component、受け入れ済みADRを優先する。
+- 表示の選択は合意したbriefとtoken・component契約に基づく。外部trendや一般論だけで要件を追加せず、既存ADRも現在の作業原則・設計原則に照合する。
 
 ## 3. Column文脈と状態継続
 
 Columnの外底面とCanvasの横スクロールバーの間には`--space-sm`の余白を置く。余白はCanvasの高さ内に含め、最終投稿・composer・横scrollの操作を妨げない。狭幅では固定の操作群も同じ余白を考慮し、投稿ボタンと下辺を揃える。
 
 - Columnのscope、target、active、focus、pin、preferred span、親子関係を別のstateとして扱う。activeとDOM focus、partially visibleを同一視しない。
+- live session / game roomのmanifestは表示範囲内のカードと開いている詳細だけが取得を要求する。非表示Column・画面外・document非表示では解除する。未取得候補は通常の参加・更新操作を持たない状態として示し、取得後に検証済みカードへ置き換える。候補があるときは一覧全体をemptyと表示しない（ADR 0052、#1262）。
 - Column間を移動しても、入力中draft、選択中scope、会話文脈、未保存状態、session内scrollを不用意に失わない。
 - 戻る操作は親Columnまたは直前の文脈へ戻し、無関係な既定画面へ飛ばさない。focusは移動元または操作を開始したcontrolへ復元する。
 - canonical URLはfocus中Columnの共有targetだけを表す。Column配列、幅、順序、scroll位置、draftをURLへ載せない。
@@ -63,6 +64,8 @@ Columnの外底面とCanvasの横スクロールバーの間には`--space-sm`�
 ## 4. Componentと画面状態
 
 自分のプロフィールは、カラムの初回表示・再open、明示的な更新・再試行、公開投稿やプロフィール・関係の変更に応じて取得する。開いたままのカラム間の選択変更だけでは再取得しない。取得成功を投稿件数と分けて保持し、0件も取得済みとして扱う。再取得中は概要・件数・投稿または0件表示を保持し、本文へloading行を追加しない。失敗でも直前の確定値と未保存の編集内容を保持する。
+
+自分と他ユーザーのプロフィールの公開投稿は、表示窓の終端へ近づいた需要に応じてcursorから次ページを読む。1回の取得回数・候補数・bytes・待機時間と保持窓の上限を実装前に定める。表示可能な行が0件でも続きのcursorがあれば終端と断定しないが、投稿が出るまで自動読込みを繰り返さない。上限で止まった場合は部分取得としてcursorと現在の表示を保ち、次の閲覧要求や明示的な再試行から再開する。失敗時は自動再試行を止める。refreshは現在の表示窓を差分更新し、先頭から閲覧位置までの全履歴の連続性確認・再取得を前提にしない。
 
 自分のプロフィールカラムのヘッダーに更新アイコンボタンを置く。取得開始から最低1秒は同じ寸法のままアイコンを回転させ、処理が1秒を超える場合は完了まで続ける。データは取得でき次第反映し、最低表示時間で反映を遅らせない。更新中のaccessible nameとbusy状態を示し、表示中・保存中の重複操作を抑止する。非選択カラムの更新で選択・route・scrollを変更しない。reduced motionでは連続回転を止め、静止アイコンと更新中の状態名を最低1秒表示して伝える。
 
@@ -75,6 +78,14 @@ Columnの外底面とCanvasの横スクロールバーの間には`--space-sm`�
 投稿の返信先は、直前の返信対象のアバター・名前・最大2行の本文を、返信カードの外側かつ前に簡略表示する。簡略表示から接続線を伸ばし、今回の投稿ヘッダー・本文・操作へ続ける。親本文からスレッドを開く操作を維持し、keyboard focus中は省略を解除して内部参照のfocusを隠さない。スレッドrootを直前の親の代用にしない。本文なし添付は短い添付表示とし、簡略行でmediaを再生しない。取得不能・表示制限とThread内の親表示抑制を維持する。
 
 投稿カード右上には端末timezoneの年月日と時分秒を常時表示する。日付順は選択localeに従い、日本語は年月日順とする。狭幅では折り返しを許容し、投稿者・公開範囲・日時を重ねたり切り捨てたりしない。
+
+投稿・DMの画像／動画と画像viewerは、自動取得が固定回数で失敗したら、その部分だけを「取得に失敗しました」と再取得のicon buttonへ置き換える。投稿本文、scroll位置、focus、表示制限による代替表示は変えず、表示制限中は失敗表示も再取得操作も出さない。icon buttonはaccessible nameを持ち、再取得中は同じ位置に残したままbusyを示して重複操作を受け付けない。reduced motionではiconの回転を止め、状態名で伝える。avatar・カスタムリアクションは既存のfallbackを使い、再取得操作を置かない。回数とリセット条件は`docs/architecture/blob-cache.md`に従う。
+
+投稿本文と返信先previewの本文blobも、取得できないときは該当部分を同じ失敗表示と再読み込みicon buttonへ置き換える。投稿カードの操作群の一番右には「投稿を再読み込み」icon buttonを常時置き、そのカードで欠けている本文・直前の返信先本文・添付だけを1回再試行する。投稿単位の操作でtopic全体を同期せず、取得済み内容、scroll、focus、draftを保持する。再読み込み中は同じ位置でbusyを示し、対象カードの操作を重複実行しない。
+
+返信先previewの本文が欠けた表示中の投稿は、有限backoffで局所再取得する。Bookmarksは20件単位のページを置き換えて表示し、ページ移動で過去のカードを残さない。これにより自動再取得の監視とtimerは表示ページの上限内に収める。
+
+投稿本文の資格情報を含まない絶対HTTP(S) URLは、全文を折り返せるlinkとして表示する。公開・表示可能・settledな投稿がviewport内にある場合は、primary contentの先頭URL 1件だけにsite、title、任意description／imageのpreview cardを表示できる。取得中は本文を押し下げるskeletonを置かず、失敗時はinline linkだけを維持する。private channel／DM、Composer参照preview、adult-content gate／trust collapse中、withdrawn／missing／local pending、viewport外では自動取得しない。cardとinline linkはpointer／keyboardから元URLをOS browserへ開き、親のthread操作を重複発火しない。remote HTML／imageをWebViewから直接読み込まず、送信・取得境界はADR 0051に従う。
 
 #### 自分のアカウント操作（#1005）
 
@@ -96,11 +107,13 @@ interactive componentは、該当する`default`、`hover`、`focus-visible`、`
 
 ### 4.2 画面状態
 
+次の表は状態の意味を定める。対象操作から到達する合意済みの状態だけを実装・検証し、すべてを各componentへ追加しない。loading・reconnectingの終了は対象要求の期限で判定し、全履歴や全peerの処理完了を待たない。
+
 | 状態 | 表示契約 | 終端／回復 |
 |---|---|---|
 | initial loading | 初回取得中であることと対象を示す | success、empty、partial、offline、errorのいずれかへ必ず移る |
 | refreshing | 直前の有効値を保持し、更新中を補助表示する | 新しい値または既存値を維持したerrorへ移る |
-| empty | 取得成功かつ対象が0件の場合だけ表示する | 作成、参加、条件変更等の次の行動を示す |
+| empty | 指定した条件・取得窓の成功結果が0件の場合だけ表示する。未取得の続きがある場合はpartialとして示す | 作成、参加、条件変更等の次の行動を示す |
 | partial | 取得済み範囲と不足範囲を区別する | 追加取得、再試行、現状利用の選択肢を示す |
 | offline | localで利用可能な値を保持し、network不在を示す | 再接続待ちまたは明示再試行を示す |
 | reconnecting | 直前の値を保持し、接続回復中を示す | connected、degraded、offlineのいずれかへ移る |
@@ -132,15 +145,19 @@ emptyの案内で実在する操作を指す場合は、その操作のiconと�
 
 通常画面ではControl Centerの設定入口に言語とテーマを扱うことを示し、「表示と言語」でthemeより先に言語選択を置く。既存の設定section ID、deep link、draft、workspaceと戻る文脈を保持する。
 
+「システム」設定では、main windowを閉じたときの動作を「毎回確認する」「kukuriを終了する」「タスクトレイに格納する」から選べるようにする。未設定時のclose確認は終了とtray格納を同じDialogで明示し、「以降同じ質問をしない」は初期状態を未選択にする。保存を選ばない応答は今回だけ適用し、キャンセル／Escapeではwindowと設定を維持する。保存失敗はhideや終了を開始せず、選択を再試行できる状態で示す。trayを利用できない環境で復帰不能な非表示状態を作らない。
+
 ### 4.4 Community Nodeの初回案内と復旧
 
-app規約・年齢申告・復元gateを終え、設定済みNodeのローカル同意状態をすべて確認でき、どのNodeにも撤回されていない同意記録がない場合は、Nodeが利用者発見・端末接続・必要時の中継を手助けするサーバーであると短いDialogで説明する。「規約を確認する」は設定一覧index 0の既存規約Dialogへ進み、それ自体は同意ではない。既定候補と利用者追加Nodeを区別せず、一覧順を変えない。
+app規約・年齢申告・復元gateを終え、ローカル同意の集約結果から、どの設定済みNodeにも撤回されていない同意記録がないと確認できる場合は、Nodeが利用者発見・端末接続・必要時の中継を手助けするサーバーであると短いDialogで説明する。「規約を確認する」は設定一覧index 0の既存規約Dialogへ進み、それ自体は同意ではない。既定候補と利用者追加Nodeを区別せず、一覧順を変えない。
+
+この有無の判定は索引での存在確認や既存の差分集約を使い、画面表示のたびに全Nodeを読み直さない。同じ同意状態の正本を二重に持たず、結果が未確認なら全Node未同意と推測せずに既存の同意gateを維持する。
 
 「あとで」/閉じるはそのアカウントの起動session中の自動再表示を抑止し、設定・見つけるから手動で再開できる。説明と規約を重ねず、他の開いているDialogの終了を待つ。同意済みでも接続失敗/機能非提供なら初回説明を繰り返さず、理由別の回復を示す。一覧0件や状態不明を全Node未同意と見なさない。
 
 同意保存、接続準備、検索機能の利用可能を別状態にする。同意・runtime event・状態取得・Node情報取得の完了と検索先の解決を同期し、autoを「明示選択先が利用不可」と表示しない。明示選択先への問い合わせ停止は、検索先を無断変更しないためであると説明し、対象のCommunity Node設定・別Nodeの選択・autoへの復帰を提示する。規約、接続/再試行期限、入場制限、公開Node情報、機能非提供の理由を区別し、検索の空表示はquery成功時に限る。
 
-フィードバックの送信可否は検索の可否と独立して示す。送信先がない場合は、未設定、状態確認中/取得失敗、認証・同意待ち、接続不調、受付非対応を区別し、設定済みノードごとの理由と既存のコミュニティノード設定への操作を入力欄より前に置く。受付非対応は運営者側の提供機能であり、検索や規約同意だけでは有効にならないことを説明する。設定へ移る際はDialogを閉じ終えてから設定内へfocusを渡し、入力が消えることと設定確認後の再開方法を示す。表示・設定遷移だけで送信・認証・同意を実行しない。
+フィードバックの送信可否は検索の可否と独立して示す。送信先がない場合は、未設定、状態確認中/取得失敗、認証・同意待ち、接続不調、受付非対応を区別し、設定済みノードごとの理由を上限つきの表示窓で示し、既存のコミュニティノード設定への操作を入力欄より前に置く。受付非対応は運営者側の提供機能であり、検索や規約同意だけでは有効にならないことを説明する。設定へ移る際はDialogを閉じ終えてから設定内へfocusを渡し、入力が消えることと設定確認後の再開方法を示す。表示・設定遷移だけで送信・認証・同意を実行しない。
 
 Nodeの規約Dialogでは、文書を見出しだけの折りたたみ一覧として初期表示する。見出しを開閉するボタンは、Enter/Spaceで操作でき、展開状態をスクリーンリーダーへ伝える。見出し行には必須/任意、更新、版、同意状況を常時表示し、折りたたんだ文書も一覧中の全文書が同意対象であることを示す。版が上がった更新は旧版と現行版を、版が同じまま内容だけ更新された場合は「内容が更新されました」を示す。本文はNodeから受け取ったMarkdownとして見出し・箇条書き・引用・表・コード・リンクを描画する。raw HTMLは要素として解釈せず文字列のまま示す。リンクは絶対HTTP(S)だけをOSのブラウザで開く。開閉は表示だけの状態であり、同意ボタンの有効条件と送信する文書・版・snapshotを変えない（#1106）。
 
@@ -156,7 +173,7 @@ Nodeの規約Dialogでは、文書を見出しだけの折りたたみ一覧と�
 
 - カラム本文とControl Center本文の基準は`--text-body`、行高は1.5とする。投稿本文は`--text-body-reading`、カラム一覧・参加先一覧の補助情報は`--text-caption`を使い、ヘッダーの文字階層とportal内Dialogのサイズを分けて維持する。文字密度を変えるために`html`の基準サイズやカラム幅を縮めない。
 - 見つけるのフォーム・タブ・Node案内はカラム内部の実幅に収める。長いNode URLを含む規約操作は全文を折り返し、buttonの高さも内容に追従する。フォームの横並びは実幅に余裕がある場合に限り、viewportが広いことだけを条件にしない。
-- user-generated contentはshort、normal、very long、emptyを確認する。日本語、英語、中国語、長いURL、絵文字、技術識別子、改行、添付あり／なしを含める。
+- user-generated contentは、変更した表示と合意済み入力条件に必要な長さ・locale・URL・改行・添付等を有限の例で確認する。列挙した種類の直積や、未依頼の新しい形式を追加しない。
 - 長い語や識別子は`overflow-wrap: anywhere`等でcontainmentを守る。省略時は完全値へ到達できる手段を持つ。
 - 日本語localeでは、kukuri、固有名、技術識別子以外の未意図な英語を混ぜない。他localeも同一情報と操作結果を保持する。
 - 言語を読めない利用者の回復導線として、`settings:appearance.languageLabel` の `Language` 併記と `settings:appearance.languageOptions` の各言語の自称表記を許容する。
@@ -182,7 +199,7 @@ Nodeの規約Dialogでは、文書を見出しだけの折りたたみ一覧と�
 
 ## 6. Accessibilityと入力
 
-WCAG 2.2 AAを基準とする。自動検査の満点だけを適合の証明にせず、描画、keyboard、pointer、touch、screen readerの観測を組み合わせる。
+WCAG 2.2 AAを基準とする。対象操作・platformと適用される条件を先に定め、自動検査と必要な描画・入力・読み上げの観測を選ぶ。満点だけで適合を宣言せず、変更のない全surface・入力方式の反復確認を要求しない。
 
 - 通常文字は4.5:1以上、大きい文字と意味を持つ非text UIは3:1以上のcontrastを持つ。theme、hover、disabled、selected、focusを含む実際のforeground／background pairで確認する。
 - semantic HTMLを優先し、roleとARIAはnative semanticsを補う場合だけ使う。見出し、landmark、label、description、errorの関係を保つ。
@@ -190,7 +207,7 @@ WCAG 2.2 AAを基準とする。自動検査の満点だけを適合の証明に
 - keyboard trapを禁止する。Escape、Tab、矢印、Enter、Space等はcomponentの既知の操作モデルに合わせる。
 - drag、swipe、pinchにはclick、tap、keyboardの代替を提供する。Column並べ替えは実pointer操作とkeyboard代替を持つ。
 - 状態更新を必要に応じてlive regionで伝える。過剰なannounceや同じ通知の反復を避ける。
-- 200% zoom／reflow、Windows High Contrast、screen reader、reduced motionは、影響する変更の手動確認対象とする。
+- 200% zoom／reflow、Windows High Contrast、screen reader、reduced motionは、対象変更の適用条件と既存証拠を照合する。必要な結果を自動検証等で判断できない場合に、その操作だけを手動で補う。
 
 ### 6.1 操作領域profile
 
@@ -214,21 +231,21 @@ WCAG 2.2 AAを基準とする。自動検査の満点だけを適合の証明に
 - 表示中の選択Columnのspan変更では、header操作部へ到達できる最小のCanvas水平補正を行う。手動で選択Columnから離れた場合は引き戻さない。補正だけでfocus、本文縦scroll、入室・network session、Dome設定を変更しない。
 - 直前まで全幅を表示していた選択Columnは、Canvas幅やWebViewの拡大率が変わっても表示範囲へ追従させる。その補正scrollをMobileのpage移動と誤認しない。利用者が手動scrollで選択Columnから離れている場合は、閲覧位置を引き戻さない。
 - overlay、Control Center、Composer、fullscreen controlはsafe areaと互いのhit areaを塞がない。
-- Mobileの下部操作は、Column footerの投稿ボタン（primary action）を右寄せ、アバター・Control Center・フィードバックのclusterを左下に固定し、4つのボタンの高さ（44px）と下辺を揃える。Composer入力中はclusterの各ボタンを隠す。
-- Tauri／WebView依存surfaceはbrowserだけで完了とせず、影響するOS／WebViewでinput ownership、fullscreen、resource縮退を確認する。
+- Mobileの下部操作は、Column footerの投稿ボタン（primary action）を右寄せ、アバター・Control Center・フィードバックのclusterを左下に固定し、各ボタンの高さ（44px）と下辺を投稿ボタンへ揃える。更新が利用可能な間だけ、フィードバックの右へ「リリースと更新」を開くprimary塗りのボタンをclusterの最後に加える。幅狭ではclusterの各ボタンをアイコンのみにし、読み上げ名は保つ。Composer入力中はclusterの各ボタンを隠す。
+- Tauri／WebView固有の結果はbrowser mockだけで確認済みとしない。合意した対象OS／WebViewで、変更したinput ownership、fullscreen、resource縮退等の必要な証拠を確認する。
 - 入室済みMetaverseの全画面ではheaderと補助面の開閉操作を除いた高さを3Dへ割り当てる。Domeの管理・接続・hostingは開閉式の補助面にまとめ、閉じた内容へfocusを入れない。同じscene、camera、chat draft、フォーム入力を保持し、退出後は元のColumnと本文scroll、focusへ戻る。未入室時はdiscoveryと入室導線を維持する。
 
 ## 8. Component設計
 
-- 既存primitive、既存variant、composite component、新規primitiveの順で検討する。
-- 同じpatternが2回以上現れる場合は共有を検討するが、見た目だけが似てdomain契約が異なるものを無理に統合しない。
+- native要素、既存primitive/variant、共通componentへの統合、置換・削除を含めて最終コード量を比較する。既存componentを残すためだけのwrapperや別実装を増やさない。
+- 同じ状態・判断・操作を個別経路で繰り返し直す場合は、共通の責務へ集約する。見た目だけが似て意味が異なるものを無理に統合したり、将来用途だけの抽象化を作ったりしない。
 - boolean propの増殖で暗黙の組合せを作らず、product上の意味を持つ明示variantまたはcompound componentを使う。
-- shared componentはanatomy、variant、全状態、keyboard／pointer／touch、overflow、Storybook storyの契約を持つ。
+- shared componentは実際のconsumerに必要な構成・variant・状態・入力・overflowの契約を持つ。合意した挙動の検証に必要なstoryを用意し、未使用variantや仮想的な全状態を追加しない。
 - data取得、domain state、actionsとpresentationの境界を保ち、見た目の都合でdomain契約を変更しない。
 - color、type、spacing、radius、border、shadow、motionは現行tokenから取る。helperやadapterは現在の責務分離・可読性・検証に必要な場合に使い、将来要件だけの抽象化は増やさない。
 - プロフィールの関係一覧は冗長な総称見出しを置かず、戻る操作、4種の切替、ユーザー一覧の順に並べる。切替は通常2列、広いColumnでは4列とし、paddingは縦4px／横8px、gapは4px、高さは最低32pxを確保する。一覧との間には8pxを置く。
 - 関係一覧のユーザー行は最上段に状態バッジと右上メニューを置き、次の段にアバター・名前・自己紹介と右寄せの主操作を置く。名前と自己紹介のgapは4px。主操作は選択中種別に対応し、フォロー中／フォロワーはfollow操作、ミュート中はmute操作、ブロック中はblock操作を使う。現在の状態に応じて解除操作を表示し、副操作はメニューに格納する。
-- shellの投稿カードはpaddingを8px、ヘッダーの折り返しgapと本文・操作間の基本間隔を4pxに揃える。余白はゼロにせず、本文・media・状態・操作のまとまりを区別する。Column本文の左右paddingは16pxずつとし、内側のstackで同じ余白を再度幅から差し引かない。
+- shellの投稿カードはpaddingを8px、ヘッダーの折り返しgapと本文・操作間の基本間隔を4pxに揃える。余白はゼロにせず、本文・media・状態・操作のまとまりを区別する。Column本文の左右paddingは16pxずつとし、内側のstackで同じ余白を再度幅から差し引かない。Column本文やその主な一覧を丸ごと包むだけのpanelは置かず、一覧はColumn本文へ直接並べる。panelは1つのColumn内の別々の区画を仕切る場合と、内容そのものであるカードに限る（[#1271](docs/ui-reviews/2026-09-21-1271-column-body-frame.md)）。
 
 ### Metaverseのアバター操作（#1021）
 
@@ -256,7 +273,7 @@ peer／hash／lease epoch／session／resource metricsは診断へ集約する�
 
 ### Metaverseの接続方位とマップ（#1025）
 
-接続カテゴリは現在Domeを中央とする北・東・南・西の方位選択、確認済みcomponentの接続マップ、選択方向の詳細で構成する。候補選択、提案、承諾、撤回、解除は既存の明示actionを使う。方位・マップ閲覧だけでは共有状態を変更せず、未知のContextを探索しない。許可済みの情報を読むための既存同期は維持する。
+接続カテゴリは現在Domeを中央とする北・東・南・西の方位選択、確認済みcomponentの接続マップ、選択方向の詳細で構成する。候補選択、提案、承諾、撤回、解除は既存の明示actionを使う。方位・マップ閲覧だけでは共有状態を変更せず、未知のContextを探索しない。許可された情報は現在の表示・操作に必要な範囲で読む。既存の全同期方式を維持する条件にはしない。
 
 マップは北を上、東を右とし、現在Domeに対する相対座標を使う。番号とDome名、文字の接続一覧でも現在地・方向・隣接先を識別できる。接続状態と通行状態は分け、解除処理中・ブロック・ホスト停止・取得失敗を理由付きで示す。未取得を空きと断定せず、最後の確認値を保持する場合は更新失敗を表示する。
 
@@ -273,12 +290,13 @@ peer／hash／lease epoch／session／resource metricsは診断へ集約する�
 
 ## 10. React／Tauri性能
 
-- 独立した取得は直列化せず並行化する。partial failureを画面全体の失敗へ拡大しない。
-- Stream／Metaverse等の重い機能は必要時に読み込み、画面外ではvideo停止、低品質化、render停止／低FPS等へ縮退する。network sessionとrender lifecycleを分離する。
-- 長い一覧は実データで計測し、必要な場合だけvirtualizationまたは`content-visibility`を導入する。
-- selectorなしの全store購読、不要な派生object、重複global event listener、render中のlayout read、無制限intervalを避ける。
-- subscriptionとlistenerは所有者とcleanupを明確にし、再mountで重複しないことを確認する。
-- localStorageはkeyとschema versionを持ち、不正値、旧version、書込み不能で主要操作を壊さない。
+- 表示・操作に必要な対象だけを取得し、取得・描画・計数・派生stateのためにtopic/author/peerや履歴の全件読込み・整列・書換えを行わない。未取得や部分取得のまま表示と操作を成立させる。
+- 独立した取得も、同時実行・待機・1回の件数/bytes・期限の予算内で進める。件数分のtaskを作って待たせず、partial failureを画面全体の失敗へ拡大しない。
+- 一覧はcursorと上限つきの表示・保持窓で構成する。DOMだけのvirtualizationや`content-visibility`で、累積配列・cache・変換処理の増加を隠さない。窓から外れた表示cacheを解放し、閲覧位置はanchor/cursorで保つ。draft・保存済み投稿・未送信outbox等の利用者データを表示cacheと一緒に削除しない。
+- Stream／Metaverse等は必要時に読み込み、画面外では描画・再生を停止または縮退する。表示需要と参加中network sessionの寿命を区別する。
+- selectorなしの全store購読、重複global listener、render中のlayout read、無制限intervalを作らない。取得・retry・購読は共通の所有者と解除条件、保持上限を持ち、需要の消失後に不要な処理を残さない。
+- localStorage等は用途・schema・保持する量と削除条件を定める。設定の保存と取得データのcacheを区別し、保存失敗や未取得で主要操作を塞がない。
+- 性能は固定した操作とデータ件数を変えたときの処理回数・待ち・保持量で評価する。小さいデータで十分速いことや、再取得頻度を下げただけの結果を件数非依存の証拠にしない。文書の改訂だけで現行実装が達成済みとは扱わない。
 - Next.js、RSC、SSR、SEO固有の最適化は対象外とする。
 
 ## 11. 現行visual foundation
@@ -441,17 +459,20 @@ peer／hash／lease epoch／session／resource metricsは診断へ集約する�
 
 ### 11.2 提案token
 
-現時点で提案tokenはない。追加する場合は現行契約表へ混ぜず、追跡Issue、導入条件、consumer、dark／light値をこの節に記載し、導入時に現行契約へ移す。
+現時点で提案tokenはない。明示的な変更要求に必要な場合だけ、対応する受入条件、導入条件、実consumer、dark／light値を記録し、採用時に現行契約へ反映する。子Issueや未使用tokenを先に作る必要はない。
 
 ## 12. エージェント向けクイックリファレンス
 
 ```text
+AGENTS.mdの作業原則・設計原則を先に適用し、対象操作と終了条件を固定する。
 kukuriはdark-firstのOperate型UI。
 topic／contentを主役にし、diagnosticsと完全な技術識別子は後景へ置く。
 色、余白、radius、shadow、motionはtokens.cssの現行tokenを使う。
 partial／offline／reconnecting／degradedをemptyと区別し、直前の有効値を保持する。
 Columnのscope、focus、draft、戻る文脈を不用意に失わない。
 pointer、touch、keyboard、screen readerで同じ操作結果へ到達できるようにする。
-長文、空値、各locale、狭幅、200% zoom、reduced motionを変更範囲に応じて確認する。
+取得・表示・保持を有限窓にし、全履歴の取得完了を待たない。
+合意した入力・環境の検証を選び、未依頼のエッジケースや状態の直積を追加しない。
+共通化・置換・削除を含む最小の最終コード量を選ぶ。
 実装と検証の手順はADR 0014、CSS／stateの配置はdesktop UI architectureを参照する。
 ```

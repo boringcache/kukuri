@@ -87,7 +87,10 @@ test('Explore results expose the same post actions as the timeline', async () =>
   const onRepost = vi.fn();
   const onToggleBookmark = vi.fn();
   const searchCommunityNodeIndex = vi.fn().mockResolvedValue({
-    entries: [indexEntry('explore-actions', 'actionable result')],
+    entries: [{
+      ...indexEntry('explore-actions', 'actionable result'),
+      source_replica_id: 'bucket::v1::topic::72757374::1',
+    }],
   });
   const resolveCommunityIndexPosts = vi.fn().mockResolvedValue({
     entries: [resolvedIndexEntry('explore-actions')],
@@ -118,6 +121,9 @@ test('Explore results expose the same post actions as the timeline', async () =>
   if (!(card instanceof HTMLElement)) throw new Error('Explore result card not found');
 
   await waitFor(() => expect(resolveCommunityIndexPosts).toHaveBeenCalledTimes(1));
+  expect(resolveCommunityIndexPosts).toHaveBeenCalledWith([
+    expect.objectContaining({ source_replica_id: 'bucket::v1::topic::72757374::1' }),
+  ]);
 
   expect(within(card).getByRole('button', { name: 'React' })).toBeEnabled();
   expect(within(card).getByRole('button', { name: 'Repost' })).toBeInTheDocument();
@@ -401,17 +407,6 @@ test('index results hide identifiers and copy their complete values from context
   fireEvent.keyDown(target, { key: 'F10', shiftKey: true });
   await user.click(screen.getByRole('menuitem', { name: 'Copy post ID' }));
   expect(clipboardWriteText).toHaveBeenLastCalledWith(entry.object_id);
-});
-
-test('all joined topic scope is disabled without sending a query', () => {
-  const api = { searchCommunityNodeIndex: vi.fn() } as unknown as DesktopApi;
-  render(
-    <CommunityIndexWorkspace
-      {...workspaceProps(api, { activeTimelineScope: { kind: 'all_joined' } })}
-    />
-  );
-  expect(screen.getByText(/Search one public topic or private channel at a time/)).toBeInTheDocument();
-  expect(screen.queryByLabelText('Search query')).not.toBeInTheDocument();
 });
 
 test('changing the selected node clears results and prevents reporting them to the new node', async () => {
@@ -743,4 +738,22 @@ test('resolved posts are published for media prefetch and cleared when results e
 
   unmount();
   expect(onResolvedPostsChange.mock.calls.at(-1)?.[0]).toEqual([]);
+});
+
+// #1192: 「見つける」カラムではカラム見出しと重複するため、カード内の見出しと説明文を出さない。
+// トピック内カードはカラム見出しと文言が異なるため従来どおり残す。
+test('the explore card drops the heading and summary that repeat the column title', () => {
+  const api = {} as DesktopApi;
+  const explore = render(
+    <CommunityIndexWorkspace {...workspaceProps(api, { mode: 'explore' })} />
+  );
+
+  expect(screen.queryByRole('heading', { name: 'Community Index' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/across indexed topics/i)).not.toBeInTheDocument();
+  expect(screen.getByRole('tablist', { name: 'Community Index surfaces' })).toBeInTheDocument();
+
+  explore.unmount();
+  render(<CommunityIndexWorkspace {...workspaceProps(api, { mode: 'topic' })} />);
+
+  expect(screen.getByRole('heading', { name: 'Community Index' })).toBeInTheDocument();
 });

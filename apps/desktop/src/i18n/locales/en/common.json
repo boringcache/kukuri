@@ -1,11 +1,11 @@
 {
+  "sessionManifestUnavailable": "Session information is not available yet.",
   "externalLink": {
     "opening": "Opening in your browser…",
     "failed": "Could not confirm that the link opened. Check your default browser and try the link again."
   },
   "actions": {
     "accept": "Accept",
-    "add": "Add",
     "authenticate": "Authenticate",
     "bookmark": "Bookmark",
     "block": "Block",
@@ -29,6 +29,9 @@
     "quoteRepost": "Add comment",
     "react": "React",
     "refresh": "Refresh",
+    "reloadPost": "Reload post",
+    "previousPage": "Previous page",
+    "nextPage": "Next page",
     "manageReactions": "Manage reactions",
     "remove": "Remove",
     "removeBookmark": "Remove bookmark",
@@ -75,7 +78,6 @@
     "keyboardHelp": "Keyboard shortcuts"
   },
   "audience": {
-    "allJoined": "All joined",
     "posting": "Posting {{audience}}",
     "privateChannel": "Private channel",
     "public": "Public",
@@ -89,6 +91,7 @@
     "failedToClearDirectMessages": "Failed to clear direct messages.",
     "failedToDeleteDirectMessage": "Failed to delete the direct message.",
     "failedToFetchConsentStatus": "Failed to load policy acceptance status.",
+    "failedToPrepareImageAttachment": "Failed to prepare the image attachment.",
     "failedToGenerateVideoPoster": "Failed to generate the video preview.",
     "failedToImportPeer": "Failed to import the peer.",
     "failedToLoadAuthor": "Failed to load user information.",
@@ -125,6 +128,8 @@
     "localSyncing": "Syncing…",
     "pendingPosts_one": "Show {{count}} new post",
     "pendingPosts_other": "Show {{count}} new posts",
+    "unavailablePosts_one": "{{count}} post in this range hasn't arrived yet. Once it arrives, it appears when you reload.",
+    "unavailablePosts_other": "{{count}} posts in this range haven't arrived yet. Once they arrive, they appear when you reload.",
     "moreMedia": "+{{count}} media",
     "quoteRepost": "Repost with comment",
     "replyingTo": "Replying to {{author}}",
@@ -173,6 +178,8 @@
     "noEvents": "no events",
     "loadMore": "Load more",
     "loadingMore": "Loading more…",
+    "bookmarkPages": "Bookmark pages",
+    "pageCount": "Page {{current}} of {{total}}",
     "none": "none",
     "selectAuthor": "Select a user to view their profile and connection.",
     "unknownAuthor": "Unknown user",
@@ -199,7 +206,9 @@
     "viewers": "viewers"
   },
   "media": {
-    "unavailable": "Media unavailable.",
+    "fetchFailed": "Failed to load.",
+    "retryFetch": "Retry loading",
+    "retryingFetch": "Retrying…",
     "closeDialog": "Close image viewer",
     "imageAlt": "image attachment",
     "reportVideo": "Report video attachment",

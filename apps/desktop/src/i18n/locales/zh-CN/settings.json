@@ -201,8 +201,6 @@
       "updatedNotice": "该节点更新了政策。请查看变更并再次接受以继续连接。",
       "noPolicies": "该节点不需要任何政策同意。",
       "noBody": "该政策未提供正文。",
-      "required": "必需",
-      "optional": "可选",
       "updatedBadge": "已更新",
       "updatedDetail": "已从 v{{previous}} 更新至 v{{current}}。",
       "updatedContentDetail": "内容已更新。",
@@ -445,12 +443,16 @@
   "release": {
     "title": "发布",
     "summary": "预览频道、更新、诊断和资源。",
+    "storeSummary": "Microsoft Store 版本的更新、诊断和资源。",
     "update": {
       "title": "更新",
       "version": "版本",
       "channel": "频道",
+      "storeChannel": "Microsoft Store",
       "manifest": "清单",
       "status": "状态",
+      "storeManagedStatus": "由 Microsoft Store 管理",
+      "storeManaged": "此版本由 Microsoft Store 管理更新。可通过 Store 库和 Windows 自动更新设置获取最新版本。",
       "statuses": {
         "available": "有可用更新",
         "checking": "正在检查",
@@ -719,6 +721,28 @@
     "operationError": "其他应用操作发生错误。这与当前连接状态不同。",
     "operationDetails": "操作错误详情",
     "previousLabel": "{{state}}（上次的信息）"
+  },
+  "system": {
+    "title": "系统",
+    "summary": "选择关闭主窗口时的行为。",
+    "windowCloseBehavior": "关闭窗口时",
+    "options": {
+      "ask": "每次询问",
+      "quit": "退出 kukuri",
+      "tray": "保留在系统托盘"
+    },
+    "hint": "保留在系统托盘时，窗口关闭后 kukuri 仍会在后台运行。托盘不可用时，kukuri 会正常退出。",
+    "saveError": "无法保存窗口关闭设置。之前的设置仍然有效。"
+  },
+  "windowClosePrompt": {
+    "title": "将 kukuri 保留在系统托盘吗？",
+    "description": "请选择继续在后台运行或退出应用。",
+    "remember": "以后不再询问",
+    "cancel": "取消",
+    "tray": "保留在系统托盘",
+    "quit": "退出 kukuri",
+    "pending": "正在退出…",
+    "error": "无法应用所选操作，请重试。"
   },
   "notifications": {
     "title": "通知",

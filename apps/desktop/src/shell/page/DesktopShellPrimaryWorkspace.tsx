@@ -1,7 +1,8 @@
-import { type FormEvent, type ReactNode, useMemo } from 'react';
+import { type FormEvent, type ReactNode, useMemo, useState } from 'react';
 import { Link2 } from 'lucide-react';
 
 import { BookmarksEmptyState, BookmarksListFrame } from '@/components/core/BookmarksEmptyState';
+import { BookmarkPage } from '@/components/core/BookmarkPage';
 import { TimelineFeed } from '@/components/core/TimelineFeed';
 import { CommunityIndexWorkspace } from '@/components/core/CommunityIndexWorkspace';
 import type { CommunityIndexingTarget } from '@/components/core/CommunityIndexingRequestDialog';
@@ -9,13 +10,13 @@ import { MetaverseRoomPanel } from '@/components/extended/MetaverseRoomPanel';
 import type { CommunityNodePanelView } from '@/components/settings/types';
 import { AuthorTrustGateNotice } from '@/components/core/AuthorTrustGateNotice';
 import { useAuthorTrustGateReveal } from '@/components/core/useAuthorTrustGateReveal';
+import { SessionVisibility, PendingSessionCards } from '@/components/extended/SessionVisibility';
 import { GameRoomPanel } from '@/components/extended/GameRoomPanel';
 import type { MetaverseRoomActions } from '@/components/extended/metaverse/MetaverseRoomActions';
 import { ProfileConnectionsPanel } from '@/components/extended/ProfileConnectionsPanel';
 import { ProfileEditorPanel } from '@/components/extended/ProfileEditorPanel';
 import { ProfileOverviewPanel } from '@/components/extended/ProfileOverviewPanel';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { IconButton } from '@/components/ui/icon-button';
 import { Notice } from '@/components/ui/notice';
 import { SmartReferenceText } from '@/components/core/SmartReferenceText';
@@ -112,6 +113,7 @@ export type DesktopShellPrimarySurfaceProps = {
   onRetryCommunityNode: (availability: CommunityNodeAvailability) => Promise<void>;
   loadReactionCatalogData: () => Promise<void>;
   refreshProfile: () => Promise<void>;
+  loadMoreProfileTimeline: () => Promise<void>;
   refreshTimelineFeed: (
     topic: string,
     currentThread: string | null,
@@ -177,6 +179,7 @@ export function DesktopShellPrimarySurface({
   loadReactionCatalogData,
   refreshTimelineFeed,
   refreshProfile,
+  loadMoreProfileTimeline,
   loadMoreTimeline,
   openAuthorDetail,
   openThread,
@@ -242,6 +245,9 @@ export function DesktopShellPrimarySurface({
     profileError,
     profilePanelState,
     profileHasLoaded,
+    profileTimelineNextCursor,
+    profileTimelineLoadingMore,
+    profileTimelineLoadMoreError,
     profileSaving,
     recentReactions,
     selectedLiveSessionId,
@@ -252,6 +258,7 @@ export function DesktopShellPrimarySurface({
     syncStatus,
     timelineLoadingMoreByKey,
     timelineNextCursorByKey,
+    timelineUnavailableByKey,
     timelinesByKey,
     joinedChannelsByTopic,
     liveSessionsByScopeKey,
@@ -294,6 +301,9 @@ export function DesktopShellPrimarySurface({
       profileError: s.profileError,
       profilePanelState: s.profilePanelState,
       profileHasLoaded: s.profileHasLoaded,
+      profileTimelineNextCursor: s.profileTimelineNextCursor,
+      profileTimelineLoadingMore: s.profileTimelineLoadingMore,
+      profileTimelineLoadMoreError: s.profileTimelineLoadMoreError,
       profileSaving: s.profileSaving,
       recentReactions: s.recentReactions,
       selectedLiveSessionId: s.selectedLiveSessionId,
@@ -304,6 +314,7 @@ export function DesktopShellPrimarySurface({
       syncStatus: s.syncStatus,
       timelineLoadingMoreByKey: s.timelineLoadingMoreByKey,
       timelineNextCursorByKey: s.timelineNextCursorByKey,
+      timelineUnavailableByKey: s.timelineUnavailableByKey,
       timelinesByKey: s.timelinesByKey,
       joinedChannelsByTopic: s.joinedChannelsByTopic,
       liveSessionsByScopeKey: s.liveSessionsByScopeKey,
@@ -333,6 +344,9 @@ export function DesktopShellPrimarySurface({
     api.submitCommunityNodeReport(request);
   const fetchReportManifest = (baseUrl: string) =>
     api.fetchCommunityNodeManifest(baseUrl);
+  // #1192: 権利侵害申請モーダルで提示する権利侵害申出ポリシーの取得(認証不要の公開カタログ)。
+  const fetchNodePolicies = (baseUrl: string, language?: string) =>
+    api.fetchCommunityNodePolicies(baseUrl, language);
   const muteReportAuthor = async (authorPubkey: string) => {
     await handleMuteAction(authorPubkey, false);
   };
@@ -363,6 +377,7 @@ export function DesktopShellPrimarySurface({
     [activeTimelineKey, surfaceJoinedChannels, timelinesByKey, viewModels]
   );
   const surfaceScopeKey = timelineStorageKeyForChannel(surfaceTopic, surfaceChannelId);
+  const [pendingLiveCount, setPendingLiveCount] = useState(0);
   const surfaceLiveSessions = liveSessionsByScopeKey[surfaceScopeKey] ?? [];
   const surfaceGameRooms = useMemo(
     () => gameRoomsByScopeKey[surfaceScopeKey] ?? [],
@@ -397,6 +412,7 @@ export function DesktopShellPrimarySurface({
   const activeTimelinePendingCount = pendingTimelineCountsByKey[activeTimelineKey] ?? 0;
   const activeTimelineHasMore = Boolean(timelineNextCursorByKey[activeTimelineKey]);
   const activeTimelineLoadingMore = timelineLoadingMoreByKey[activeTimelineKey] ?? false;
+  const activeTimelineUnavailable = timelineUnavailableByKey[activeTimelineKey] ?? 0;
   const metaverseRooms = useMemo(
     () => surfaceGameRooms.filter((room) => room.room_kind === 'metaverse_room'),
     [surfaceGameRooms]
@@ -458,7 +474,7 @@ export function DesktopShellPrimarySurface({
       <section className='shell-section'>
         {activeSurfaceSection === 'timeline' ? (
           <>
-            <Card className='shell-workspace-card'>
+            <div className='shell-column-content'>
               {activeTimelineView === 'feed' ? (
                 <TimelineFeed
                   posts={surfaceTimelinePostViews}
@@ -487,6 +503,7 @@ export function DesktopShellPrimarySurface({
                   onCopyPostLink={handleCopyInternalLink}
                   hasMore={activeTimelineHasMore}
                   loadingMore={activeTimelineLoadingMore}
+                  unavailableCount={activeTimelineUnavailable}
                   onLoadMore={() => void loadMoreTimeline(surfaceTopic, surfaceChannelId)}
                   pendingCount={activeTimelinePendingCount}
                   onApplyPending={() =>
@@ -495,6 +512,7 @@ export function DesktopShellPrimarySurface({
                   onSubmitReport={submitReport}
                   onCopyReportContact={copyReportContact}
                   onFetchReportManifest={fetchReportManifest}
+                  onFetchNodePolicies={fetchNodePolicies}
                   onMuteReportAuthor={muteReportAuthor}
                 />
               ) : (
@@ -504,49 +522,62 @@ export function DesktopShellPrimarySurface({
                   onRetry={() => retryBookmarks?.()}
                 >
                   {(bookmarksDisplayedStatus) => (
-                    <TimelineFeed
-                      posts={viewModels.bookmarkedTimelinePostViews}
-                      emptyCopy={t('shell:workspace.noBookmarks')}
-                      emptyState={
-                        bookmarksDisplayedStatus === 'ready' ? (
-                          <BookmarksEmptyState
-                            onShowTimeline={
-                              selectTimelineView ? () => selectTimelineView(column, 'feed') : undefined
-                            }
-                          />
-                        ) : null
-                      }
-                      onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
-                      onOpenThread={openThreadInSurfaceScope}
-                      onOpenThreadInTopic={openThreadInTopicFromSurface}
-                      onReply={beginColumnReply}
-                      onRepost={(post) => void handleSimpleRepost(post)}
-                      onQuoteRepost={beginColumnQuoteRepost}
-                      onRetryLocalPost={handleRetryLocalPost}
-                      onRestoreLocalPost={handleRestoreLocalPost}
-                      localAuthorPubkey={syncStatus.local_author_pubkey}
-                      mediaObjectUrls={mediaObjectUrls}
-                      ownedReactionAssets={ownedReactionAssets}
-                      bookmarkedReactionAssets={bookmarkedReactionAssets}
-                      recentReactions={recentReactions}
-                      onToggleReaction={(post, reactionKey) => void handleToggleReaction(post, reactionKey)}
-                      onBookmarkCustomReaction={(asset) => void handleBookmarkCustomReaction(asset)}
-                      onReactionPickerOpen={() => void loadReactionCatalogData()}
-                      showBookmarkAction={true}
-                      bookmarkedPostIds={bookmarkedPostIds}
-                      onToggleBookmark={(post) => void handleToggleBookmarkedPost(post)}
-                      onWithdraw={(post) => void handleWithdrawPost(post)}
-                      onActivateReference={(reference) => void handleActivateReference(reference)}
-                      onCopyPostLink={handleCopyInternalLink}
-                      onSubmitReport={submitReport}
-                      onCopyReportContact={copyReportContact}
-                      onFetchReportManifest={fetchReportManifest}
-                      onMuteReportAuthor={muteReportAuthor}
-                    />
+                    <BookmarkPage key={column.id} items={viewModels.bookmarkedTimelinePostViews}>
+                      {(bookmarkPage) => (
+                        <TimelineFeed
+                          posts={bookmarkPage}
+                          emptyCopy={t('shell:workspace.noBookmarks')}
+                          emptyState={
+                            bookmarksDisplayedStatus === 'ready' ? (
+                              <BookmarksEmptyState
+                                onShowTimeline={
+                                  selectTimelineView
+                                    ? () => selectTimelineView(column, 'feed')
+                                    : undefined
+                                }
+                              />
+                            ) : null
+                          }
+                          onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
+                          onOpenThread={openThreadInSurfaceScope}
+                          onOpenThreadInTopic={openThreadInTopicFromSurface}
+                          onReply={beginColumnReply}
+                          onRepost={(post) => void handleSimpleRepost(post)}
+                          onQuoteRepost={beginColumnQuoteRepost}
+                          onRetryLocalPost={handleRetryLocalPost}
+                          onRestoreLocalPost={handleRestoreLocalPost}
+                          localAuthorPubkey={syncStatus.local_author_pubkey}
+                          mediaObjectUrls={mediaObjectUrls}
+                          ownedReactionAssets={ownedReactionAssets}
+                          bookmarkedReactionAssets={bookmarkedReactionAssets}
+                          recentReactions={recentReactions}
+                          onToggleReaction={(post, reactionKey) =>
+                            void handleToggleReaction(post, reactionKey)
+                          }
+                          onBookmarkCustomReaction={(asset) =>
+                            void handleBookmarkCustomReaction(asset)
+                          }
+                          onReactionPickerOpen={() => void loadReactionCatalogData()}
+                          showBookmarkAction={true}
+                          bookmarkedPostIds={bookmarkedPostIds}
+                          onToggleBookmark={(post) => void handleToggleBookmarkedPost(post)}
+                          onWithdraw={(post) => void handleWithdrawPost(post)}
+                          onActivateReference={(reference) =>
+                            void handleActivateReference(reference)
+                          }
+                          onCopyPostLink={handleCopyInternalLink}
+                          onSubmitReport={submitReport}
+                          onCopyReportContact={copyReportContact}
+                          onFetchReportManifest={fetchReportManifest}
+                          onFetchNodePolicies={fetchNodePolicies}
+                          onMuteReportAuthor={muteReportAuthor}
+                        />
+                      )}
+                    </BookmarkPage>
                   )}
                 </BookmarksListFrame>
               )}
-            </Card>
+            </div>
           </>
         ) : null}
 
@@ -609,7 +640,7 @@ export function DesktopShellPrimarySurface({
 
         {activeSurfaceSection === 'live' ? (
           <div className='shell-stream-layout'>
-            <Card className='shell-workspace-card'>
+            <section className='shell-column-content'>
               <div className='panel-header'>
                 <div>
                   <h3>{t('live:title')}</h3>
@@ -623,9 +654,9 @@ export function DesktopShellPrimarySurface({
               (liveError ?? surfaceLivePanelState.error) ? (
                 <Notice tone='destructive'>{liveError ?? surfaceLivePanelState.error}</Notice>
               ) : null}
-            </Card>
-            <Card className='shell-workspace-card'>
-              {surfaceLiveSessionListItems.length === 0 &&
+            </section>
+            <div className='shell-column-content'>
+              {surfaceLiveSessionListItems.length === 0 && pendingLiveCount === 0 &&
               surfaceLivePanelState.status === 'ready' ? (
                 <p className='empty-state'>{t('live:empty')}</p>
               ) : null}
@@ -645,7 +676,7 @@ export function DesktopShellPrimarySurface({
                     );
                   }
                   return (
-                  <li key={session.session_id}>
+                  <SessionVisibility key={session.session_id} sessionId={session.session_id} kind="live" context={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}>
                     <article
                       className={`post-card${
                         selectedLiveSessionId === session.session_id ? ' post-card-targeted' : ''
@@ -728,16 +759,20 @@ export function DesktopShellPrimarySurface({
                         </IconButton>
                       </div>
                     </article>
-                  </li>
+                  </SessionVisibility>
                   );
                 })}
               </ul>
-            </Card>
+              <PendingSessionCards context={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
+                kind="live" targetId={column.entityId} onCountChange={setPendingLiveCount} refreshToken={surfaceLiveSessions} knownIds={surfaceLiveSessions.map((item) => item.session_id)} />
+            </div>
           </div>
         ) : null}
 
         {activeSurfaceSection === 'game' && column.kind === 'game' ? (
           <GameRoomPanel
+            requestedSessionId={column.entityId}
+            sessionDisplay={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
             status={surfaceGamePanelState.status}
             error={gameError ?? surfaceGamePanelState.error}
             audienceLabel={surfaceAudienceLabel}
@@ -771,6 +806,7 @@ export function DesktopShellPrimarySurface({
           />
         ) : activeSurfaceSection === 'game' ? (
           <MetaverseRoomPanel
+            sessionDisplay={{ api, topic: surfaceTopic, scope: surfaceTimelineScope }}
             loadError={surfaceGamePanelState.error}
             catalogReady={surfaceGamePanelState.status === 'ready'}
             actions={metaverseActions}
@@ -867,10 +903,14 @@ export function DesktopShellPrimarySurface({
             ) : null}
             {profileMode !== 'connections' &&
             profileHasLoaded ? (
-              <Card className='shell-workspace-card'>
+              <div className='shell-column-content'>
                 <TimelineFeed
                   posts={viewModels.profileTimelinePostViews}
                   emptyCopy={t('profile:feed.noOwnPosts')}
+                  hasMore={Boolean(profileTimelineNextCursor)}
+                  loadingMore={profileTimelineLoadingMore}
+                  loadMoreError={profileTimelineLoadMoreError}
+                  onLoadMore={() => void loadMoreProfileTimeline()}
                   onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
                   onOpenThread={openThreadInSurfaceScope}
                   onOpenThreadInTopic={openThreadInTopicFromSurface}
@@ -880,7 +920,7 @@ export function DesktopShellPrimarySurface({
                   onActivateReference={(reference) => void handleActivateReference(reference)}
                   onCopyPostLink={handleCopyInternalLink}
                 />
-              </Card>
+              </div>
             ) : null}
           </>
         ) : null}

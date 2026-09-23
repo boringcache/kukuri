@@ -24,6 +24,7 @@ type PostsMock = Pick<
   | 'bookmarkPost'
   | 'removeBookmarkedPost'
   | 'resolveCommunityIndexPosts'
+  | 'retryPostElements'
 >;
 
 export function createPostsMock(runtime: MockRuntime): PostsMock {
@@ -32,7 +33,6 @@ export function createPostsMock(runtime: MockRuntime): PostsMock {
     postsByTopic,
     authorProfileTimelines,
     syncStatus,
-    joinedChannelsByTopic,
     bookmarkedPosts,
     visibleTimelineItems,
     isVisiblePost,
@@ -301,7 +301,7 @@ export function createPostsMock(runtime: MockRuntime): PostsMock {
       }
       return {
         items: visibleTimelineItems(
-          filterChannelScopedItems(postsByTopic[topic] ?? [], scope, joinedChannelsByTopic[topic] ?? [])
+          filterChannelScopedItems(postsByTopic[topic] ?? [], scope)
         ),
         next_cursor: null,
       };
@@ -320,6 +320,13 @@ export function createPostsMock(runtime: MockRuntime): PostsMock {
         items: visibleTimelineItems([...(authorProfileTimelines[pubkey] ?? [])]),
         next_cursor: null,
       };
+    },
+    async retryPostElements(objectId) {
+      for (const posts of Object.values(postsByTopic)) {
+        const post = posts.find((candidate) => candidate.object_id === objectId);
+        if (post) return withSocialPostDefaults({ ...post });
+      }
+      return null;
     },
     async listBookmarkedPosts() {
       return bookmarkedPosts

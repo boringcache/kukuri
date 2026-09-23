@@ -155,6 +155,7 @@ fn post_view_full() -> PostView {
                 picture_asset: Some(profile_asset()),
             },
             content: "parent content".to_string(),
+            content_status: BlobViewStatus::Available,
             attachments: vec![observed_attachment()],
             content_labels: Vec::new(),
             root_id: Some("root-1".to_string()),
@@ -253,6 +254,7 @@ fn views_wire_timeline_view() {
                 created_at: 1_700_000_001,
                 object_id: kukuri_core::EnvelopeId("post-2".to_string()),
             }),
+            unavailable_count: 2,
         },
     );
 }
@@ -409,6 +411,7 @@ fn dm_status() -> DirectMessageStatusView {
         send_enabled: true,
         peer_count: 1,
         pending_outbox_count: 2,
+        pending_outbox_has_more: false,
     }
 }
 

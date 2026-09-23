@@ -13,11 +13,17 @@ Accepted
 - `docs/adr/0012-topic-first_progressive_community_filtering_draft.md`
 - `docs/adr/0018-channel-first-sidebar-and-unified-epoch-lifecycle.md`
 - `docs/adr/0019-profile-avatar-blob-data-classification.md`
+- [ADR 0055](0055-demand-owned-network-work.md)（account受信routeへの段階移行）
 
 ## Summary
 - `chat` ではなく `DM` を正式方針にする。
 - DM v1 は `1on1 / global pairwise / mutual 限定 / offline 可 / local-only transcript / local-only delete / account-key E2E / image+video attachment 対応` で固定する。
 - private channel の UI / secure storage / blob transport / social graph は再利用するが、`docs` を正本にする private channel data plane は使わない。DM は `private channel audience v1` の外側にある別データプレーンとして定義する。
+
+2026-09-23の輸送追補: 暗号frame・署名ACK・mutual・保護outboxの契約は本ADRを維持する。
+輸送routeは[ADR 0055 §4](0055-demand-owned-network-work.md)に従い、署名済みaccount受信先へ
+sealed参照とACKを段階移行する。旧pairwise hintも撤去条件を満たすまで併用し、重複した有効ACKは
+最初に保存した配達時刻を維持する。以下のpairwise輸送表は元のv1設計であり、移行中の追加経路は追補が定める。
 
 ## Feature Data Classification
 

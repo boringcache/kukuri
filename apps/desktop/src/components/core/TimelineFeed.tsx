@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import type {
   BookmarkedCustomReactionView,
   CommunityNodeManifestFetch,
+  CommunityNodePoliciesResponse,
   CustomReactionAssetView,
   ReactionKeyInput,
   RecentReactionView,
@@ -16,6 +17,7 @@ import type { InternalSmartReference } from '@/lib/internalLinks';
 import { Button } from '@/components/ui/button';
 
 import { PostCard } from './PostCard';
+import { UnavailablePostsNotice } from './UnavailablePostsNotice';
 import { type PostCardView } from './types';
 import { useInfiniteScrollSentinel } from './useInfiniteScrollSentinel';
 
@@ -56,7 +58,10 @@ type TimelineFeedProps = {
   focusedPostObjectId?: string | null;
   hasMore?: boolean;
   loadingMore?: boolean;
+  loadMoreError?: string | null;
   onLoadMore?: () => void;
+  /** 読んだ範囲にあるが、まだ取得できていない投稿の数(#1239 AC-4)。続きを読む操作は止めない。 */
+  unavailableCount?: number;
   pendingCount?: number;
   onApplyPending?: () => void;
   // 分散通報ルーティング（#310）。取得済み community node manifest（ok のみ）と送信導線。
@@ -65,6 +70,8 @@ type TimelineFeedProps = {
   ) => Promise<SubmitCommunityNodeReportResult>;
   onCopyReportContact?: (value: string) => void;
   onFetchReportManifest?: (baseUrl: string) => Promise<CommunityNodeManifestFetch>;
+  /// #1192: 権利侵害を選んだときに提示する権利侵害申出ポリシーの取得(読み取りのみ)。
+  onFetchNodePolicies?: (baseUrl: string, language?: string) => Promise<CommunityNodePoliciesResponse>;
   onMuteReportAuthor?: (authorPubkey: string) => Promise<void> | void;
 };
 
@@ -101,17 +108,22 @@ export function TimelineFeed({
   focusedPostObjectId,
   hasMore = false,
   loadingMore = false,
+  loadMoreError = null,
   onLoadMore,
+  unavailableCount = 0,
   pendingCount = 0,
   onApplyPending,
   onSubmitReport,
   onCopyReportContact,
   onFetchReportManifest,
+  onFetchNodePolicies,
   onMuteReportAuthor,
 }: TimelineFeedProps) {
   const { t } = useTranslation('common');
   const { sentinelRef: loadMoreRef, canAutoLoad } = useInfiniteScrollSentinel({
-    hasMore,
+    // A failed automatic request must not immediately reconnect the observer and retry forever.
+    // Keep the cursor, but require an explicit retry after an error.
+    hasMore: hasMore && !loadMoreError,
     loadingMore,
     onLoadMore,
   });
@@ -162,7 +174,11 @@ export function TimelineFeed({
     }
   };
 
-  if (posts.length === 0 && !canApplyPending) {
+  // 行が 0 件でも、続きがある(`hasMore`)あいだは、続きを読む手段(sentinel か button)を描く。
+  // 非表示の著者の投稿が続く範囲では、取得が空のページと `next_cursor` を返す(#1239)。ここで空の文言だけを
+  // 返すと、その先の表示できる投稿へ進めない。
+  // まだ取得できていない投稿があるときも、空の文言ではなく、その旨を描く(#1239 AC-4)。
+  if (posts.length === 0 && !canApplyPending && !hasMore && unavailableCount <= 0) {
     if (emptyState !== undefined) return <>{emptyState}</>;
     return <p className='empty'>{emptyCopy}</p>;
   }
@@ -188,7 +204,8 @@ export function TimelineFeed({
       ) : null}
       {posts.map((view) => (
         <li key={view.post.object_id} className={itemClassName}>
-          <PostCard
+        <PostCard
+          enableLinkPreview
             view={view}
             onOpenAuthor={onOpenAuthor}
             onOpenThread={onOpenThread}
@@ -218,19 +235,30 @@ export function TimelineFeed({
             onSubmitReport={onSubmitReport}
             onCopyReportContact={onCopyReportContact}
             onFetchReportManifest={onFetchReportManifest}
+            onFetchNodePolicies={onFetchNodePolicies}
             onMuteReportAuthor={onMuteReportAuthor}
           />
         </li>
       ))}
+      {unavailableCount > 0 ? (
+        <li className={itemClassName}>
+          <UnavailablePostsNotice count={unavailableCount} />
+        </li>
+      ) : null}
       {hasMore ? (
         <li className={itemClassName}>
-          {canAutoLoad ? <div ref={loadMoreRef} aria-hidden='true' /> : null}
-          {!canAutoLoad && onLoadMore ? (
+          {loadMoreError ? <p className='error'>{loadMoreError}</p> : null}
+          {canAutoLoad && !loadMoreError ? <div ref={loadMoreRef} aria-hidden='true' /> : null}
+          {(!canAutoLoad || loadMoreError) && onLoadMore ? (
             <Button variant='secondary' type='button' onClick={() => onLoadMore()}>
-              {loadingMore ? t('fallbacks.loadingMore') : t('fallbacks.loadMore')}
+              {loadingMore
+                ? t('fallbacks.loadingMore')
+                : loadMoreError
+                  ? t('actions.retry')
+                  : t('fallbacks.loadMore')}
             </Button>
           ) : null}
-          {canAutoLoad && loadingMore ? (
+          {canAutoLoad && !loadMoreError && loadingMore ? (
             <p className='empty'>{t('fallbacks.loadingMore')}</p>
           ) : null}
         </li>

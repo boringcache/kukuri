@@ -332,7 +332,7 @@ test('browser mock shell can switch topics, publish, open thread, open author, a
 
   const controlCenter = await openControlCenter(page);
   await controlCenter.getByPlaceholder('general').fill('kukuri:topic:browser');
-  await controlCenter.getByRole('button', { name: 'Add', exact: true }).click();
+  await controlCenter.getByRole('button', { name: 'Add Topic', exact: true }).click();
   await controlCenter.getByRole('button', { name: /^browser$/ }).click();
   await expectActiveTopic(page, 'kukuri:topic:browser');
 
@@ -797,7 +797,7 @@ test('browser mock shell persists language changes across reloads', async ({ pag
   await expect(settingsDialog).toBeHidden();
   await openComposerDialog(page);
   await expect(page.getByPlaceholder('投稿を書く')).toBeVisible();
-  await expect(page.getByRole('button', { name: '投稿' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '投稿', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
 
   await page.reload();
@@ -948,7 +948,7 @@ test('browser mock narrow shell keeps nav, context, and settings flows reachable
 
   let controlCenter = await openControlCenter(page);
   await controlCenter.getByPlaceholder('general').fill('kukuri:topic:narrow');
-  await controlCenter.getByRole('button', { name: 'Add', exact: true }).click();
+  await controlCenter.getByRole('button', { name: 'Add Topic', exact: true }).click();
 
   controlCenter = await openControlCenter(page);
   await controlCenter.getByRole('button', { name: /^general$/ }).click();

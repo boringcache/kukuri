@@ -31,13 +31,21 @@ impl AppService {
     ) -> Result<DomeHostingView> {
         let replica = self.hosting_context_replica(&spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, instance_id)
+            .hosting_instance(&replica, &spatial_context, instance_id)
             .await?
             .context("Dome instance was not found")?;
+        self.hosting_view_for_instance(&replica, &instance).await
+    }
+
+    pub(crate) async fn hosting_view_for_instance(
+        &self,
+        replica: &ReplicaId,
+        instance: &DomeInstanceManifestV1,
+    ) -> Result<DomeHostingView> {
         let records = self
-            .list_dome_hosting_records(&replica, instance_id)
+            .list_dome_hosting_records(replica, &instance.instance_id)
             .await?;
-        self.hosting_view(&instance, &records, Utc::now().timestamp_millis())
+        self.hosting_view(instance, &records, Utc::now().timestamp_millis())
             .await
     }
 
@@ -58,7 +66,7 @@ impl AppService {
         }
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         if input
@@ -160,7 +168,7 @@ impl AppService {
     ) -> Result<DomeHostingView> {
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         if input
@@ -224,7 +232,7 @@ impl AppService {
         let _guard = self.services.dome_mutations.lock().await;
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         self.ensure_dome_hosting_owner(&instance)?;
@@ -282,7 +290,7 @@ impl AppService {
     ) -> Result<DomeHostingView> {
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         if input
@@ -323,7 +331,7 @@ impl AppService {
     ) -> Result<SignedDomePhysicsSnapshotV1> {
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         if input
@@ -550,7 +558,7 @@ impl AppService {
         }
         let replica = self.hosting_context_replica(&input.spatial_context).await?;
         let instance = self
-            .hosting_instance(&replica, &input.instance_id)
+            .hosting_instance(&replica, &input.spatial_context, &input.instance_id)
             .await?
             .context("Dome instance was not found")?;
         self.ensure_dome_hosting_owner(&instance)?;
@@ -749,38 +757,6 @@ impl AppService {
         Ok(replica)
     }
 
-    pub(crate) async fn hosting_instance(
-        &self,
-        replica: &ReplicaId,
-        instance_id: &str,
-    ) -> Result<Option<DomeInstanceManifestV1>> {
-        let states = self
-            .services
-            .docs_sync
-            .query_replica(
-                replica,
-                DocQuery::Prefix(stable_key("metaverse/dome-instances", "")),
-            )
-            .await?;
-        for record in states {
-            if !record.key.ends_with("/state") {
-                continue;
-            }
-            let state: DomeInstanceStateDocV1 = serde_json::from_slice(&record.value)?;
-            if state.instance_id != instance_id {
-                continue;
-            }
-            let Some((_, manifest)) = self
-                .fetch_dome_instance_manifest(replica, &state.owner_pubkey)
-                .await?
-            else {
-                continue;
-            };
-            return Ok(Some(manifest));
-        }
-        Ok(None)
-    }
-
     pub(crate) async fn list_dome_hosting_records(
         &self,
         replica: &ReplicaId,
@@ -950,14 +926,14 @@ impl AppService {
         let mut heartbeat_at = local_heartbeat;
         if heartbeat_at.is_none() {
             let preliminary = resolve_dome_hosting_state(instance, records, now, Some(now))?;
+            // lock は `if let` の前で手放す(条件式の中で取ると、下の else の取り直しが自分を待って止まる。#1252)。
+            let heartbeats = self.dome_host_heartbeats.lock().await;
+            let received_heartbeat = heartbeats.get(&instance.instance_id).cloned();
+            drop(heartbeats);
             if let (Some(lease), Some(session_id), Some(signed)) = (
                 current_unique_lease(records)?,
                 preliminary.session_id.as_deref(),
-                self.dome_host_heartbeats
-                    .lock()
-                    .await
-                    .get(&instance.instance_id)
-                    .cloned(),
+                received_heartbeat,
             ) {
                 if signed.heartbeat.sent_at <= now.saturating_add(5_000)
                     && verify_signed_dome_host_heartbeat(&signed, &lease.lease, session_id).is_ok()

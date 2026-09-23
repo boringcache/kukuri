@@ -16,54 +16,59 @@ impl AppService {
     ) -> Result<Vec<GameRoomView>> {
         self.ensure_scope_subscriptions(topic_id, &scope).await?;
         let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
-        let allowed = self.allowed_channel_ids_for_scope(topic_id, &scope).await?;
-        let mut rows = filter_channel_rows(
-            self.services
-                .projection_store
-                .list_topic_game_rooms(topic_id)
-                .await?,
-            &allowed,
-            |row| row.channel_id.as_str(),
+        let channel_id = self.allowed_channel_id_for_scope(topic_id, &scope).await?;
+        let allowed = BTreeSet::from([channel_id.clone()]);
+        let projection_store = Arc::clone(&self.services.projection_store);
+        let topic_key = topic_id.to_string();
+        let channel_key = channel_id.clone();
+        let hidden_author_pubkeys = Arc::new(hidden_author_pubkeys);
+        let rows = load_projection_rows_with_one_refresh(
+            move || {
+                let projection_store = Arc::clone(&projection_store);
+                let topic_key = topic_key.clone();
+                let channel_key = channel_key.clone();
+                let hidden_author_pubkeys = Arc::clone(&hidden_author_pubkeys);
+                async move {
+                    Ok(projection_store
+                        .list_channel_game_rooms(
+                            topic_key.as_str(),
+                            channel_key.as_str(),
+                            LIVE_GAME_LIST_LIMIT,
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
+                        .filter(|row| {
+                            row.room_kind != GameRoomKind::MetaverseRoom
+                                || row.metaverse.as_ref().is_some_and(|state| {
+                                    state.instance_status == DomeInstanceStatusV1::Active
+                                })
+                        })
+                        .collect())
+                }
+            },
+            |rows| rows.is_empty(),
+            || async {
+                // #1239: replica を走査しない。session の固定件数だけを、key の一覧から反映する。
+                self.catch_up_scope_sessions(topic_id, &scope).await?;
+                Ok(())
+            },
         )
-        .into_iter()
-        .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-        .filter(|row| {
-            row.room_kind != GameRoomKind::MetaverseRoom
-                || row
-                    .metaverse
-                    .as_ref()
-                    .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-        })
-        .collect::<Vec<_>>();
-        if rows.is_empty() {
-            self.hydrate_scope_projection(topic_id, &scope).await?;
-            rows = filter_channel_rows(
-                self.services
-                    .projection_store
-                    .list_topic_game_rooms(topic_id)
-                    .await?,
-                &allowed,
-                |row| row.channel_id.as_str(),
-            )
-            .into_iter()
-            .filter(|row| !hidden_author_pubkeys.contains(row.host_pubkey.as_str()))
-            .filter(|row| {
-                row.room_kind != GameRoomKind::MetaverseRoom
-                    || row
-                        .metaverse
-                        .as_ref()
-                        .is_some_and(|state| state.instance_status == DomeInstanceStatusV1::Active)
-            })
-            .collect();
-        }
+        .await?;
         let mut items = Vec::with_capacity(rows.len());
         for mut row in rows {
             let dome_hosting = if let Some(metaverse) = row.metaverse.as_ref() {
                 let replica = self
                     .hosting_context_replica(&metaverse.spatial_context)
                     .await?;
+                let owner = Pubkey::from(row.host_pubkey.clone());
                 let instance = match self
-                    .hosting_instance(&replica, &metaverse.instance_id)
+                    .hosting_instance_for_owner(
+                        &replica,
+                        &metaverse.spatial_context,
+                        &metaverse.instance_id,
+                        &owner,
+                    )
                     .await
                 {
                     Ok(Some(instance)) => instance,
@@ -78,10 +83,7 @@ impl AppService {
                 }
                 // Resolve readiness from the canonical Instance, not the cached ref.
                 // A pending Preset keeps its row for refresh; invalid data still fails.
-                match self
-                    .get_dome_hosting(metaverse.spatial_context.clone(), &metaverse.instance_id)
-                    .await
-                {
+                match self.hosting_view_for_instance(&replica, &instance).await {
                     Ok(hosting)
                         if hosting.preset_manifest_json.is_none()
                             && instance.owner_pubkey != self.services.keys.public_key() =>
@@ -180,10 +182,11 @@ impl AppService {
         let room_id = format!(
             "game-{}-{}",
             now,
-            short_id_suffix(self.current_author_pubkey().as_str())
+            owner_bound_id_suffix(self.current_author_pubkey().as_str())
         );
         let manifest = GameRoomManifestBlobV1 {
             room_id: room_id.clone(),
+            score_revision: Some(1),
             topic_id: TopicId::new(topic_id),
             channel_id: channel_id.clone(),
             owner_pubkey: Pubkey::from(self.current_author_pubkey()),
@@ -212,35 +215,13 @@ impl AppService {
             metaverse: None,
             updated_at: now,
         };
-        let envelope = build_game_session_envelope(
-            self.services.keys.as_ref(),
-            &TopicId::new(topic_id),
-            room_id.as_str(),
-            &serde_json::json!({
-                "room_id": room_id,
-                "topic_id": topic_id,
-                "channel_id": channel_id.as_ref().map(|value| value.as_str()),
-                "status": "waiting",
-            }),
-        )?;
         let projection_guard = self.services.game_room_projections.lock(&room_id).await;
         let state = self
-            .persist_game_room_manifest(
-                &source_replica_id,
-                topic_id,
-                manifest.clone(),
-                now,
-                envelope.id.clone(),
-            )
+            .persist_game_room_manifest(&source_replica_id, topic_id, manifest.clone(), now)
             .await?;
         self.services
             .projection_store
-            .upsert_game_room_cache(game_projection_row_from_state(
-                &state,
-                &manifest,
-                topic_id,
-                &source_replica_id,
-            ))
+            .upsert_game_room_cache(game_projection_row(&state))
             .await?;
         drop(projection_guard);
         self.services
@@ -359,6 +340,7 @@ impl AppService {
         validate_metaverse_room_state(&metaverse)?;
         let manifest = GameRoomManifestBlobV1 {
             room_id: room_id.clone(),
+            score_revision: None,
             topic_id: TopicId::new(topic_id),
             channel_id: channel_id.clone(),
             owner_pubkey,
@@ -375,35 +357,12 @@ impl AppService {
         let instance_manifest = dome_instance_manifest_from_game_manifest(&manifest)?;
         self.persist_dome_instance_manifest(&source_replica_id, &instance_manifest, now)
             .await?;
-        let envelope = build_game_session_envelope(
-            self.services.keys.as_ref(),
-            &TopicId::new(topic_id),
-            room_id.as_str(),
-            &serde_json::json!({
-                "room_id": room_id,
-                "topic_id": topic_id,
-                "channel_id": channel_id.as_ref().map(|value| value.as_str()),
-                "status": "waiting",
-                "room_kind": "metaverse_room",
-            }),
-        )?;
         let state = self
-            .persist_game_room_manifest(
-                &source_replica_id,
-                topic_id,
-                manifest.clone(),
-                now,
-                envelope.id.clone(),
-            )
+            .persist_game_room_manifest(&source_replica_id, topic_id, manifest.clone(), now)
             .await?;
         self.services
             .projection_store
-            .upsert_game_room_cache(game_projection_row_from_state(
-                &state,
-                &manifest,
-                topic_id,
-                &source_replica_id,
-            ))
+            .upsert_game_room_cache(game_projection_row(&state))
             .await?;
         self.services
             .hint_transport
@@ -452,42 +411,31 @@ impl AppService {
                 score: score.score,
             })
             .collect();
+        manifest.score_revision = Some(
+            manifest
+                .score_revision
+                .context("ScoreGame revision is missing")?
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("ScoreGame revision overflow"))?,
+        );
         manifest.updated_at = Utc::now().timestamp_millis();
-        let envelope = build_game_session_envelope(
-            self.services.keys.as_ref(),
-            &TopicId::new(topic_id),
-            room_id,
-            &serde_json::json!({
-                "room_id": room_id,
-                "topic_id": topic_id,
-                "channel_id": state.channel_id.as_ref().map(|value| value.as_str()),
-                "status": format!("{:?}", manifest.status).to_lowercase(),
-                "phase_label": manifest.phase_label,
-            }),
-        )?;
         let state = self
             .persist_game_room_manifest(
                 &source_replica_id,
                 topic_id,
                 manifest.clone(),
                 state.created_at,
-                envelope.id.clone(),
             )
             .await?;
         self.services
             .projection_store
-            .upsert_game_room_cache(game_projection_row_from_state(
-                &state,
-                &manifest,
-                topic_id,
-                &source_replica_id,
-            ))
+            .upsert_game_room_cache(game_projection_row(&state))
             .await?;
         drop(projection_guard);
         self.services
             .hint_transport
             .publish_hint(
-                &channel_hint_topic_for(topic_id, state.channel_id.as_ref()),
+                &channel_hint_topic_for(topic_id, state.state().channel_id.as_ref()),
                 GossipHint::SessionChanged {
                     topic_id: TopicId::new(topic_id),
                     session_id: room_id.to_string(),
@@ -572,7 +520,6 @@ impl AppService {
         metaverse.dome.customization = input.customization;
         metaverse.preset_ref = preset_ref;
         validate_metaverse_room_state(metaverse)?;
-        let world_version = metaverse.world_version;
         manifest.status = input.status;
         manifest.updated_at = now;
         let instance_manifest = dome_instance_manifest_from_game_manifest(&manifest)?;
@@ -582,41 +529,22 @@ impl AppService {
             state.created_at,
         )
         .await?;
-        let envelope = build_game_session_envelope(
-            self.services.keys.as_ref(),
-            &TopicId::new(topic_id),
-            room_id,
-            &serde_json::json!({
-                "room_id": room_id,
-                "topic_id": topic_id,
-                "channel_id": state.channel_id.as_ref().map(|value| value.as_str()),
-                "status": format!("{:?}", manifest.status).to_lowercase(),
-                "room_kind": "metaverse_room",
-                "world_version": world_version,
-            }),
-        )?;
         let state = self
             .persist_game_room_manifest(
                 &source_replica_id,
                 topic_id,
                 manifest.clone(),
                 state.created_at,
-                envelope.id.clone(),
             )
             .await?;
         self.services
             .projection_store
-            .upsert_game_room_cache(game_projection_row_from_state(
-                &state,
-                &manifest,
-                topic_id,
-                &source_replica_id,
-            ))
+            .upsert_game_room_cache(game_projection_row(&state))
             .await?;
         self.services
             .hint_transport
             .publish_hint(
-                &channel_hint_topic_for(topic_id, state.channel_id.as_ref()),
+                &channel_hint_topic_for(topic_id, state.state().channel_id.as_ref()),
                 GossipHint::SessionChanged {
                     topic_id: TopicId::new(topic_id),
                     session_id: room_id.to_string(),
@@ -737,17 +665,11 @@ impl AppService {
                         topic_id,
                         manifest.clone(),
                         state.created_at,
-                        envelope.id.clone(),
                     )
                     .await?;
                 self.services
                     .projection_store
-                    .upsert_game_room_cache(game_projection_row_from_state(
-                        &persisted,
-                        &manifest,
-                        topic_id,
-                        &source_replica_id,
-                    ))
+                    .upsert_game_room_cache(game_projection_row(&persisted))
                     .await?;
             }
         }
@@ -887,7 +809,6 @@ impl AppService {
             .ok_or_else(|| anyhow::anyhow!("metaverse room state is missing"))?;
         metaverse.preset_ref = preset_ref;
         metaverse.asset_refs = asset_refs;
-        let preset_manifest_hash = metaverse.preset_ref.manifest_blob_hash.clone();
         manifest.updated_at = now;
         let instance_manifest = dome_instance_manifest_from_game_manifest(&manifest)?;
         self.persist_dome_instance_manifest(
@@ -896,35 +817,17 @@ impl AppService {
             state.created_at,
         )
         .await?;
-        let envelope = build_game_session_envelope(
-            self.services.keys.as_ref(),
-            &TopicId::new(topic_id),
-            input.room_id.as_str(),
-            &serde_json::json!({
-                "room_id": input.room_id,
-                "topic_id": topic_id,
-                "channel_id": state.channel_id.as_ref().map(|value| value.as_str()),
-                "room_kind": "metaverse_room",
-                "preset_manifest_hash": preset_manifest_hash,
-            }),
-        )?;
         let persisted = self
             .persist_game_room_manifest(
                 &source_replica_id,
                 topic_id,
                 manifest.clone(),
                 state.created_at,
-                envelope.id,
             )
             .await?;
         self.services
             .projection_store
-            .upsert_game_room_cache(game_projection_row_from_state(
-                &persisted,
-                &manifest,
-                topic_id,
-                &source_replica_id,
-            ))
+            .upsert_game_room_cache(game_projection_row(&persisted))
             .await?;
         Ok(asset)
     }

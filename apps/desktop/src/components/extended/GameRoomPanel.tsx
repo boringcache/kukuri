@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { SessionVisibility, PendingSessionCards, type SessionDisplayContext } from './SessionVisibility';
 import type { FormEventHandler } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,6 +20,8 @@ import type { GameRoomStatus, GameRoomView } from '@/lib/api';
 import { type ExtendedPanelStatus, type GameDraftView, type GameRoomPendingMap } from './types';
 
 type GameRoomPanelProps = {
+  sessionDisplay?: SessionDisplayContext;
+  requestedSessionId?: string | null;
   status: ExtendedPanelStatus;
   error: string | null;
   audienceLabel: string;
@@ -44,6 +48,8 @@ type GameRoomPanelProps = {
 };
 
 export function GameRoomPanel({
+  requestedSessionId,
+  sessionDisplay,
   status,
   error,
   audienceLabel,
@@ -66,6 +72,7 @@ export function GameRoomPanel({
   trustGates,
   onOpenAuthor,
 }: GameRoomPanelProps) {
+  const [pendingManifestCount, setPendingManifestCount] = useState(0);
   const { t } = useTranslation(['common', 'game']);
   const { gateFor, reveal } = useAuthorTrustGateReveal(trustGates);
   return (
@@ -115,7 +122,7 @@ export function GameRoomPanel({
         </Button>
       </form>
 
-      {rooms.length === 0 && status === 'ready' ? <p className='empty-state'>{t('game:empty')}</p> : null}
+      {rooms.length === 0 && pendingManifestCount === 0 && status === 'ready' ? <p className='empty-state'>{t('game:empty')}</p> : null}
 
       <ul className='post-list'>
         {rooms.map((room) => {
@@ -137,7 +144,7 @@ export function GameRoomPanel({
           const pending = Boolean(savingByRoomId[room.room_id]);
 
           return (
-            <li key={room.room_id}>
+            <SessionVisibility key={room.room_id} sessionId={room.room_id} kind="game" context={sessionDisplay}>
               <article className='post-card' aria-busy={pending}>
                 <div className='post-meta'>
                   <span>{room.title}</span>
@@ -213,10 +220,12 @@ export function GameRoomPanel({
                   </div>
                 ) : null}
               </article>
-            </li>
+            </SessionVisibility>
           );
         })}
       </ul>
+      {sessionDisplay ? <PendingSessionCards context={sessionDisplay} kind="game" targetId={requestedSessionId} onCountChange={setPendingManifestCount}
+        refreshToken={rooms} knownIds={rooms.map((room) => room.room_id)} /> : null}
     </Card>
   );
 }

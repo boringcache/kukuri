@@ -1,6 +1,6 @@
 use super::*;
 use crate::service::game_projection_support::hydrate_game_room_from_record;
-use crate::service::{hydrate_game_room_from_key, hydrate_game_rooms_from_replica};
+use crate::service::{catch_up_sessions, hydrate_game_room_from_key};
 use kukuri_docs_sync::{DocEventStream, DocFetchPolicy, DocOp, DocQuery, DocRecord};
 use kukuri_store::GameRoomProjectionRow;
 use std::sync::atomic::AtomicUsize;
@@ -34,6 +34,9 @@ impl GatedBlobService {
 
 #[async_trait]
 impl BlobService for GatedBlobService {
+    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetch_blob(hash).await
+    }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.puts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_blob(data, mime).await
@@ -61,6 +64,10 @@ impl BlobService for GatedBlobService {
         self.inner.blob_status(hash).await
     }
 
+    async fn local_blob_status(&self, hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
+        self.inner.local_blob_status(hash).await
+    }
+
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
         self.inner.import_peer_ticket(ticket).await
     }
@@ -73,6 +80,7 @@ struct ControlledDocs {
     queries: AtomicUsize,
     fail_local_query: AtomicBool,
     local_gate: TokioMutex<Option<(String, Arc<FetchGate>)>>,
+    local_gate_skip: AtomicUsize,
 }
 
 #[async_trait]
@@ -103,11 +111,18 @@ impl DocsSync for ControlledDocs {
         if let DocQuery::Exact(key) = query
             && policy == DocFetchPolicy::LocalOnly
         {
-            let gate = self
-                .local_gate
-                .lock()
-                .await
-                .take_if(|(target, _)| *target == key);
+            let skip = self
+                .local_gate_skip
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            let gate = if skip {
+                None
+            } else {
+                self.local_gate
+                    .lock()
+                    .await
+                    .take_if(|(target, _)| *target == key)
+            };
             if let Some((_, gate)) = gate {
                 // The canonical snapshot is fixed; the caller must protect its commit.
                 gate.entered.notify_one();
@@ -115,6 +130,15 @@ impl DocsSync for ControlledDocs {
             }
         }
         Ok(rows)
+    }
+
+    // 上限つきの key の一覧の既定実装はエラーを返す。session の固定件数の反映が使うので転送する。
+    async fn query_replica_keys(
+        &self,
+        replica: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        self.inner.query_replica_keys(replica, query).await
     }
 
     async fn subscribe_replica(&self, replica: &ReplicaId) -> Result<DocEventStream> {
@@ -224,11 +248,9 @@ impl Fixture {
         self.app
             .services
             .projection_store
-            .list_topic_game_rooms(TOPIC)
+            .get_game_room(TOPIC, room_id)
             .await
             .unwrap()
-            .into_iter()
-            .find(|row| row.room_id == room_id)
             .unwrap()
     }
 
@@ -275,6 +297,13 @@ impl Fixture {
                 .unwrap(),
         )
         .unwrap();
+        manifest.score_revision = Some(
+            manifest
+                .score_revision
+                .expect("ScoreGame revision")
+                .checked_add(1)
+                .expect("ScoreGame revision overflow"),
+        );
         manifest.scores[0].score = score;
         manifest.status = GameRoomStatus::Running;
         manifest.phase_label = Some("round 1".into());
@@ -282,6 +311,18 @@ impl Fixture {
         let blob = store_manifest_blob(self.blobs.as_ref(), &manifest, GAME_MANIFEST_MIME)
             .await
             .unwrap();
+        // #1252: 反映は owner が署名した manifest を要求する。owner の別端末からの書き込みと同じ形で置く。
+        let envelope = kukuri_core::build_game_session_envelope(
+            self.app.services.keys.as_ref(),
+            &manifest.topic_id,
+            manifest.room_id.as_str(),
+            &manifest,
+        )
+        .unwrap();
+        persist_session_envelope(self.docs.as_ref(), &topic_replica_id(TOPIC), &envelope)
+            .await
+            .unwrap();
+        state.last_envelope_id = envelope.id;
         state.status = manifest.status;
         state.updated_at = updated_at;
         state.current_manifest = ManifestBlobRef {
@@ -356,8 +397,10 @@ async fn late_hydration_keeps_valid_update(sqlite: bool, batch: bool) {
     let hydration = tokio::spawn(async move {
         let replica = topic_replica_id(TOPIC);
         if batch {
-            hydrate_game_rooms_from_replica(&services, TOPIC, &replica, DocFetchPolicy::LocalOnly)
+            // #1239: replica の全件走査は削除した。session の固定件数の反映(購読タスクの追いつきと同じ)を通す。
+            catch_up_sessions(&services, TOPIC, &replica, DocFetchPolicy::LocalOnly)
                 .await
+                .map(|()| 1)
         } else {
             hydrate_game_room_from_key(&services, TOPIC, &replica, &key)
                 .await
@@ -594,6 +637,8 @@ async fn comparison_and_commit_exclude_same_room_writer(sqlite: bool) {
         .unwrap();
     assert_ne!(room_id, other_room);
     let gate = Arc::new(FetchGate::default());
+    // #1262: 最初のstate読みもLocalOnlyになった。guardを確かめる停止点は、その後のlock内のcanonical比較。
+    fixture.docs.local_gate_skip.store(1, Ordering::SeqCst);
     *fixture.docs.local_gate.lock().await =
         Some((fixture.row(&room_id).await.source_key, gate.clone()));
     let services = fixture.app.services.clone();
@@ -692,7 +737,7 @@ async fn canonical_read_failure_and_cancel_release_the_room() {
 }
 
 #[tokio::test]
-async fn missing_blob_retry_refreshes_without_overwriting_the_cache() {
+async fn missing_blob_arrival_refreshes_without_overwriting_the_cache() {
     for sqlite in [false, true] {
         let fixture = Fixture::new(sqlite).await;
         let room_id = fixture.create().await;
@@ -718,12 +763,15 @@ async fn missing_blob_retry_refreshes_without_overwriting_the_cache() {
         .unwrap();
         assert_eq!(fixture.row(&room_id).await, before);
         assert_eq!(fixture.mutation_counts().await, writes);
+        assert_eq!(
+            hydration.await.unwrap().unwrap(),
+            0,
+            "missing manifest ends this attempt"
+        );
         fixture.blobs.hidden.lock().await.clear();
         assert_eq!(
-            timeout(Duration::from_secs(15), hydration)
+            refresh_trigger(&fixture.app.services, &room_id, false)
                 .await
-                .unwrap()
-                .unwrap()
                 .unwrap(),
             1
         );
@@ -767,7 +815,8 @@ async fn missing_and_corrupt_canonical_state_do_not_apply_the_candidate() {
             )
             .await
             .unwrap();
-        assert!(fixture.hydrate(&room_id).await.is_err());
+        // #1252: 読めない record は、その room だけを飛ばす(エラーにしない)。
+        assert!(!fixture.hydrate(&room_id).await.unwrap());
         assert_eq!(fixture.row(&room_id).await, before);
         fixture
             .docs
@@ -838,19 +887,16 @@ async fn restart_and_missing_cache_resolve_docs_at_the_same_timestamp() {
     services.store = reopened.clone();
     services.projection_store = reopened.clone();
     services.game_room_projections = Arc::default();
-    assert_eq!(
-        hydrate_game_rooms_from_replica(
-            &services,
-            TOPIC,
-            &topic_replica_id(TOPIC),
-            DocFetchPolicy::LocalOnly
-        )
-        .await
-        .unwrap(),
-        1
-    );
+    catch_up_sessions(
+        &services,
+        TOPIC,
+        &topic_replica_id(TOPIC),
+        DocFetchPolicy::LocalOnly,
+    )
+    .await
+    .unwrap();
     let row = reopened
-        .list_topic_game_rooms(TOPIC)
+        .list_channel_game_rooms(TOPIC, "public", 100)
         .await
         .unwrap()
         .remove(0);
@@ -860,19 +906,16 @@ async fn restart_and_missing_cache_resolve_docs_at_the_same_timestamp() {
         .execute(reopened.pool())
         .await
         .unwrap();
-    assert_eq!(
-        hydrate_game_rooms_from_replica(
-            &services,
-            TOPIC,
-            &topic_replica_id(TOPIC),
-            DocFetchPolicy::LocalOnly
-        )
-        .await
-        .unwrap(),
-        1
-    );
+    catch_up_sessions(
+        &services,
+        TOPIC,
+        &topic_replica_id(TOPIC),
+        DocFetchPolicy::LocalOnly,
+    )
+    .await
+    .unwrap();
     let rebuilt = reopened
-        .list_topic_game_rooms(TOPIC)
+        .list_channel_game_rooms(TOPIC, "public", 100)
         .await
         .unwrap()
         .remove(0);

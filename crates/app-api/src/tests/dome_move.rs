@@ -21,6 +21,9 @@ impl SelectivelyMissingBlobService {
 
 #[async_trait]
 impl BlobService for SelectivelyMissingBlobService {
+    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetch_blob(hash).await
+    }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(data, mime).await
     }
@@ -38,6 +41,13 @@ impl BlobService for SelectivelyMissingBlobService {
             return Ok(BlobStatus::Missing);
         }
         self.inner.blob_status(hash).await
+    }
+
+    async fn local_blob_status(&self, hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
+        if self.missing.lock().await.contains(hash.as_str()) {
+            return Ok(BlobStatus::Missing);
+        }
+        self.inner.local_blob_status(hash).await
     }
 
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {

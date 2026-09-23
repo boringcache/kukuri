@@ -75,7 +75,7 @@ MP4/H.264、WebM/VP8・VP9、32 MiB・600秒以下・長辺3840/短辺2160以下
    （手順は [production rollout §5.2](community-node-production-rollout.md#52-readiness)、#1097）。
    force-probeの失敗結果も15分間は再利用されるため、原因を直した後は再度 `--force-probe` から実行する。
 4. モデル、前処理、decoder build、node署名ID、policyの変更は内容判定キーを変える。
-   `latest` の提供内容が更新された場合は `config_version` を増やし、再起動・`--force-probe`・再取り込みを行う。
+   `latest` の提供内容が更新された場合は `config_version` を増やし、再起動・`--force-probe`を行う。再取り込みが必要なら対象の投稿・範囲と終了条件を先に決め、構成変更を理由に全履歴の再取得・再scanを必須にしない。
    secretの値はfingerprintに含めないため、キーrotationも `--force-probe` を行う。
 5. rollbackも構成世代を明示し、旧imageに新providerを指定したまま公開しない。
    decoder・認証・DB・応答形式が不正な場合やframeの一部が失敗した場合はhold / de-indexを維持する。
@@ -115,7 +115,7 @@ CNは原メディア・frame・data URL・API生応答を恒久保存しない�
 
 DBの共通cacheは内容hash＋node/provider/model/policy/前処理構成に対応する正規化判定と最小coverageのみ。
 投稿・著者・scope・appealは含めず、参照元の署名・supported scope・撤回・削除・送信防止を再確認して関連付ける。
-完了結果に自動TTLは設けない。運用で再検査する際は構成世代を更新する。
+現行の完了結果cacheには自動TTLがなく、保存上限・回収は設計原則上の未解消点である。構成世代の更新は判定キーの変更であって旧cacheの回収ではない。本手順のために全件GCを追加・実行せず、保存方式を変更する作業では上限と対象を絞った削除を受入条件に含める。
 
 カテゴリbooleanで判定し、scoreは同カテゴリのconfidenceとして保持する。動画はカテゴリごとにOR / MAXで集約する。
 画像非対応のカテゴリと音声は未検査。サンプリングの間に短時間だけ現れる内容を見逃し得るため、全フレーム検査や
@@ -127,7 +127,7 @@ indexerの `GET /v1/status` の `moderation` にAPI attempt数、scan完了/失�
 動画duration合計・frame数を出す。既存の `media_fetch_success` / `scans_fresh` / `scans_reused` と併せて差分を測る。
 本文・画像・API生応答・キーをmetricに含めない。counterはprocess再起動で0に戻り、予算と内容cacheはDBに残る。
 
-- 通常の自動検証: `cargo xtask cn-check`、`cargo xtask cn-test`、`cargo xtask cn-e2e`。
+- ローカルは変更したprovider・decoder・予算の関連testを選び、全体はPR CIで確認する。`cargo xtask cn-check`、`cargo xtask cn-test`、`cargo xtask cn-e2e`は全体確認の入口。
 - 無害な実API検証: Linuxで `KUKURI_CN_RUN_LIVE_MODERATION_TESTS=1`、テスト専用の
   `COMMUNITY_NODE_DATABASE_URL`、`COMMUNITY_NODE_VLM_API_KEY` を設定し、
   `cargo test -p kukuri-cn-indexer --test live_moderation -- --nocapture`。

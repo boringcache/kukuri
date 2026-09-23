@@ -235,6 +235,14 @@
   min-width: 0;
 }
 
+/* #1271: カラム本文に直接並べる内容の stack。枠(.panel)を持たず、左右の余白は
+   カラム本文の padding だけにする。区画を仕切る枠が要る場合だけ .shell-workspace-card を使う。 */
+.shell-column-content {
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
 .shell-workspace-header {
   display: flex;
   justify-content: space-between;
@@ -574,8 +582,8 @@
   margin-top: var(--space-md);
 }
 
-.media-viewer-dialog {
-  width: auto;
+.ui-dialog-content.media-viewer-dialog {
+  width: min(96vw, 84rem);
   max-width: min(96vw, 84rem);
   max-height: none;
   padding: 0;
@@ -598,6 +606,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 100%;
   min-height: 0;
   max-width: min(88vw, 80rem);
   max-height: 88vh;
@@ -632,7 +641,7 @@
 .media-viewer-image {
   width: auto;
   height: auto;
-  max-width: min(88vw, 80rem);
+  max-width: 100%;
   max-height: 88vh;
   object-fit: contain;
 }
@@ -759,6 +768,33 @@
 .report-target-capability,
 .report-target-contact {
   color: var(--muted-foreground);
+}
+
+/* #1192: 権利侵害申出ポリシーの折りたたみ提示。申出画面へ進む前に対応範囲を読める。
+   字送り・色は他の report 要素と同じく JSX 側の utility class で与える。 */
+.report-rights-policy {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-input);
+  background: var(--surface-panel-soft);
+}
+
+.report-rights-policy button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.report-rights-policy-body {
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .report-target-list {
@@ -898,6 +934,24 @@
   display: inline;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.smart-external-link {
+  color: var(--accent-foreground);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.15em;
+}
+
+.smart-external-link:hover {
+  color: var(--accent);
+}
+
+.smart-external-link:focus-visible {
+  border-radius: var(--radius-xs);
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .smart-reference-chip {

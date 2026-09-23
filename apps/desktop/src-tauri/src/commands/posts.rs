@@ -3,6 +3,7 @@ use kukuri_desktop_runtime::{
     BookmarkPostRequest, CreatePostRequest, CreateRepostRequest, GetBlobMediaRequest,
     GetBlobPreviewRequest, ListProfileTimelineRequest, ListThreadRequest, ListTimelineRequest,
     RemoveBookmarkedPostRequest, ResolveCommunityIndexPostsRequest, WithdrawPostRequest,
+    RetryPostElementsRequest,
 };
 
 use crate::state::{CommandError, DesktopState, map_error};
@@ -122,6 +123,18 @@ pub async fn list_profile_timeline(
     state
         .runtime()
         .list_profile_timeline(request)
+        .await
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub async fn retry_post_elements(
+    state: tauri::State<'_, DesktopState>,
+    request: RetryPostElementsRequest,
+) -> Result<Option<kukuri_app_api::PostView>, CommandError> {
+    state
+        .runtime()
+        .retry_post_elements(request)
         .await
         .map_err(map_error)
 }

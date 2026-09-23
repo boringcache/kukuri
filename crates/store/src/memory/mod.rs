@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -11,8 +12,9 @@ use tokio::sync::RwLock;
 
 use crate::models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
-    BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
+    BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+    DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
+    DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
     DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
     LiveSessionProjectionRow, MutedAuthorRow, NotificationRow, ObjectProjectionRow, Page,
     PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,
@@ -34,11 +36,30 @@ type LivePresenceKey = (String, String, String, String);
 type LivePresenceValue = (i64, i64);
 type MemoryReactionProjectionRows = HashMap<(String, String, String), ReactionProjectionRow>;
 type MemoryDirectMessageRows = HashMap<(String, String), DirectMessageMessageRow>;
-type MemoryDirectMessageOutboxRows = HashMap<(String, String), DirectMessageOutboxRow>;
+type DirectMessageOutboxPeerKey = (String, i64, String, String);
+type DirectMessageOutboxNewKey = (i64, String, String, String);
+type DirectMessageOutboxRetryKey = (i64, i64, String, String, String);
+#[derive(Default)]
+struct MemoryDirectMessageOutboxRows {
+    rows: HashMap<(String, String), DirectMessageOutboxRow>,
+    by_created: BTreeSet<(i64, String, String)>,
+    by_peer: BTreeSet<DirectMessageOutboxPeerKey>,
+    never_attempted: BTreeSet<DirectMessageOutboxNewKey>,
+    attempted: BTreeSet<DirectMessageOutboxRetryKey>,
+    by_dm: HashMap<String, BTreeSet<String>>,
+}
 type MemoryDirectMessageTombstones = HashMap<(String, String), DirectMessageTombstoneRow>;
-type MemoryNotificationRows = HashMap<String, NotificationRow>;
+#[derive(Default)]
+struct MemoryNotificationRows {
+    rows: HashMap<String, NotificationRow>,
+    by_sequence: BTreeMap<i64, String>,
+    last_sequence: i64,
+}
 type MemoryContentObservationRows =
     HashMap<(String, String, String, String), ContentObservationRow>;
+type ProjectionScope = (String, String);
+type DescendingProjectionKey = (Reverse<i64>, Reverse<String>);
+type ProjectionIndex = HashMap<ProjectionScope, BTreeSet<DescendingProjectionKey>>;
 
 #[derive(Clone, Default)]
 pub struct MemoryStore {
@@ -51,12 +72,15 @@ pub struct MemoryStore {
     object_projection_rows: Arc<RwLock<HashMap<EnvelopeId, ObjectProjectionRow>>>,
     adult_media_hashes: Arc<RwLock<HashSet<String>>>,
     live_session_rows: Arc<RwLock<HashMap<String, LiveSessionProjectionRow>>>,
+    live_session_index: Arc<RwLock<ProjectionIndex>>,
     game_room_rows: Arc<RwLock<HashMap<String, GameRoomProjectionRow>>>,
+    game_room_index: Arc<RwLock<ProjectionIndex>>,
     dome_connection_rows: Arc<RwLock<HashMap<String, DomeConnectionProjectionRow>>>,
     dome_hosting_rows: Arc<RwLock<HashMap<String, DomeHostingProjectionRow>>>,
     author_relationship_rows:
         Arc<RwLock<HashMap<(String, String), AuthorRelationshipProjectionRow>>>,
     muted_authors: Arc<RwLock<HashMap<String, MutedAuthorRow>>>,
+    author_docs_authors: Arc<RwLock<HashMap<String, String>>>,
     live_presence: Arc<RwLock<HashMap<LivePresenceKey, LivePresenceValue>>>,
     blob_statuses: Arc<RwLock<HashMap<String, BlobCacheStatus>>>,
     reaction_projection_rows: Arc<RwLock<MemoryReactionProjectionRows>>,

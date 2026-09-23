@@ -7,18 +7,197 @@
 //! ピア台帳・リトライ状態そのものは kukuri-transport の共通実装(WP-H2)。
 
 use std::fmt::Display;
+use std::future::Future;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use kukuri_transport::{PeerAddrBook, RemoteFetchRetryState, RemoteFetchStart};
+use anyhow::{Context, Result};
+use kukuri_core::VerifiedReceiveOffer;
+use kukuri_transport::{
+    EndpointAddr, PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchRetryState,
+    RequestRateDecision, SharedRemoteFetchResult, fetch_receive_endpoint_binding,
+};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 use tracing::{info, warn};
 
 use crate::IrohDocsNode;
+use crate::network_work::{FetchIdentity, FetchRequest, NetworkWorkRuntime};
+use kukuri_transport::work_admission::WorkPersistence;
 
 pub const REMOTE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REMOTE_FETCH_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
+/// One blob must not consume the sum of every peer/candidate timeout. The caller keeps the
+/// existing entry and retries later when this budget is exhausted.
+pub const REMOTE_FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn within_remote_fetch_budget<T>(future: impl Future<Output = T>) -> Option<T> {
+    timeout(REMOTE_FETCH_TOTAL_TIMEOUT, future).await.ok()
+}
+
+/// 表示要求が所有する取得。共有walkと合流/切り離しをせず、取消で待機permitとQUIC streamもdropする。
+/// bytesの検証だけを行い、保存は表示権限を再確認する呼出元が所有する。
+pub type DisplayBlobFetch = std::pin::Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send>>;
+
+pub async fn prepare_display_fetch(
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Mutex<RemoteFetchRetryState>,
+    hash: iroh_blobs::Hash,
+) -> Result<DisplayBlobFetch> {
+    let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
+    let lease = node
+        .network_work
+        .acquire(*hash.as_bytes(), deadline)
+        .await?;
+    // Keep the legacy shared-walk bound during staged migration. Successful
+    // preparation still means both permits are held before app-api spends an
+    // attempt; queueing alone must not consume its display retry budget.
+    let permit = tokio::select! {
+        biased;
+        _ = lease.cancelled() => return Err(if Instant::now() >= deadline {
+            crate::DisplayAdmissionError::Expired
+        } else {
+            crate::DisplayAdmissionError::Closed
+        }.into()),
+        permit = tokio::time::timeout_at(deadline, async {
+            let permits = retries.lock().await.walk_permits();
+            permits.acquire_owned().await
+        }) => permit.map_err(|_| crate::DisplayAdmissionError::Expired)??,
+    };
+    let node = node.clone();
+    let peers = peers.clone();
+    Ok(Box::pin(async move {
+        let _permit = permit;
+        let hash_text = hash.to_string();
+        let walk = run_display_fetch(fetch_bytes_from_remote(
+            &node,
+            &peers,
+            "displayed session",
+            &hash_text,
+            hash,
+            "local manifest unavailable",
+            FetchMode::Ephemeral,
+        ));
+        let result = tokio::select! {
+            biased;
+            _ = lease.cancelled() => Ok(None),
+            result = tokio::time::timeout_at(deadline, walk) => result.unwrap_or(Ok(None)),
+        };
+        if lease.finish() { result } else { Ok(None) }
+    }))
+}
+
+async fn run_display_fetch(
+    future: impl Future<Output = Result<Option<Vec<u8>>>>,
+) -> Result<Option<Vec<u8>>> {
+    within_remote_fetch_budget(future).await.unwrap_or(Ok(None))
+}
+
+/// One signed provider and one bounded ephemeral manifest. The account binding
+/// and Bao content hash are checked on the same selected endpoint, without
+/// falling back to the general peer walk or persisting the result.
+pub async fn fetch_verified_receive_offer_payload(
+    node: &Arc<IrohDocsNode>,
+    offer: &VerifiedReceiveOffer,
+    provider: EndpointAddr,
+) -> Result<Vec<u8>> {
+    let reference = offer.reference();
+    anyhow::ensure!(
+        provider.id.to_string() == reference.provider_endpoint_id,
+        "receive offer provider endpoint mismatch"
+    );
+    let max_bytes = reference.payload_bytes as u64;
+    anyhow::ensure!(
+        (1..=kukuri_core::RECEIVE_PAYLOAD_MAX_BYTES as u64).contains(&max_bytes),
+        "invalid receive offer payload size"
+    );
+    let hash = iroh_blobs::Hash::from_str(reference.payload_hash.as_str())?;
+    anyhow::ensure!(
+        current_time_ms()? < offer.expires_at_ms(),
+        "receive offer expired before fetch"
+    );
+    let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
+    let lease = node
+        .network_work
+        .acquire_bounded_blob(*hash.as_bytes(), max_bytes, deadline)
+        .await?;
+    let work = async {
+        anyhow::ensure!(
+            current_time_ms()? < offer.expires_at_ms(),
+            "receive offer expired before fetch"
+        );
+        let binding = fetch_receive_endpoint_binding(
+            node.endpoint(),
+            provider.clone(),
+            offer.sender(),
+            deadline,
+        )
+        .await?;
+        anyhow::ensure!(
+            binding.endpoint_id() == reference.provider_endpoint_id,
+            "receive offer binding provider mismatch"
+        );
+        let now_ms = current_time_ms()?;
+        anyhow::ensure!(
+            now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
+            "receive offer or provider binding expired before payload request"
+        );
+        let connection = timeout(
+            REMOTE_FETCH_CONNECT_TIMEOUT,
+            node.endpoint().connect(provider, iroh_blobs::ALPN),
+        )
+        .await
+        .context("receive offer provider connect timed out")??;
+        let close = CloseOfferConnection(connection.clone());
+        let bytes = timeout(
+            REMOTE_FETCH_TRANSFER_TIMEOUT,
+            fetch_ephemeral(connection, hash, FetchMode::EphemeralBounded(max_bytes)),
+        )
+        .await
+        .context("receive offer payload transfer timed out")??;
+        drop(close);
+        anyhow::ensure!(
+            bytes.len() as u64 == max_bytes,
+            "receive offer payload size mismatch"
+        );
+        anyhow::ensure!(
+            iroh_blobs::Hash::new(&bytes) == hash,
+            "receive offer payload hash mismatch"
+        );
+        let now_ms = current_time_ms()?;
+        anyhow::ensure!(
+            now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
+            "receive offer or provider binding expired"
+        );
+        Ok(bytes)
+    };
+    let result = tokio::select! {
+        biased;
+        _ = lease.cancelled() => anyhow::bail!("receive offer payload fetch cancelled"),
+        result = tokio::time::timeout_at(deadline, work) => {
+            result.context("receive offer payload fetch timed out")?
+        }
+    };
+    anyhow::ensure!(lease.finish(), "receive offer payload fetch scope ended");
+    result
+}
+
+fn current_time_ms() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?)
+}
+
+struct CloseOfferConnection(iroh::endpoint::Connection);
+
+impl Drop for CloseOfferConnection {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"receive offer payload complete");
+    }
+}
 
 /// remote fetch の取得モード。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,9 +223,9 @@ impl std::error::Error for BlobTooLarge {}
 
 /// CN scan ingress: stop consuming verified leaves before exceeding the bound.
 pub async fn fetch_bytes_ephemeral_bounded_with_cooldown(
-    node: &IrohDocsNode,
-    peers: &PeerAddrBook,
-    retries: &Mutex<RemoteFetchRetryState>,
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Arc<Mutex<RemoteFetchRetryState>>,
     hash: iroh_blobs::Hash,
     max_bytes: u64,
 ) -> Result<Option<Vec<u8>>> {
@@ -103,9 +282,9 @@ async fn fetch_ephemeral(
 /// 呼び出し側のローカル取得が返したエラーで、ログにのみ使う。
 /// 成功時はローカルストアへ取り込んだうえで bytes を返す。
 pub async fn fetch_bytes_with_cooldown(
-    node: &IrohDocsNode,
-    peers: &PeerAddrBook,
-    retries: &Mutex<RemoteFetchRetryState>,
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Arc<Mutex<RemoteFetchRetryState>>,
     subject: &str,
     hash_text: &str,
     hash: iroh_blobs::Hash,
@@ -129,9 +308,9 @@ pub async fn fetch_bytes_with_cooldown(
 /// safety scan の一時 fetch(#609)用。community node の no-permanent-blob-storage 前提を
 /// 構造的に守る(スキャン後の破棄処理が不要になる)。
 pub async fn fetch_bytes_ephemeral_with_cooldown(
-    node: &IrohDocsNode,
-    peers: &PeerAddrBook,
-    retries: &Mutex<RemoteFetchRetryState>,
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Arc<Mutex<RemoteFetchRetryState>>,
     subject: &str,
     hash_text: &str,
     hash: iroh_blobs::Hash,
@@ -152,9 +331,9 @@ pub async fn fetch_bytes_ephemeral_with_cooldown(
 
 #[allow(clippy::too_many_arguments)]
 async fn fetch_bytes_with_cooldown_mode(
-    node: &IrohDocsNode,
-    peers: &PeerAddrBook,
-    retries: &Mutex<RemoteFetchRetryState>,
+    node: &Arc<IrohDocsNode>,
+    peers: &Arc<PeerAddrBook>,
+    retries: &Arc<Mutex<RemoteFetchRetryState>>,
     subject: &str,
     hash_text: &str,
     hash: iroh_blobs::Hash,
@@ -166,25 +345,203 @@ async fn fetch_bytes_with_cooldown_mode(
         FetchMode::EphemeralBounded(limit) => format!("bounded:{limit}:{hash_text}"),
         _ => hash_text.to_owned(),
     };
-    match retries.lock().await.try_begin(&retry_key, Instant::now()) {
-        RemoteFetchStart::Ready => {}
-        RemoteFetchStart::CoolingDown => {
-            info!(
-                subject,
-                hash = %hash_text,
-                error = %local_error,
-                "remote fetch skipped during retry cooldown"
-            );
-            return Ok(None);
+    // 保存先が違う取得を合流させない。永続取得へ一時取得が合流すると、保存しないはずの
+    // bytes がローカルストアへ残る(#1207 INVAR-2)。
+    let flight_key = match mode {
+        FetchMode::Store => format!("store:{hash_text}"),
+        FetchMode::Ephemeral => format!("ephemeral:{hash_text}"),
+        FetchMode::EphemeralBounded(_) => retry_key.clone(),
+    };
+    let walk = {
+        let node = Arc::clone(node);
+        let peers = Arc::clone(peers);
+        let subject = bounded_fetch_log_text(subject, 128);
+        let hash_text = hash_text.to_owned();
+        let local_error = bounded_fetch_log_text(local_error, 4096);
+        async move {
+            fetch_bytes_from_remote(&node, &peers, &subject, &hash_text, hash, local_error, mode)
+                .await
+        }
+    };
+    let Some(result) = run_single_flight(
+        &node.network_work,
+        retries,
+        &retry_key,
+        &flight_key,
+        subject,
+        hash_text,
+        mode,
+        walk,
+    )
+    .await
+    else {
+        info!(
+            subject,
+            hash = %hash_text,
+            "remote fetch skipped during retry cooldown"
+        );
+        return Ok(None);
+    };
+    match result {
+        Ok(bytes) => Ok(bytes.map(Arc::unwrap_or_clone)),
+        Err(error) => match error.downcast_ref::<BlobTooLarge>() {
+            // 呼び出し側(CN scan)が型で判定するため、合流した側にも同じ型で返す。
+            Some(too_large) => Err(BlobTooLarge {
+                limit: too_large.limit,
+            }
+            .into()),
+            None => Err(anyhow::anyhow!("{error:#}")),
+        },
+    }
+}
+
+/// Queue only bounded diagnostic labels; never retain an arbitrarily large
+/// formatted error behind a pending fetch. This does not truncate user content.
+fn bounded_fetch_log_text(value: impl Display, limit: usize) -> String {
+    use std::fmt::Write;
+    struct LimitedText {
+        value: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for LimitedText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let remaining = self.limit - self.value.len();
+            if text.len() <= remaining {
+                self.value.push_str(text);
+                return Ok(());
+            }
+            let mut end = remaining;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.value.push_str(&text[..end]);
+            Err(std::fmt::Error)
         }
     }
-    let result =
-        fetch_bytes_from_remote(node, peers, subject, hash_text, hash, local_error, mode).await;
-    retries
-        .lock()
-        .await
-        .finish(&retry_key, matches!(&result, Ok(Some(_))), Instant::now());
-    result
+    let mut text = LimitedText {
+        value: String::with_capacity(limit),
+        limit,
+    };
+    let _ = write!(&mut text, "{value}");
+    text.value
+}
+
+/// 同じ対象の走査を 1 本にまとめ、結果を全呼び出しへ配る(#1207 AC-6)。
+///
+/// 走査は呼び出し側の future から切り離した task で最後まで実行する。呼び出し側が外側の
+/// timeout や cancel で待つのをやめても、クールダウンと peer 単位の成否は必ず記録される。
+/// 戻り値が `None` のときはクールダウン中で、走査を行っていない。
+#[allow(clippy::too_many_arguments)]
+async fn run_single_flight<F>(
+    admission: &Arc<NetworkWorkRuntime>,
+    retries: &Arc<Mutex<RemoteFetchRetryState>>,
+    retry_key: &str,
+    flight_key: &str,
+    subject: &str,
+    hash_text: &str,
+    mode: FetchMode,
+    walk: F,
+) -> Option<SharedRemoteFetchResult>
+where
+    F: Future<Output = Result<Option<Vec<u8>>>> + Send + 'static,
+{
+    // Hold the retry guard through synchronous admission. Completion records
+    // cooldown before retiring the identity, so it cannot race a new attempt.
+    let retry_state = retries.lock().await;
+    let identity = FetchIdentity {
+        service: retry_state.instance_id(),
+        key: flight_key.to_owned(),
+    };
+    let cooling_down = retry_state.is_cooling_down(retry_key, Instant::now());
+    let persistence = if mode == FetchMode::Store {
+        WorkPersistence::Store
+    } else {
+        WorkPersistence::Ephemeral
+    };
+    let byte_limit = match mode {
+        FetchMode::EphemeralBounded(limit) => limit,
+        _ => u64::MAX,
+    };
+    let completion_retries = retries.clone();
+    let retry_key = retry_key.to_owned();
+    let completion_key = flight_key.to_owned();
+    let finished = Box::new(move |success| {
+        Box::pin(async move {
+            completion_retries.lock().await.finish(
+                &retry_key,
+                &completion_key,
+                success,
+                Instant::now(),
+            );
+        }) as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
+    });
+    let admitted = admission.submit_fetch(
+        FetchRequest {
+            identity,
+            object: *iroh_blobs::Hash::new(flight_key.as_bytes()).as_bytes(),
+            persistence,
+            byte_limit,
+            cooling_down,
+        },
+        Box::pin(walk),
+        finished,
+    );
+    drop(retry_state);
+    match admitted {
+        Ok(waiter) => Some(waiter.result().await),
+        Err(crate::NetworkAdmissionError::CoolingDown) => None,
+        Err(error) => {
+            info!(subject, hash = %hash_text, %error, "remote fetch not admitted");
+            Some(Err(Arc::new(error.into())))
+        }
+    }
+}
+
+enum BlobTransferFailure {
+    Missing,
+    Rejected,
+    Local,
+    Remote,
+}
+
+fn classify_blob_transfer(error: &iroh_blobs::get::GetError) -> BlobTransferFailure {
+    use iroh_blobs::protocol::{ERR_INTERNAL, ERR_LIMIT, ERR_PERMISSION};
+    // The pinned provider reports absent data as ERR_INTERNAL, which also
+    // covers genuine server faults. Preserve that ambiguity: a stream-level
+    // application reply is neither proven NotFound nor a transport failure.
+    // Connection-close codes occupy a different namespace, so do not use them.
+    if (error.remote_read().is_some() || error.remote_write().is_some())
+        && error
+            .iroh_error_code()
+            .is_some_and(|code| code == ERR_INTERNAL || code == ERR_LIMIT || code == ERR_PERMISSION)
+    {
+        return BlobTransferFailure::Rejected;
+    }
+    use iroh_blobs::get::{
+        GetError,
+        fsm::{AtBlobHeaderNextError, DecodeError},
+    };
+    match error {
+        GetError::AtBlobHeaderNext {
+            source: AtBlobHeaderNextError::NotFound { .. },
+            ..
+        }
+        | GetError::Decode {
+            source:
+                DecodeError::ChunkNotFound { .. }
+                | DecodeError::ParentNotFound { .. }
+                | DecodeError::LeafNotFound { .. },
+            ..
+        } => BlobTransferFailure::Missing,
+        GetError::LocalFailure { .. }
+        | GetError::IrpcSend { .. }
+        | GetError::BadRequest { .. }
+        | GetError::Decode {
+            source: DecodeError::Write { .. },
+            ..
+        } => BlobTransferFailure::Local,
+        _ => BlobTransferFailure::Remote,
+    }
 }
 
 async fn fetch_bytes_from_remote(
@@ -196,12 +553,13 @@ async fn fetch_bytes_from_remote(
     local_error: impl Display,
     mode: FetchMode,
 ) -> Result<Option<Vec<u8>>> {
-    let imported_peers = peers.merged_peers().await;
+    let imported_peers = peers.ranked_peers().await;
+    let mut had_transport_failure = false;
     info!(
         subject,
         hash = %hash_text,
         error = %local_error,
-        configured_peer_count = imported_peers.len(),
+        selected_peer_count = imported_peers.len(),
         "fetch local miss, trying remote peers"
     );
     for imported_peer in imported_peers {
@@ -215,6 +573,21 @@ async fn fetch_bytes_from_remote(
             "fetch prepared remote peer candidates"
         );
         for peer in candidates {
+            if let RequestRateDecision::Limited { retry_after } =
+                peers.record_peer_fetch_request(imported_peer.id).await
+            {
+                info!(
+                    subject,
+                    hash = %hash_text,
+                    peer_id = %imported_peer.id,
+                    retry_after_ms = retry_after.as_millis(),
+                    "peer fetch request deferred by the shared request-frequency ledger"
+                );
+                break;
+            }
+            let Some(attempt) = peers.begin_fetch_attempt(imported_peer.id).await else {
+                break;
+            };
             match timeout(
                 REMOTE_FETCH_CONNECT_TIMEOUT,
                 node.endpoint().connect(peer.clone(), iroh_blobs::ALPN),
@@ -222,6 +595,7 @@ async fn fetch_bytes_from_remote(
             .await
             {
                 Ok(Ok(conn)) => {
+                    attempt.connection(PeerConnectionStatus::Connected).await;
                     info!(
                         subject,
                         hash = %hash_text,
@@ -231,6 +605,7 @@ async fn fetch_bytes_from_remote(
                     );
                     match mode {
                         FetchMode::Store => {
+                            let transfer_started = Instant::now();
                             match timeout(
                                 REMOTE_FETCH_TRANSFER_TIMEOUT,
                                 node.blobs().remote().fetch(conn, hash),
@@ -238,6 +613,7 @@ async fn fetch_bytes_from_remote(
                             .await
                             {
                                 Ok(Ok(_)) => {
+                                    attempt.success(transfer_started.elapsed()).await;
                                     info!(
                                         subject,
                                         hash = %hash_text,
@@ -246,6 +622,21 @@ async fn fetch_bytes_from_remote(
                                     );
                                 }
                                 Ok(Err(error)) => {
+                                    match classify_blob_transfer(&error) {
+                                        BlobTransferFailure::Missing => {
+                                            attempt.failure(PeerFetchFailure::NotFound).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Rejected => {
+                                            attempt.failure(PeerFetchFailure::Rejected).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Local => return Err(error.into()),
+                                        BlobTransferFailure::Remote => {
+                                            had_transport_failure = true;
+                                            attempt.failure(PeerFetchFailure::TransferFailed).await
+                                        }
+                                    }
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -257,6 +648,8 @@ async fn fetch_bytes_from_remote(
                                     continue;
                                 }
                                 Err(_) => {
+                                    had_transport_failure = true;
+                                    attempt.failure(PeerFetchFailure::TransferTimeout).await;
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -283,6 +676,7 @@ async fn fetch_bytes_from_remote(
                         }
                         FetchMode::Ephemeral | FetchMode::EphemeralBounded(_) => {
                             // ストアへ書き込まず、検証付きで memory へ直接取得する。
+                            let transfer_started = Instant::now();
                             match timeout(
                                 REMOTE_FETCH_TRANSFER_TIMEOUT,
                                 fetch_ephemeral(conn, hash, mode),
@@ -290,6 +684,7 @@ async fn fetch_bytes_from_remote(
                             .await
                             {
                                 Ok(Ok(bytes)) => {
+                                    attempt.success(transfer_started.elapsed()).await;
                                     info!(
                                         subject,
                                         hash = %hash_text,
@@ -302,6 +697,25 @@ async fn fetch_bytes_from_remote(
                                     if error.is::<BlobTooLarge>() {
                                         return Err(error);
                                     }
+                                    match error
+                                        .downcast_ref::<iroh_blobs::get::GetError>()
+                                        .map(classify_blob_transfer)
+                                        .unwrap_or(BlobTransferFailure::Remote)
+                                    {
+                                        BlobTransferFailure::Missing => {
+                                            attempt.failure(PeerFetchFailure::NotFound).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Rejected => {
+                                            attempt.failure(PeerFetchFailure::Rejected).await;
+                                            break;
+                                        }
+                                        BlobTransferFailure::Local => return Err(error),
+                                        BlobTransferFailure::Remote => {
+                                            had_transport_failure = true;
+                                            attempt.failure(PeerFetchFailure::TransferFailed).await
+                                        }
+                                    }
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -313,6 +727,8 @@ async fn fetch_bytes_from_remote(
                                     continue;
                                 }
                                 Err(_) => {
+                                    had_transport_failure = true;
+                                    attempt.failure(PeerFetchFailure::TransferTimeout).await;
                                     warn!(
                                         subject,
                                         hash = %hash_text,
@@ -328,6 +744,8 @@ async fn fetch_bytes_from_remote(
                     }
                 }
                 Ok(Err(error)) => {
+                    had_transport_failure = true;
+                    attempt.failure(PeerFetchFailure::ConnectFailed).await;
                     warn!(
                         subject,
                         hash = %hash_text,
@@ -338,6 +756,8 @@ async fn fetch_bytes_from_remote(
                     );
                 }
                 Err(_) => {
+                    had_transport_failure = true;
+                    attempt.failure(PeerFetchFailure::ConnectTimeout).await;
                     warn!(
                         subject,
                         hash = %hash_text,
@@ -350,10 +770,13 @@ async fn fetch_bytes_from_remote(
             }
         }
     }
-    warn!(
-        subject,
-        hash = %hash_text,
-        "fetch exhausted remote peers without success"
-    );
+    if had_transport_failure {
+        warn!(subject, hash = %hash_text, "fetch exhausted selected peers after transport failures");
+    } else {
+        info!(subject, hash = %hash_text, "fetch ended without content from the selected peer window");
+    }
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests;

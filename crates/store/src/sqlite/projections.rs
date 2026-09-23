@@ -1,5 +1,170 @@
 use super::*;
 
+const TIMELINE_SELECT: &str = r#"
+    SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
+           reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
+           repost_of_json, content_labels_json, source_replica_id, source_key,
+           source_envelope_id, source_blob_hash, derived_at, projection_version,
+           source_docs_author
+"#;
+
+const THREAD_SELECT: &str = r#"
+    SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
+           oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
+           oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
+           oic.content_labels_json, oic.source_replica_id, oic.source_key,
+           oic.source_docs_author, oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
+           oic.projection_version
+    FROM object_thread_cache tc
+    INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
+"#;
+
+/// cursor より古い行だけを読む条件を足す(#1239)。
+///
+/// 行の値の比較で書く。`created_at < ? OR (created_at = ? AND object_id < ?)` の形や、`? IS NULL OR …` と
+/// 1 つの SQL にまとめた形は、索引の範囲の読み出しにならず、遡った深さに比例して行を読み飛ばす。
+fn push_timeline_cursor(builder: &mut QueryBuilder<'_, Sqlite>, cursor: Option<&TimelineCursor>) {
+    if let Some(cursor) = cursor {
+        builder.push(" AND (created_at, object_id) < (");
+        builder.push_bind(cursor.created_at);
+        builder.push(", ");
+        builder.push_bind(cursor.object_id.as_str().to_string());
+        builder.push(")");
+    }
+}
+
+/// タイムラインの 1 ページを読む SQL を組み立てる。`channel_id` が `None` なら channel で絞らない。
+///
+/// channel で絞るときは 1 つだけ(#1280)。(topic, channel, 時刻, id) の索引の範囲をそのまま読み、許可されない
+/// channel の行を読み飛ばさない。複数の channel をまたぐページは作らない。
+///
+/// `prefix` は SQL の前に置く文字列(取得は空、query plan の test は `EXPLAIN QUERY PLAN `)。test が実装と同じ
+/// SQL の plan を確かめられるように、組み立てをここに 1 つだけ置く。
+pub(crate) fn timeline_page_query<'a>(
+    prefix: &str,
+    topic_id: &'a str,
+    channel_id: Option<&'a str>,
+    cursor: Option<&TimelineCursor>,
+    limit: usize,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    builder.push(TIMELINE_SELECT);
+    builder.push(" FROM object_index_cache WHERE topic_id = ");
+    builder.push_bind(topic_id);
+    if let Some(channel_id) = channel_id {
+        builder.push(" AND channel_id = ");
+        builder.push_bind(channel_id);
+    }
+    push_timeline_cursor(&mut builder, cursor);
+    builder.push(" ORDER BY created_at DESC, object_id DESC LIMIT ");
+    builder.push_bind(limit as i64);
+    builder
+}
+
+/// thread の root の行を 1 行引く SQL(`after` が `None`)、または返信の範囲を読む SQL を組み立てる。
+pub(crate) fn thread_page_query<'a>(
+    prefix: &str,
+    topic_id: &'a str,
+    root_id: &'a str,
+    channel_id: Option<&'a str>,
+    part: ThreadPagePart<'_>,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    builder.push(THREAD_SELECT);
+    builder.push(" WHERE tc.topic_id = ");
+    builder.push_bind(topic_id);
+    builder.push(" AND tc.root_object_id = ");
+    builder.push_bind(root_id);
+    if let Some(channel_id) = channel_id {
+        builder.push(" AND tc.channel_id = ");
+        builder.push_bind(channel_id);
+    }
+    match part {
+        ThreadPagePart::Root => {
+            builder.push(" AND tc.object_id = ");
+            builder.push_bind(root_id);
+        }
+        ThreadPagePart::Replies { after, limit } => {
+            builder.push(" AND tc.object_id != ");
+            builder.push_bind(root_id);
+            if let Some(after) = after {
+                builder.push(" AND (tc.created_at, tc.object_id) > (");
+                builder.push_bind(after.created_at);
+                builder.push(", ");
+                builder.push_bind(after.object_id.as_str().to_string());
+                builder.push(")");
+            }
+            builder.push(" ORDER BY tc.created_at ASC, tc.object_id ASC LIMIT ");
+            builder.push_bind(limit as i64);
+        }
+    }
+    builder
+}
+
+pub(crate) enum ThreadPagePart<'a> {
+    Root,
+    Replies {
+        after: Option<&'a TimelineCursor>,
+        limit: usize,
+    },
+}
+
+impl SqliteStore {
+    /// thread の 1 ページ(root が先頭、返信は古い順)。
+    ///
+    /// 返信は `object_thread_cache` の (topic, root, 時刻, id) の索引の範囲を、cursor の位置から読む。root を先頭に
+    /// 置くために全行を並べ替える形(`ORDER BY CASE …`)にすると、1 ページの取得が thread の返信の総数に比例する。
+    /// root は最初のページでだけ 1 行引きし、返信の範囲からは除く。
+    async fn thread_page(
+        &self,
+        topic_id: &str,
+        thread_root_object_id: &EnvelopeId,
+        channel_id: Option<&str>,
+        cursor: Option<TimelineCursor>,
+        limit: usize,
+    ) -> Result<Page<ObjectProjectionRow>> {
+        if limit == 0 {
+            return Ok(Page {
+                items: Vec::new(),
+                next_cursor: cursor,
+            });
+        }
+        let root_id = thread_root_object_id.as_str();
+        // root を返すのは、cursor の無い最初のページだけ。root の位置の cursor は「返信の先頭から」を表す
+        // (返信の時刻が root より前でも、時計のずれで飛ばさない)。
+        let first_page = cursor.is_none();
+        let after = cursor.filter(|cursor| cursor.object_id.as_str() != root_id);
+        let mut rows = Vec::new();
+        if first_page {
+            rows.extend(
+                thread_page_query("", topic_id, root_id, channel_id, ThreadPagePart::Root)
+                    .build()
+                    .fetch_all(&self.pool)
+                    .await?,
+            );
+        }
+        let remaining = limit.saturating_sub(rows.len());
+        if remaining > 0 {
+            rows.extend(
+                thread_page_query(
+                    "",
+                    topic_id,
+                    root_id,
+                    channel_id,
+                    ThreadPagePart::Replies {
+                        after: after.as_ref(),
+                        limit: remaining,
+                    },
+                )
+                .build()
+                .fetch_all(&self.pool)
+                .await?,
+            );
+        }
+        object_projection_page_from_rows(rows, limit)
+    }
+}
+
 #[async_trait]
 impl ObjectProjectionStore for SqliteStore {
     async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
@@ -27,9 +192,10 @@ impl ObjectProjectionStore for SqliteStore {
                   object_id, topic_id, channel_id, author_pubkey, created_at, object_kind,
                   root_object_id, reply_to_object_id, payload_ref_json, content, attachments_json,
                   repost_of_json, content_labels_json, source_replica_id, source_key,
-                  source_envelope_id, source_blob_hash, derived_at, projection_version
+                  source_envelope_id, source_blob_hash, derived_at, projection_version,
+                  source_docs_author
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT(object_id) DO UPDATE SET
                   topic_id = excluded.topic_id,
                   channel_id = excluded.channel_id,
@@ -48,7 +214,8 @@ impl ObjectProjectionStore for SqliteStore {
                   source_envelope_id = excluded.source_envelope_id,
                   source_blob_hash = excluded.source_blob_hash,
                   derived_at = excluded.derived_at,
-                  projection_version = excluded.projection_version
+                  projection_version = excluded.projection_version,
+                  source_docs_author = excluded.source_docs_author
                 "#,
             )
             .bind(row.object_id.as_str())
@@ -70,6 +237,7 @@ impl ObjectProjectionStore for SqliteStore {
             .bind(row.source_blob_hash.as_ref().map(BlobHash::as_str))
             .bind(row.derived_at)
             .bind(row.projection_version)
+            .bind(row.source_docs_author.as_deref())
             .execute(&mut *tx)
             .await?;
 
@@ -128,7 +296,8 @@ impl ObjectProjectionStore for SqliteStore {
             SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
                    reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
                    repost_of_json, content_labels_json, source_replica_id, source_key,
-                   source_envelope_id, source_blob_hash, derived_at, projection_version
+                   source_envelope_id, source_blob_hash, derived_at, projection_version,
+                   source_docs_author
             FROM object_index_cache
             WHERE object_id = ?1
             "#,
@@ -138,6 +307,42 @@ impl ObjectProjectionStore for SqliteStore {
         .await?;
 
         row.map(row_to_object_projection).transpose()
+    }
+
+    async fn find_author_reposts_of(
+        &self,
+        topic_id: &str,
+        author_pubkey: &str,
+        source_object_id: &EnvelopeId,
+        limit: usize,
+    ) -> Result<Vec<ObjectProjectionRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // 条件の式は `idx_object_index_cache_repost_source` と同じ形に保つ(索引を使うため)。
+        let rows = sqlx::query(
+            r#"
+            SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
+                   reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
+                   repost_of_json, content_labels_json, source_replica_id, source_key,
+                   source_envelope_id, source_blob_hash, derived_at, projection_version,
+                   source_docs_author
+            FROM object_index_cache
+            WHERE object_kind = 'repost'
+              AND topic_id = ?1
+              AND author_pubkey = ?2
+              AND json_extract(repost_of_json, '$.source_object_id') = ?3
+            ORDER BY created_at DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(topic_id)
+        .bind(author_pubkey)
+        .bind(source_object_id.as_str())
+        .bind(i64::try_from(limit)?)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_object_projection).collect()
     }
 
     async fn mark_adult_media_hashes(&self, hashes: &[BlobHash]) -> Result<()> {
@@ -185,90 +390,30 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
-                   reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
-                   repost_of_json, content_labels_json, source_replica_id, source_key,
-                   source_envelope_id, source_blob_hash, derived_at, projection_version
-            FROM object_index_cache
-            WHERE topic_id = ?1
-              AND (
-                ?2 IS NULL
-                OR created_at < ?2
-                OR (created_at = ?2 AND object_id < ?3)
-              )
-            ORDER BY created_at DESC, object_id DESC
-            LIMIT ?4
-            "#,
-        )
-        .bind(topic_id)
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
+        let rows = timeline_page_query("", topic_id, None, cursor.as_ref(), limit)
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
         object_projection_page_from_rows(rows, limit)
     }
 
-    async fn list_topic_timeline_filtered(
+    async fn list_topic_timeline_in_channel(
         &self,
         topic_id: &str,
-        allowed_channels: &std::collections::BTreeSet<String>,
+        channel_id: &str,
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        if limit == 0 || allowed_channels.is_empty() {
+        if limit == 0 {
             return Ok(Page {
                 items: Vec::new(),
                 next_cursor: cursor,
             });
         }
-
-        let mut builder = QueryBuilder::<Sqlite>::new(
-            r#"
-            SELECT object_id, topic_id, author_pubkey, created_at, object_kind, root_object_id,
-                   reply_to_object_id, channel_id, payload_ref_json, content, attachments_json,
-                   repost_of_json, content_labels_json, source_replica_id, source_key,
-                   source_envelope_id, source_blob_hash, derived_at, projection_version
-            FROM object_index_cache
-            WHERE topic_id = "#,
-        );
-        builder.push_bind(topic_id);
-        builder.push(" AND channel_id IN (");
-        let mut separated = builder.separated(", ");
-        for channel_id in allowed_channels {
-            separated.push_bind(channel_id);
-        }
-        separated.push_unseparated(")");
-        builder.push(
-            r#"
-              AND (
-                "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(
-            r#" IS NULL
-                OR created_at < "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(
-            r#"
-                OR (created_at = "#,
-        );
-        builder.push_bind(cursor.as_ref().map(|value| value.created_at));
-        builder.push(" AND object_id < ");
-        builder.push_bind(cursor.as_ref().map(|value| value.object_id.as_str()));
-        builder.push(
-            r#")
-              )
-            ORDER BY created_at DESC, object_id DESC
-            LIMIT "#,
-        );
-        builder.push_bind(limit as i64);
-
-        let rows = builder.build().fetch_all(&self.pool).await?;
+        let rows = timeline_page_query("", topic_id, Some(channel_id), cursor.as_ref(), limit)
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
         object_projection_page_from_rows(rows, limit)
     }
 
@@ -279,39 +424,8 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
-                   oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
-                   oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
-                   oic.content_labels_json, oic.source_replica_id, oic.source_key,
-                   oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
-                   oic.projection_version
-            FROM object_thread_cache tc
-            INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
-            WHERE tc.topic_id = ?1
-              AND tc.root_object_id = ?2
-              AND (
-                ?3 IS NULL
-                OR oic.created_at > ?3
-                OR (oic.created_at = ?3 AND oic.object_id > ?4)
-              )
-            ORDER BY
-              CASE WHEN oic.object_id = tc.root_object_id THEN 0 ELSE 1 END ASC,
-              oic.created_at ASC,
-              oic.object_id ASC
-            LIMIT ?5
-            "#,
-        )
-        .bind(topic_id)
-        .bind(thread_root_object_id.as_str())
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        object_projection_page_from_rows(rows, limit)
+        self.thread_page(topic_id, thread_root_object_id, None, cursor, limit)
+            .await
     }
 
     async fn list_thread_filtered(
@@ -322,52 +436,14 @@ impl ObjectProjectionStore for SqliteStore {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>> {
-        let Some(channel_id) = allowed_channel else {
-            return ObjectProjectionStore::list_thread(
-                self,
-                topic_id,
-                thread_root_object_id,
-                cursor,
-                limit,
-            )
-            .await;
-        };
-
-        let rows = sqlx::query(
-            r#"
-            SELECT oic.object_id, oic.topic_id, oic.author_pubkey, oic.created_at, oic.object_kind,
-                   oic.root_object_id, oic.reply_to_object_id, oic.channel_id,
-                   oic.payload_ref_json, oic.content, oic.attachments_json, oic.repost_of_json,
-                   oic.content_labels_json, oic.source_replica_id, oic.source_key,
-                   oic.source_envelope_id, oic.source_blob_hash, oic.derived_at,
-                   oic.projection_version
-            FROM object_thread_cache tc
-            INNER JOIN object_index_cache oic ON oic.object_id = tc.object_id
-            WHERE tc.topic_id = ?1
-              AND tc.root_object_id = ?2
-              AND tc.channel_id = ?3
-              AND (
-                ?4 IS NULL
-                OR oic.created_at > ?4
-                OR (oic.created_at = ?4 AND oic.object_id > ?5)
-              )
-            ORDER BY
-              CASE WHEN oic.object_id = tc.root_object_id THEN 0 ELSE 1 END ASC,
-              oic.created_at ASC,
-              oic.object_id ASC
-            LIMIT ?6
-            "#,
+        self.thread_page(
+            topic_id,
+            thread_root_object_id,
+            allowed_channel,
+            cursor,
+            limit,
         )
-        .bind(topic_id)
-        .bind(thread_root_object_id.as_str())
-        .bind(channel_id)
-        .bind(cursor.as_ref().map(|value| value.created_at))
-        .bind(cursor.as_ref().map(|value| value.object_id.as_str()))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        object_projection_page_from_rows(rows, limit)
+        .await
     }
 
     async fn rebuild_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {

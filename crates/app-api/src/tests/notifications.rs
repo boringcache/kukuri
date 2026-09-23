@@ -49,7 +49,7 @@ async fn remote_reply_to_local_post_creates_single_unread_reply_notification() {
     assert!(created);
     ObjectProjectionStore::put_object_projection(
         store.as_ref(),
-        projection_row_from_header(&remote_object, None, &topic_replica_id(topic.as_str())),
+        verified_projection_row(&remote_envelope, &topic_replica_id(topic.as_str()), None),
     )
     .await
     .expect("put remote projection");
@@ -124,7 +124,7 @@ async fn object_notification_view_exposes_thread_root_object_id_for_click_throug
     );
     ObjectProjectionStore::put_object_projection(
         store.as_ref(),
-        projection_row_from_header(&remote_object, None, &topic_replica_id(topic.as_str())),
+        verified_projection_row(&remote_envelope, &topic_replica_id(topic.as_str()), None),
     )
     .await
     .expect("put remote projection");
@@ -312,13 +312,9 @@ async fn repost_notification_survives_hydration_before_live_doc_event() {
         .create_post(topic.as_str(), "source post", None)
         .await
         .expect("create source post");
-    let baseline = snapshot_object_notification_baseline(
-        docs_sync.as_ref(),
-        &replica,
-        DocFetchPolicy::LocalThenRemote,
-    )
-    .await
-    .expect("snapshot object baseline");
+    let baseline = snapshot_window_notification_baseline(docs_sync.as_ref(), &replica)
+        .await
+        .expect("snapshot object baseline");
     let remote_keys = generate_keys();
     let repost_source = app
         .resolve_repost_source(topic.as_str(), source_object_id.as_str())
@@ -339,11 +335,12 @@ async fn repost_notification_survives_hydration_before_live_doc_event() {
     )
     .await
     .expect("persist simple repost");
-    hydrate_subscription_state(
+    catch_up_replica_window(
         &app.services,
         topic.as_str(),
         &replica,
         DocFetchPolicy::LocalThenRemote,
+        true,
     )
     .await
     .expect("hydrate topic state");
@@ -391,13 +388,9 @@ async fn quote_repost_notification_survives_hydration_before_live_doc_event() {
         .create_post(topic.as_str(), "quoted source", None)
         .await
         .expect("create source post");
-    let baseline = snapshot_object_notification_baseline(
-        docs_sync.as_ref(),
-        &replica,
-        DocFetchPolicy::LocalThenRemote,
-    )
-    .await
-    .expect("snapshot object baseline");
+    let baseline = snapshot_window_notification_baseline(docs_sync.as_ref(), &replica)
+        .await
+        .expect("snapshot object baseline");
     let remote_keys = generate_keys();
     let repost_source = app
         .resolve_repost_source(topic.as_str(), source_object_id.as_str())
@@ -422,11 +415,12 @@ async fn quote_repost_notification_survives_hydration_before_live_doc_event() {
     )
     .await
     .expect("persist quote repost");
-    hydrate_subscription_state(
+    catch_up_replica_window(
         &app.services,
         topic.as_str(),
         &replica,
         DocFetchPolicy::LocalThenRemote,
+        true,
     )
     .await
     .expect("hydrate topic state");
@@ -467,11 +461,27 @@ async fn quote_repost_notification_survives_hydration_before_live_doc_event() {
 
 #[tokio::test]
 async fn incoming_dm_frame_creates_single_direct_message_notification_after_store() {
-    let (app, _store, _, blob_service) = local_app_with_memory_services();
+    let (app, store, _, blob_service) = local_app_with_memory_services();
     let local_keys = app.services.keys.clone();
     let local_author_pubkey = app.current_author_pubkey();
     let remote_keys = generate_keys();
     let remote_pubkey = remote_keys.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        local_author_pubkey.as_str(),
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local_author_pubkey.clone(),
+            author_pubkey: remote_pubkey.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .expect("establish mutual relationship");
     let dm_id = direct_message_id_for_participants(
         &Pubkey::from(local_author_pubkey.as_str()),
         &Pubkey::from(remote_pubkey.as_str()),
@@ -509,6 +519,7 @@ async fn incoming_dm_frame_creates_single_direct_message_notification_after_stor
         dm_id.as_str(),
         message_id,
         &frame_blob.hash,
+        None,
     )
     .await
     .expect("ingest direct message frame");
@@ -576,7 +587,8 @@ async fn follow_notification_survives_hydration_before_live_doc_event() {
     let baseline = snapshot_follow_notification_baseline(
         docs_sync.as_ref(),
         &replica,
-        DocFetchPolicy::LocalThenRemote,
+        local_author_pubkey.as_str(),
+        None,
     )
     .await
     .expect("snapshot follow baseline");
@@ -652,7 +664,8 @@ async fn initial_follow_baseline_prevents_backfill_notification() {
     let baseline = snapshot_follow_notification_baseline(
         docs_sync.as_ref(),
         &replica,
-        DocFetchPolicy::LocalThenRemote,
+        local_author_pubkey.as_str(),
+        None,
     )
     .await
     .expect("snapshot follow baseline");
@@ -795,18 +808,15 @@ async fn restart_or_manual_hydration_does_not_backfill_or_duplicate_notification
         .to_post_object()
         .expect("parse existing reply")
         .expect("existing reply object");
-    let baseline = snapshot_object_notification_baseline(
-        docs_sync.as_ref(),
-        &replica,
-        DocFetchPolicy::LocalThenRemote,
-    )
-    .await
-    .expect("snapshot object baseline");
-    hydrate_subscription_state(
+    let baseline = snapshot_window_notification_baseline(docs_sync.as_ref(), &replica)
+        .await
+        .expect("snapshot object baseline");
+    catch_up_replica_window(
         &app.services,
         topic.as_str(),
         &replica,
         DocFetchPolicy::LocalThenRemote,
+        true,
     )
     .await
     .expect("hydrate topic state");
@@ -871,11 +881,12 @@ async fn restart_or_manual_hydration_does_not_backfill_or_duplicate_notification
         )
         .await
     );
-    hydrate_subscription_state(
+    catch_up_replica_window(
         &app.services,
         topic.as_str(),
         &replica,
         DocFetchPolicy::LocalThenRemote,
+        true,
     )
     .await
     .expect("rehydrate topic state");

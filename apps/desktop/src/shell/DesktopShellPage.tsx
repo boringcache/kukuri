@@ -48,6 +48,7 @@ import { useDeveloperModeBridge } from '@/shell/useDeveloperModeBridge';
 import { useOsNotificationBridge } from '@/shell/useOsNotificationBridge';
 import { useOsNotificationActivation } from '@/shell/useOsNotificationActivation';
 import { selectUpdateAvailable, useAppUpdateStore } from '@/shell/useAppUpdateStore';
+import { useAppUpdateScheduler } from '@/shell/useAppUpdateScheduler';
 import { useDesktopShellViewModels } from '@/shell/useDesktopShellViewModels';
 import {
   DesktopShellDetailSurfaceStack,
@@ -77,10 +78,9 @@ import {
   type ColumnTimelineView,
 } from '@/shell/slices/workspace';
 import { routeStateForColumn } from '@/shell/routing/initialWorkspaceRoute';
+import { PostRecoveryProviders } from '@/components/core/PostRecoveryProviders';
 
 const CLIPBOARD_TOAST_TIMEOUT_MS = 2200;
-const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-
 export function DesktopShellPage({
   api = runtimeApi,
   theme,
@@ -198,6 +198,8 @@ export function DesktopShellPage({
     refreshTimelineFeed,
     refreshConnectivityStatus,
     loadProfileSection,
+    loadMoreProfileTimeline,
+    loadMoreAuthorTimeline,
     loadBookmarksSection,
     loadReactionCatalogData,
     loadNotificationsSection,
@@ -211,6 +213,8 @@ export function DesktopShellPage({
     buildImageDraftItem: buildComposerImageDraftItem,
     buildVideoDraftItem: buildComposerVideoDraftItem,
     gatedAdultMediaHashes,
+    retryMediaFetch,
+    reloadPostElements,
   } = useDesktopShellData({
     api,
     translate,
@@ -483,25 +487,16 @@ export function DesktopShellPage({
   useFocusScroll({
     focusKey: liveFocusKey,
     readinessKey: liveSessionListItems.length,
-    selector: liveFocusKey ? `[data-live-session-id="${liveFocusKey}"]` : null,
+    selector: liveFocusKey ? `[data-live-session-id=${JSON.stringify(liveFocusKey)}]` : null,
   });
   const gameFocusKey =
     shellChromeState.activePrimarySection === 'game' ? selectedGameRoomId : null;
   useFocusScroll({
     focusKey: gameFocusKey,
     readinessKey: activeGameRooms.length,
-    selector: gameFocusKey ? `[data-game-room-id="${gameFocusKey}"]` : null,
+    selector: gameFocusKey ? `[data-game-room-id=${JSON.stringify(gameFocusKey)}]` : null,
   });
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
-      return;
-    }
-    void checkForUpdate();
-    const intervalId = window.setInterval(() => {
-      void checkForUpdate();
-    }, UPDATE_CHECK_INTERVAL_MS);
-    return () => window.clearInterval(intervalId);
-  }, [checkForUpdate]);
+  useAppUpdateScheduler(checkForUpdate);
   const renderMessagesSurface = (
     surfaceKind: 'messages' | 'conversation',
     peerPubkey: string | undefined,
@@ -542,7 +537,6 @@ export function DesktopShellPage({
       showComposer={false}
     />
   );
-  const openNotificationSettings = () => handleOpenSettingsSection('notifications');
   const renderNotificationsSurface = (column: ColumnState) => (
     <DesktopShellNotificationsSurface
       t={t}
@@ -550,7 +544,7 @@ export function DesktopShellPage({
       handleOpenNotification={(notification) =>
         shellActions.handleOpenNotification(notification, column.id)
       }
-      onOpenNotificationSettings={openNotificationSettings}
+      onOpenNotificationSettings={() => handleOpenSettingsSection('notifications')}
     />
   );
   const renderDetailSurface = (
@@ -565,6 +559,7 @@ export function DesktopShellPage({
       t={t}
       viewModels={viewModels}
       loadMoreThread={loadMoreThread}
+      loadMoreAuthorTimeline={loadMoreAuthorTimeline}
       loadReactionCatalogData={loadReactionCatalogData}
       openAuthorDetail={(authorPubkey, options) =>
         openAuthorDetail(authorPubkey, {
@@ -631,6 +626,7 @@ export function DesktopShellPage({
       loadReactionCatalogData={loadReactionCatalogData}
       refreshTimelineFeed={refreshTimelineFeed}
       refreshProfile={loadProfileSection}
+      loadMoreProfileTimeline={loadMoreProfileTimeline}
       loadMoreTimeline={loadMoreTimeline}
       openAuthorDetail={(authorPubkey, options) =>
         openAuthorDetail(authorPubkey, {
@@ -828,6 +824,7 @@ export function DesktopShellPage({
       }}
       mentionCandidates={viewModels.mentionCandidates}
       onColumnAttachmentSelection={shellActions.handleColumnDraftAttachmentSelection}
+      onColumnAttachmentPaste={shellActions.handleColumnDraftAttachmentPaste}
       onRemoveColumnAttachment={shellActions.handleRemoveColumnDraftAttachment}
       onSubmitColumnDraft={shellActions.handleSubmitColumnDraft}
       onEndLiveSession={shellActions.handleEndLiveSession}
@@ -890,7 +887,7 @@ export function DesktopShellPage({
   );
 
   return (
-    <>
+    <PostRecoveryProviders mediaRetry={retryMediaFetch} postReload={reloadPostElements}>
       <div className='shell-phase1' data-workspace-layout='column'>
         <a className='shell-skip-link' href={`#${SHELL_WORKSPACE_ID}`}>
           {t('shell:workspace.skipToWorkspace')}
@@ -904,6 +901,8 @@ export function DesktopShellPage({
           {workspace}
         </main>
         <DesktopShellControlCenter
+          api={api}
+          onAcceptCommunityNodeConsents={shellActions.handleAcceptCommunityNodeConsents}
           triggerRef={controlCenterTriggerRef}
           topicItems={topicNavItems}
           topicInput={topicInput}
@@ -995,6 +994,6 @@ export function DesktopShellPage({
         handleCreateCustomReactionAsset={shellActions.handleCreateCustomReactionAsset}
         handleRemoveBookmarkedCustomReaction={shellActions.handleRemoveBookmarkedCustomReaction}
       />
-    </>
+    </PostRecoveryProviders>
   );
 }

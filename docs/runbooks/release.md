@@ -4,7 +4,9 @@
 
 Preview tagは`vX.Y.Z-preview.N`。Windows NSIS／updater、Linux AppImage／Deb x86_64、CLI x86_64／aarch64を同じsourceから生成する。Linux資材が公開済みかはReleaseのasset一覧を正とし、workflow実装だけで公開済みとしない。
 
-version／tag／source SHAと公開の依頼範囲を先に確定する。実装PRの承認はRelease公開の承認と区別する。既存tag／公開assetの上書き、検証用一時鍵の転用はしない。
+Windows x64のMicrosoft Store版は、このGitHub Release経路とは別に[Windows Microsoft Store配布](windows-microsoft-store.md)でMSIXを作る。Store版の更新はMicrosoft Store／Windowsへ委譲し、GitHub updaterや別のapp内Store updaterを動かさない。Store用identity、version、PFX、Partner Center候補をNSIS assetへ混在させない。
+
+version／tag／source SHA、対象成果物の有限な一覧、draft作成または公開までの依頼範囲と成功判定を先に確定する。実装PRの承認はRelease公開の承認と区別する。既存tag／公開assetの上書き、検証用一時鍵の転用はしない。
 
 GUIはWindows／Linuxとも既存`cargo xtask desktop-package`を使う。Ubuntu 22.04はLinux build基盤で、全Linux環境の保証ではない。確認済み範囲と延期環境は[AppImage作業記録](../progress/2026-09-05-issue-889-linux-appimage.md)、利用方法は[quickstart](./mvp-user-quickstart.md)と[Linux CLI](./linux-cli.md)を参照する。
 
@@ -25,11 +27,12 @@ npx pnpm@10.16.1 tauri signer generate --write-keys <secure-private-key-path>
 
 ## 検証
 
-path別の選定は[REFACTORING.md](../../REFACTORING.md#path別検証マトリクス)。既存必須CIは維持し、同じsource・code・依存・条件で成功した検証を理由なく重複しない。
+path別の選定は[REFACTORING.md](../../REFACTORING.md#path別検証マトリクス)。以下はcommandの参照一覧で、ローカルは変更関連の検証、全体はCIを使う。同じsource・code・依存・条件で成功した証拠は再利用する。公開する実成果物の署名・hash・完全性の確認は、その候補に結び付けて行う。
 
 ```bash
 cargo xtask release-check v0.1.8-preview.2
 python scripts/release/test_release_assets.py
+python scripts/release/test_windows_store_package.py
 python scripts/release/test_cli_archive.py
 python scripts/release/test_native_compliance.py
 python scripts/release/test_deb_package.py
@@ -52,12 +55,21 @@ python scripts/release/test_verify_public_preview.py
 1. 承認したsourceに新しいtagを作成・pushする。tag pushは既定でdraftまで。
 2. 手動実行なら`Kukuri Release`のworkflow refにも同じtagを選び、入力`tag`を一致させる。`draft`の既定値は`true`。別refのworkflowで過去tagをbuildする入力は拒否する。
 3. `validate-release-inputs`がevent／tag／versionを検証し、tagとworkflowのsourceを照合してcommit SHAを一度固定する。後続checkoutはそのSHAを使う。
-4. `linux-verify`が既存製品CIを実行。Windows／Linux GUI package、CLI 2archのjobで本体を生成し、source／target／version／SHA-256を`release-package.json`へ記録する。
+4. `linux-verify`が既存製品CIを実行。Windows／Linux GUI package、CLI 2archのjobで本体を生成し、source／target／version／SHA-256を`release-package.json`へ記録する。package jobは`linux-verify`を待たずに並行して始まり、公開は`linux-verify`を含む全jobの成功を条件とする（#1180）。
 5. CLIはarchiveから展開した実binaryでschema、専用profileのdaemon起動・status・終了を確認する。aarch64はQEMUで実行し、cross-compileだけを成功条件にしない。HOME／XDGとprofileは一時領域で、GUIのidentityを共有しない。
-6. `changelog`が固定sourceからRelease notesを生成し、`release-assets`が4targetの資材を集約する。必須job失敗・欠落・異なるsource／version／鍵・test署名・hash不一致は公開前に拒否する。
+6. `changelog`が固定sourceからRelease notesを生成し（起点は公開済み（draftでない）Releaseのtagのうち最も近い祖先。Releaseの無いtag、つまり失敗したreleaseのtagは起点にしない。#1186）、`release-assets`が4targetの資材を集約する。必須job失敗・欠落・異なるsource／version／鍵・test署名・hash不一致は公開前に拒否する。
 7. 同じWindows buildの実Rust verifierで、最終manifestのWindows／AppImage／Debの3entryの実bytesとembedded signatureを検証する。正常bundle受理と1 byte改変拒否の双方が必要。installは行わない。
 8. `publish-draft`が完全性と現在のtag SHAを再検証し、draftを作成してuploadする。公開指定でも、全assetのuploadとGitHub SHA-256 digest照合が終わるまで公開しない。
 9. 公開指定時は`verify-published`が安定updater URL、checksum／provenance、5本体を取得して候補hashと照合する。失敗は公開後検証未完了として扱う。
+
+### Runnerとcache（#1180）
+
+- build／verifyと署名するjob（`validate-release-inputs`、`linux-verify`、`windows-package`、Linux GUI package、CLI package）は、Cache Volumeのないrelease用のNamespace profileで動かす。Linuxは`namespace-profile-kukuri-linux-release`（Ubuntu 22.04、8 vCPU／16 GB）で、配布物のglibcの下限をUbuntu 22.04に保つ。Windowsは`namespace-profile-kukuri-win-release`（Windows Server 2022、8 vCPU／16 GB）。
+- `linux-verify`の中身は`kukuri-release-verify.yml`（reusable workflow）に置き、そのfileを変えたPRでも同じprofileで流す。release用profileの環境差（Ubuntu 22.04 imageにPowerShellが無い等）をtag前に確かめるため。
+- Cache Volume付きのprofile（`namespace-profile-kukuri`／`-kukuri-win`）は、cache actionを置かなくてもvolumeとtool／Git cacheが付き、PRのrunと共有される。releaseでは使わない。
+- 配布用の署名鍵はNamespaceのrunnerへ渡る。2026-09-19のユーザー判断で、#1148の「配布鍵を渡すrunはGitHub-hosted」を改めた。PRのrunには引き続き渡さない。Windowsでは鍵を`Build Windows package` stepのenvにだけ渡す。
+- releaseの経路ではbuild cache（sccache、rust-cache、pnpm cache、Cache Volume）を使わない。tagのrunは他のrunのcacheを読めず、復元・保存の時間だけかかっていた。PRのrunが書いた成果物を署名付きの配布物へ持ち込まない目的もある。
+- 公開まわりの末尾のjob（`changelog`、`release-assets`、`publish-draft`、`verify-published`）はGitHub-hostedのまま。
 
 GitHub上の`prerelease` flagは既存互換のため`false`、公開時`make_latest=true`を維持する。製品としてはPreviewだが、`prerelease=true`へ変えると既存clientの`/releases/latest/download/latest-preview.json`に出なくなる。
 

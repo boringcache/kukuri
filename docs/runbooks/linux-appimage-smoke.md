@@ -2,7 +2,7 @@
 
 ## 状態と対象
 
-#889の開発・検証手順。生成機能と実機確認は実装中で、配布開始を意味しない。
+#889で整備した生成・検証手順と当時の確認記録。現行の公開状況は[Release手順](release.md)と対象Releaseの成果物一覧で確認し、過去の未完了記述を新たな作業条件にしない。
 検証済み範囲は [作業記録](../progress/2026-09-05-issue-889-linux-appimage.md)、署名とデータ分類は [ADR 0049](../adr/0049-linux-gui-cli-control-plane.md) を参照する。公開Releaseへの集約と利用者向け導線は#890が所有する。
 
 - 生成: Ubuntu 22.04、x86_64、repositoryのRust／pnpm／Tauri固定版。
@@ -90,6 +90,16 @@ bash xtask/tests/appimage/gio-isolation.sh \
 新しい関数を要求する不整合fixtureで修正前のerrorを確認し、修正後のTLS backend・ローカルファイル参照、通常起動への非適用、同梱TLS欠落時の拒否を確認する。これはUbuntu Desktop上の再検証の代替ではない。
 
 `app-level legal consent required; deferring runtime startup` は同意待ちを示す情報ログであり、このモジュール読込み失敗とは別である。
+
+### 同梱しない表示系library（#1222）
+
+`libEGL`／`libGL`／`libgbm`／`libdrm`はホストのMesaを使う。Mesaと同じ世代で揃える必要がある次の10件は同梱しない: `libwayland-client`／`-cursor`／`-egl`／`-server`、`libxkbcommon`、`libxcb-randr`／`-render`／`-shm`、`libXau`、`libXdmcp`。Ubuntu 22.04の版を同梱したv0.2.8以前は、Fedora 44（Mesa 26）等でWebKitWebProcessが`Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...`で終了し、windowが真っ白になった。
+
+Tauri bundlerにはlinuxdeployの除外設定がなく、GTK pluginが内部で呼ぶlinuxdeployには`--exclude-library`が届かない。Tauriは実行のたびにlinuxdeploy本体の先頭byteを書き換えるため、本体をscriptへ置き換えることもできない。そこで`cargo xtask desktop-package`は、Tauriのtools directory（`~/.cache/tauri`）のAppImage出力plugin `linuxdeploy-plugin-appimage.AppImage`をwrapperにし、Tauriが取得するものと同じpluginを`kukuri-appimage-output.real.AppImage`として呼ぶ。linuxdeployは依存の収集とGTK pluginの後にこのpluginを呼ぶので、wrapperはAppDirから上記libraryを削除して本来のpluginへ引数をそのまま渡す。AppImageの生成と署名は従来どおりTauriの1回のbuild内で完結する。環境変数`KUKURI_APPIMAGE_HOST_LIBRARIES`がない呼出し（同じcacheを使う他のTauri project）では何も削除しない。pluginを取得できない場合、Tauriは古い内蔵版へ切り替えるが、xtaskは同梱runtimeが変わるのを避けてbuildを止める。一覧とwrapperは`xtask/src/linuxdeploy.rs`と`xtask/src/appimage-output-wrapper.sh`に置く。
+
+生成後、xtaskはAppDirと、FUSEを使わず展開したAppImage本体の両方に上記libraryがないことを検査し、混入時は失敗する。
+
+修正前後の起動は、Fedoraのcontainer内でheadlessのWayland session（weston、Xwayland、software rendering）を使って比較できる。これはWebKitWebProcessのEGL初期化の確認であり、実GPUや実desktopでの表示確認の代替ではない。手順と観測は[#1222作業記録](../progress/2026-09-20-issue-1222-appimage-egl-white-screen.md)に置く。
 
 ## 確認と証跡
 

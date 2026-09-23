@@ -201,8 +201,6 @@
       "updatedNotice": "このノードはポリシーを更新しました。変更内容を確認し、再度同意すると接続を継続できます。",
       "noPolicies": "このノードは同意が必要なポリシーを持っていません。",
       "noBody": "このポリシーには本文がありません。",
-      "required": "必須",
-      "optional": "任意",
       "updatedBadge": "更新",
       "updatedDetail": "v{{previous}} から v{{current}} に更新されました。",
       "updatedContentDetail": "内容が更新されました。",
@@ -445,12 +443,16 @@
   "release": {
     "title": "リリース",
     "summary": "プレビューチャンネル、更新、診断、リソースです。",
+    "storeSummary": "Microsoft Store版の更新、診断、リソースです。",
     "update": {
       "title": "更新",
       "version": "バージョン",
       "channel": "チャンネル",
+      "storeChannel": "Microsoft Store",
       "manifest": "マニフェスト",
       "status": "状態",
+      "storeManagedStatus": "Microsoft Store が管理",
+      "storeManaged": "この版の更新は Microsoft Store が管理します。Store のライブラリと Windows の自動更新設定から最新版を取得できます。",
       "statuses": {
         "available": "更新あり",
         "checking": "確認中",
@@ -719,6 +721,28 @@
     "operationError": "別のアプリ操作でエラーが発生しました。現在の接続状態とは別の情報です。",
     "operationDetails": "操作エラーの詳細",
     "previousLabel": "{{state}}（前回の情報）"
+  },
+  "system": {
+    "title": "システム",
+    "summary": "メインウィンドウを閉じたときの動作を選びます。",
+    "windowCloseBehavior": "ウィンドウを閉じたとき",
+    "options": {
+      "ask": "毎回確認する",
+      "quit": "kukuriを終了する",
+      "tray": "タスクトレイに格納する"
+    },
+    "hint": "タスクトレイに格納すると、ウィンドウを閉じてもkukuriはバックグラウンドで動作します。トレイを利用できない場合は正常終了します。",
+    "saveError": "終了時の設定を保存できませんでした。以前の設定を維持しています。"
+  },
+  "windowClosePrompt": {
+    "title": "アプリケーションをタスクトレイに格納しますか？",
+    "description": "バックグラウンドで動作を続けるか、アプリケーションを終了するか選択してください。",
+    "remember": "以降同じ質問をしない",
+    "cancel": "キャンセル",
+    "tray": "タスクトレイに格納",
+    "quit": "kukuriを終了",
+    "pending": "終了中…",
+    "error": "選択を反映できませんでした。もう一度お試しください。"
   },
   "notifications": {
     "title": "通知",

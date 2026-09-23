@@ -1,4 +1,6 @@
 import type {
+  SessionCandidateView,
+  SessionDisplayRequest,
   AuthorSocialView,
   BlobMediaPayload,
   BookmarkedCustomReactionView,
@@ -62,7 +64,6 @@ import type {
   TimelineView,
   TrustUserReadResponse,
 } from '../types';
-
 // request DTO の生成型(WP-B6)。組み立てた literal を satisfies で拘束し、
 // Rust 側 DTO の変更を tsc で検出する。手書き types.ts の同名 shadow を避けるため
 // types.generated から直接 import する。
@@ -144,7 +145,7 @@ import type {
 import { invokeDesktop } from '../invoke/desktop';
 import { command } from '../invoke/dispatch';
 import { commitDomeLayoutRequest, resyncDomeSnapshotsRequest } from './domeHostingRequests';
-import { developerLogsApi, domeTransitionApi, socialBlockApi } from './apiModules';
+import { developerLogsApi, domeTransitionApi, postReloadApi, socialBlockApi } from './apiModules';
 
 export const runtimeApi: DesktopApi = {
   createPost: command('createPost', async (topic, content, replyTo, attachments = [], channelRef = { kind: 'public' }, contentLabels = []) => {
@@ -402,6 +403,10 @@ export const runtimeApi: DesktopApi = {
       request: { pubkey } satisfies DirectMessageRequest,
     });
   }),
+  listSessionCandidates: command('listSessionCandidates', async (topic, scope) =>
+    invokeDesktop<SessionCandidateView[]>('list_session_candidates', { request: { topic, scope } satisfies ListLiveSessionsRequest })),
+  setSessionDisplay: command('setSessionDisplay', async (request) =>
+    invokeDesktop<void>('set_session_display', { request: request satisfies SessionDisplayRequest })),
   listLiveSessions: command('listLiveSessions', async (topic, scope = { kind: 'public' }) => {
     return invokeDesktop<LiveSessionView[]>('list_live_sessions', {
       request: {
@@ -697,6 +702,7 @@ export const runtimeApi: DesktopApi = {
   ...domeTransitionApi,
   ...socialBlockApi,
   ...developerLogsApi,
+  ...postReloadApi,
   commitDomeLayout: command('commitDomeLayout', async (
     spatialContext,
     instanceId,

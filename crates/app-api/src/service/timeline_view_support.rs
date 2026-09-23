@@ -72,6 +72,15 @@ impl AppService {
         &self,
         page: Page<ObjectProjectionRow>,
     ) -> Result<TimelineView> {
+        self.page_to_view_with_policy(page, DocFetchPolicy::LocalThenRemote)
+            .await
+    }
+
+    pub(crate) async fn page_to_view_with_policy(
+        &self,
+        page: Page<ObjectProjectionRow>,
+        policy: DocFetchPolicy,
+    ) -> Result<TimelineView> {
         let local_author = self.current_author_pubkey();
         let mut author_pubkeys = BTreeSet::new();
         let mut targets_by_replica = BTreeMap::<String, Vec<EnvelopeId>>::new();
@@ -108,13 +117,20 @@ impl AppService {
         let mut items = Vec::with_capacity(page.items.len());
         for row in page.items {
             items.push(
-                self.row_to_view_with_cache(row, &profiles, &relationships, &reactions_by_target)
-                    .await?,
+                self.row_to_view_with_cache(
+                    row,
+                    &profiles,
+                    &relationships,
+                    &reactions_by_target,
+                    policy,
+                )
+                .await?,
             );
         }
         Ok(TimelineView {
             items,
             next_cursor: page.next_cursor,
+            unavailable_count: 0,
         })
     }
 
@@ -124,6 +140,7 @@ impl AppService {
         profiles: &HashMap<String, Profile>,
         relationships: &HashMap<String, AuthorRelationshipProjectionRow>,
         reactions_by_target: &HashMap<String, Vec<ReactionProjectionRow>>,
+        policy: DocFetchPolicy,
     ) -> Result<PostView> {
         let withdrawal = self
             .services
@@ -137,6 +154,8 @@ impl AppService {
         let repost_commentary = normalize_repost_commentary(row.content.clone());
         let content_status = if is_withdrawn || row.object_kind == "repost" {
             BlobViewStatus::Available
+        } else if row.content.is_none() && matches!(row.payload_ref, PayloadRef::BlobText { .. }) {
+            BlobViewStatus::Missing
         } else {
             blob_view_status_for_payload(self.services.blob_service.as_ref(), &row.payload_ref)
                 .await?
@@ -153,16 +172,17 @@ impl AppService {
         let repost_of = match (is_withdrawn, row.repost_of.clone()) {
             (true, _) => None,
             (false, Some(snapshot)) => Some(
-                self.repost_snapshot_to_view_with_profiles(snapshot, profiles)
+                self.repost_snapshot_to_view_with_profiles(snapshot, profiles, policy)
                     .await?,
             ),
             (false, None) => None,
         };
         let reply_preview = self
-            .reply_preview_for_object_id(
+            .reply_preview_for_object_id_with_policy(
                 row.reply_to_object_id.as_ref(),
-                Some(&row.source_replica_id),
+                Some((&row.source_replica_id, row.topic_id.as_str())),
                 profiles,
+                policy,
             )
             .await?;
         let audience_label = self
@@ -230,61 +250,27 @@ impl AppService {
         })
     }
 
-    pub(crate) async fn hydrate_reply_preview_row(
-        &self,
-        object_id: &EnvelopeId,
-        source_replica_id: Option<&ReplicaId>,
-    ) -> Result<Option<ObjectProjectionRow>> {
-        if let Some(row) = self
-            .services
-            .projection_store
-            .get_object_projection(object_id)
-            .await?
-        {
-            return Ok(Some(row));
-        }
-        let Some(source_replica_id) = source_replica_id else {
-            return Ok(None);
-        };
-        let source_key = stable_key("objects", &format!("{}/state", object_id.as_str()));
-        let Some(header) = fetch_post_object_for_projection(
-            self.services.docs_sync.as_ref(),
-            source_replica_id,
-            source_key.as_str(),
-        )
-        .await?
-        else {
-            return Ok(None);
-        };
-        let is_withdrawn = self
-            .services
-            .projection_store
-            .get_post_withdrawal(object_id)
-            .await?
-            .is_some();
-        let content = if is_withdrawn {
-            Some(String::new())
-        } else {
-            match &header.payload_ref {
-                PayloadRef::InlineText { text } => Some(text.clone()),
-                PayloadRef::BlobText { hash, .. } => {
-                    fetch_projection_blob_text(self.services.blob_service.as_ref(), hash).await
-                }
-            }
-        };
-        let row = projection_row_from_header(&header, content, source_replica_id);
-        self.services
-            .projection_store
-            .put_object_projection(row.clone())
-            .await?;
-        Ok(Some(row))
-    }
-
     pub(crate) async fn reply_preview_for_object_id(
         &self,
         object_id: Option<&EnvelopeId>,
-        source_replica_id: Option<&ReplicaId>,
+        source: Option<(&ReplicaId, &str)>,
         profiles: &HashMap<String, Profile>,
+    ) -> Result<Option<ReplyPreviewView>> {
+        self.reply_preview_for_object_id_with_policy(
+            object_id,
+            source,
+            profiles,
+            DocFetchPolicy::LocalThenRemote,
+        )
+        .await
+    }
+
+    pub(crate) async fn reply_preview_for_object_id_with_policy(
+        &self,
+        object_id: Option<&EnvelopeId>,
+        source: Option<(&ReplicaId, &str)>,
+        profiles: &HashMap<String, Profile>,
+        policy: DocFetchPolicy,
     ) -> Result<Option<ReplyPreviewView>> {
         let Some(object_id) = object_id else {
             return Ok(None);
@@ -296,11 +282,36 @@ impl AppService {
             .await?
             .is_some();
         let Some(row) = self
-            .hydrate_reply_preview_row(object_id, source_replica_id)
+            .reply_target_row(
+                object_id,
+                if policy == DocFetchPolicy::LocalOnly {
+                    None
+                } else {
+                    source
+                },
+            )
             .await?
         else {
             return Ok(None);
         };
+        // localな表示では、別scopeのcacheが返信先IDに一致しても本文を取り出さない。
+        if policy == DocFetchPolicy::LocalOnly {
+            let Some((replica, topic)) = source else {
+                return Ok(None);
+            };
+            let channel_matches = match kukuri_docs_sync::post_replica_kind(replica) {
+                Some(kukuri_docs_sync::PostReplicaKind::PublicTopic { .. }) => {
+                    row.channel_id == PUBLIC_CHANNEL_ID
+                }
+                Some(kukuri_docs_sync::PostReplicaKind::PrivateChannel { channel_id }) => {
+                    row.channel_id == channel_id
+                }
+                None => false,
+            };
+            if row.topic_id != topic || !channel_matches {
+                return Ok(None);
+            }
+        }
         let provenance = self
             .content_provenance_view("post", row.object_id.as_str(), "author_docs")
             .await?;
@@ -310,6 +321,14 @@ impl AppService {
             self.attachment_views_for_projection_row(&row).await?
         };
         inherit_post_observation_for_attachments(&mut attachments, provenance.as_ref());
+        let content_status = if is_withdrawn {
+            BlobViewStatus::Available
+        } else if row.content.is_none() && matches!(row.payload_ref, PayloadRef::BlobText { .. }) {
+            BlobViewStatus::Missing
+        } else {
+            blob_view_status_for_payload(self.services.blob_service.as_ref(), &row.payload_ref)
+                .await?
+        };
         let profile = match profiles.get(row.author_pubkey.as_str()) {
             Some(profile) => Some(profile.clone()),
             None => {
@@ -337,6 +356,7 @@ impl AppService {
             } else {
                 row.content.unwrap_or_else(|| "[blob pending]".to_string())
             },
+            content_status,
             attachments,
             content_labels: row.content_labels.clone(),
             root_id: row.root_object_id.map(|id| id.0),
@@ -351,24 +371,9 @@ impl AppService {
         if row.object_kind == "repost" {
             return Ok(Vec::new());
         }
-        if !row.attachments.is_empty() || row.projection_version >= 2 {
-            return attachment_views_from_refs(
-                self.services.blob_service.as_ref(),
-                &row.attachments,
-            )
-            .await;
-        }
-
-        let post_object = fetch_post_object_for_projection(
-            self.services.docs_sync.as_ref(),
-            &row.source_replica_id,
-            row.source_key.as_str(),
-        )
-        .await?;
-        if let Some(post_object) = post_object {
-            return attachment_views(self.services.blob_service.as_ref(), &post_object).await;
-        }
-        Ok(Vec::new())
+        // 添付は行から読む。添付の列が無い旧い行(`projection_version < 2`)を docs の `state` で補う fallback は、
+        // 未検証の値を表示するので削除した(#1248。旧い行は migration が消す)。
+        attachment_views_from_refs(self.services.blob_service.as_ref(), &row.attachments).await
     }
 
     pub(crate) async fn bookmarked_post_view_from_row(
@@ -435,7 +440,7 @@ impl AppService {
         let reply_preview = self
             .reply_preview_for_object_id(
                 row.reply_to_object_id.as_ref(),
-                Some(&row.source_replica_id),
+                Some((&row.source_replica_id, row.topic_id.as_str())),
                 &empty_profiles,
             )
             .await?;
@@ -495,13 +500,20 @@ impl AppService {
     }
 
     pub(crate) async fn profile_post_to_view(&self, profile_post: ProfilePost) -> Result<PostView> {
-        hydrate_post_withdrawals_from_replica(
-            self.services.docs_sync.as_ref(),
-            self.services.projection_store.as_ref(),
-            &topic_replica_id(profile_post.published_topic_id.as_str()),
-            DocFetchPolicy::LocalThenRemote,
-        )
-        .await?;
+        // #1239: view の生成中に docs を読まない。取り下げは projection の表だけで判定し、
+        // 購読していない topic の投稿の取り下げは、背景の上限つきの確認で追いつく。
+        self.schedule_withdrawal_check(
+            profile_post.published_topic_id.as_str(),
+            &profile_post.object_id,
+        );
+        // 返信先の preview も同じ topic の投稿で、取り下げの event が届かないことがある。
+        // 返信先の本文と添付を出し続けないよう、返信先の取り下げも確認する(ADR 0032 §2)。
+        if let Some(reply_to_object_id) = profile_post.reply_to_object_id.as_ref() {
+            self.schedule_withdrawal_check(
+                profile_post.published_topic_id.as_str(),
+                reply_to_object_id,
+            );
+        }
         let withdrawal = self
             .services
             .projection_store
@@ -527,7 +539,7 @@ impl AppService {
         let reply_preview = self
             .reply_preview_for_object_id(
                 profile_post.reply_to_object_id.as_ref(),
-                Some(&source_replica_id),
+                Some((&source_replica_id, profile_post.published_topic_id.as_str())),
                 &empty_profiles,
             )
             .await?;
@@ -608,13 +620,12 @@ impl AppService {
         &self,
         profile_repost: ProfileRepost,
     ) -> Result<PostView> {
-        hydrate_post_withdrawals_from_replica(
-            self.services.docs_sync.as_ref(),
-            self.services.projection_store.as_ref(),
-            &topic_replica_id(profile_repost.published_topic_id.as_str()),
-            DocFetchPolicy::LocalThenRemote,
-        )
-        .await?;
+        // #1239: view の生成中に docs を読まない。取り下げは projection の表だけで判定し、
+        // 購読していない topic の投稿の取り下げは、背景の上限つきの確認で追いつく。
+        self.schedule_withdrawal_check(
+            profile_repost.published_topic_id.as_str(),
+            &profile_repost.object_id,
+        );
         let withdrawal = self
             .services
             .projection_store
@@ -706,22 +717,28 @@ impl AppService {
             .store
             .get_profiles(&[snapshot.source_author_pubkey.as_str().to_string()])
             .await?;
-        self.repost_snapshot_to_view_with_profiles(snapshot, &profiles)
-            .await
+        self.repost_snapshot_to_view_with_profiles(
+            snapshot,
+            &profiles,
+            DocFetchPolicy::LocalThenRemote,
+        )
+        .await
     }
 
     pub(crate) async fn repost_snapshot_to_view_with_profiles(
         &self,
         snapshot: RepostSourceSnapshotV1,
         profiles: &HashMap<String, Profile>,
+        policy: DocFetchPolicy,
     ) -> Result<RepostSourceView> {
-        hydrate_post_withdrawals_from_replica(
-            self.services.docs_sync.as_ref(),
-            self.services.projection_store.as_ref(),
-            &topic_replica_id(snapshot.source_topic_id.as_str()),
-            DocFetchPolicy::LocalThenRemote,
-        )
-        .await?;
+        // #1239: view の生成中に docs を読まない。取り下げは projection の表だけで判定し、
+        // 購読していない topic の投稿の取り下げは、背景の上限つきの確認で追いつく。
+        if policy == DocFetchPolicy::LocalThenRemote {
+            self.schedule_withdrawal_check(
+                snapshot.source_topic_id.as_str(),
+                &snapshot.source_object_id,
+            );
+        }
         let is_withdrawn = self
             .services
             .projection_store

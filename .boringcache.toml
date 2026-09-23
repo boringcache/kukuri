@@ -7,17 +7,17 @@ metadata-hints = ["project=kukuri", "workflow=kukuri-fast"]
 # hashes, so the eight Linux jobs read each other's dependency objects instead
 # of each filling a private cache that the 10 GB allowance then evicts.
 [adapters.sccache]
-tag = "kukuri-fast-rust"
+tag = "kukuri-fast-rust-20260923"
 
 # Cargo download state is the same in every job: one Cargo.lock, one copy.
 [entries.cargo-registry-cache]
-tag = "kukuri-cargo-registry-cache"
+tag = "kukuri-cargo-registry-cache-20260923"
 
 [entries.cargo-registry-index]
-tag = "kukuri-cargo-registry-index"
+tag = "kukuri-cargo-registry-index-20260923"
 
 [entries.cargo-git-db]
-tag = "kukuri-cargo-git-db"
+tag = "kukuri-cargo-git-db-20260923"
 
 # Target directories stay separated per job exactly as shared-key separated
 # them, because each job compiles a different selection. They are no longer
@@ -25,46 +25,46 @@ tag = "kukuri-cargo-git-db"
 
 [entries.target-linux-rust-static]
 path = "target"
-tag = "kukuri-fast-linux-rust-static-target"
+tag = "kukuri-fast-linux-rust-static-target-20260923"
 
 [entries.target-linux-rust-tests]
 path = "target"
-tag = "kukuri-fast-linux-rust-tests-target"
+tag = "kukuri-fast-linux-rust-tests-target-20260923"
 
 [entries.target-linux-desktop-ui]
 path = "target"
-tag = "kukuri-fast-linux-desktop-ui-target"
+tag = "kukuri-fast-linux-desktop-ui-target-20260923"
 
 [entries.target-linux-desktop-browser]
 path = "target"
-tag = "kukuri-fast-linux-desktop-browser-target"
+tag = "kukuri-fast-linux-desktop-browser-target-20260923"
 
 [entries.target-linux-cn]
 path = "target"
-tag = "kukuri-fast-linux-cn-target"
+tag = "kukuri-fast-linux-cn-target-20260923"
 
 [entries.target-linux-cn-e2e]
 path = "target"
-tag = "kukuri-fast-linux-cn-e2e-target"
+tag = "kukuri-fast-linux-cn-e2e-target-20260923"
 
 [entries.target-linux-smoke]
 path = "target"
-tag = "kukuri-fast-linux-smoke-target"
+tag = "kukuri-fast-linux-smoke-target-20260923"
 
 [entries.target-linux-community-node]
 path = "target"
-tag = "kukuri-fast-linux-community-node-target"
+tag = "kukuri-fast-linux-community-node-target-20260923"
 
 [entries.target-windows-fast]
 path = "target"
-tag = "kukuri-fast-windows-fast-target"
+tag = "kukuri-fast-windows-fast-target-20260923"
 
 # apps/desktop/src-tauri is excluded from the root workspace and keeps its own
 # target directory. Only desktop-package builds it, so only windows-fast carries
 # it. The finished installer is a job artifact, not reusable compiler state.
 [entries.desktop-tauri-target]
 path = "apps/desktop/src-tauri/target"
-tag = "kukuri-fast-desktop-tauri-target"
+tag = "kukuri-fast-desktop-tauri-target-20260923"
 exclude = ["**/bundle"]
 
 [profiles.linux-rust-static]

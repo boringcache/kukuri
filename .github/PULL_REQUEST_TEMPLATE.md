@@ -4,7 +4,7 @@
 
 ## 対象と条件
 
-<!-- 正本は docs/runbooks/issue-lifecycle.md。非該当の欄・節は削除してよい。
+<!-- AGENTS.mdの作業原則・設計原則を適用し、手順はdocs/runbooks/issue-lifecycle.mdに従う。非該当欄は削除してよい。
 必要な検証の未実行・失敗・例外は削除しない。詳細がrepositoryにあればリンクする。
 区分Cは自動Close文言を使わず Refs を使い、PR headの独立監査PASSと必須CIの成功後にマージする。 -->
 
@@ -12,6 +12,7 @@
 - リスク区分・Scope revision・基準commit:
 - 変更path・対象外:
 - AC / INVARと差分・検証証跡の対応:
+- 統合・置換・削除した処理と、完成後に残るコードの必要性:
 - B/C: inventoryの探索方法、変更前後、未分類件数・状態遷移:
 - C: sensitive sinkとshared helperの全caller確認:
 
@@ -37,7 +38,8 @@
 
 ## 検証とリスク
 
-<!-- path別必須validationはREFACTORING.md。CI成功だけをAC網羅の証拠にしない。 -->
+<!-- ローカルは変更関連箇所、全体確認はPR CI。REFACTORING.mdから必要な検証を選ぶ。
+CI成功だけをAC達成の証拠にしない。未依頼のエッジケースを追加しない。 -->
 
 - 実行command・結果:
 - 未実行・中断・失敗と理由、補完方法:
@@ -47,7 +49,7 @@
 
 ## 独立監査
 
-<!-- 必要な場合だけ残す。正本はissue-lifecycle.md。Cは必須、Bは親Issue・再Open・shared guardを含む場合に必要。
+<!-- 必要な場合だけ残す。Cは固定条件の独立監査を行い、Bは計画時に必要性を定める。
 対象commit、Scope revision、inventoryの合計/適合/不適合/未分類、AC/INVAR evidence、validation、blocker、non-blocker、PASS/FAIL/INCONCLUSIVEを記録した監査へリンクする。監査後の変更はdeltaを再監査する。 -->
 
 - 監査記録・対象commit・判定:

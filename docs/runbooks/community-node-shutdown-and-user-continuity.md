@@ -1,6 +1,6 @@
 # Community Node Shutdown と User Continuity
 
-最終更新日: 2026-06-19
+最終更新日: 2026-09-24
 
 ## この文書の位置づけ
 
@@ -19,7 +19,7 @@ kukuri の community node は Mastodon 的な home server ではなく、P2P-fir
 ## 0. 大原則: node 停止は user の存在を終わらせない
 
 - user を識別する canonical source は **user 自身の鍵**であり、いずれかの community node ではない。
-- ある community node が停止・消失しても、**user identity / signed profile / social graph は失われない**。別の node や直接 P2P 経路から引き続き参照・再構築できる。
+- nodeの停止はuser identityの失効や、端末に保存済みのprofile / social graphの削除を意味しない。未取得データの再取得は、提供するpeerや保持状態に依存する。ネットワーク上に必ずcopyがあることや全履歴の復元は保証しない。
 - したがって community node を「アカウントの所在地」「退会先」「凍結権者」として停止設計してはならない。停止するのは node が提供していた**補助 capability** だけである。
 
 ## 1. User side: 停止後も残るもの / 失われ得るもの
@@ -29,16 +29,15 @@ kukuri の community node は Mastodon 的な home server ではなく、P2P-fir
 | 項目 | 理由 |
 |---|---|
 | user identity（鍵） | user の鍵に紐づく。node に属さない。 |
-| signed profile | author docs + signed envelope が canonical source。node は truth source ではない。 |
-| social graph / follow edges | author docs から再構築できる public graph state。 |
+| 取得済みsigned profile | author docs + signed envelopeが正本。端末のcopyはnode停止で消えないが、欠損分の再取得は提供元に依存する。 |
+| 取得済みsocial graph / follow edges | 端末にある署名済みstateを利用する。未取得の全edgeを揃える保証はない。 |
 | local cache / local projection | client ローカルに保持される。 |
-| author docs から再構築できる public graph state | P2P network / 他 node から再取得できる。 |
 
-これらは停止した node に依存しない。client は別 node / 直接 P2P 経路から継続利用・再構築できる。
+必要な対象の欠損分だけを、利用者が選んだ別nodeや到達可能なpeerから取得する。全author・全topicの走査や再同期の完了を継続利用の前提にしない。本人性の復元には本人の鍵、端末データの移行にはバックアップを使う。
 
 ### 停止で失われ得るもの（capability 別）
 
-node-local な補助 capability は、その node の停止で利用できなくなる。ただし上記の canonical state は失われない。
+node-local な補助 capability は、その node の停止で利用できなくなる。端末の保持済みデータとは区別し、nodeだけが持っていた情報や到達不能なcopyの再取得は保証しない。
 
 | capability | 停止時の影響 | user から見た代替 |
 |---|---|---|
@@ -50,18 +49,20 @@ node-local な補助 capability は、その node の停止で利用できなく
 | node-local trust signals | この node の trust signal が参照できなくなる | 別 node の signal（optional trust input） |
 | node-local media cache | この node の cache 経由の媒体配信が止まる | 原本 blob / 別 cache node |
 
-重要: これらはいずれも **node-local な補助出力**であり、停止しても user の identity / profile / social graph という canonical state には影響しない。moderation labels / trust signals は元々 optional trust input（`docs/adr/0027-deterministic-moderation-critical-safety.md` §2.1）であり、network-wide な認定ではない。そもそも network-wide な認定は P2P 基盤上に中央権者が存在しないため構造的に成立し得ない。
+重要: これらはいずれも **node-local な補助出力**であり、停止によってuserの鍵や端末の保持済みstateを削除するものではない。moderation labels / trust signals は元々 optional trust input（`docs/adr/0027-deterministic-moderation-critical-safety.md` §2.1）であり、network-wide な認定ではない。そもそも network-wide な認定は P2P 基盤上に中央権者が存在しないため構造的に成立し得ない。
 
 ## 2. Operator side: 安全な停止手順
 
+停止対象のnode・capability、停止日時、保持するデータと削除対象、確認方法を先に固定する。対象サービスの停止、残す資料・連絡先と保持期限の記録で本作業を終え、全peerへの通知到達や全データ移転を完了条件にしない。
+
 ### 推奨手順（順序）
 
-1. **shutdown notice を出す**（後述の manifest shutdown notice）。client が影響 capability と停止予定を事前に表示できるようにする。
+1. **停止予定と影響するcapabilityを案内する**。利用可能な公開文書・連絡経路を使う。後述のmanifest案や追加client UIの実装をnode停止の前提にしない。
 2. **public listing / default listing からの撤退**。default-onboarding-node に登録されている場合は、その登録元から外す手続きを行う（network 全体を統治する中央権者は構造的に存在せず、この node も network-wide authority ではないため、外しても network は継続する）。
 3. **capability を段階的に停止**する。利用者影響の小さいものから順に止めるとよい。各 capability の停止方針:
    - auth / consent: 新規 token 発行を止める。既存 token は失効まで有効。
    - bootstrap assist: heartbeat 受付を止め、bootstrap node 一覧から外す。
-   - relay assist / traffic relay fallback: relay 受付を止める。進行中接続は直接 P2P / 別 relay へ自然 fallback する。
+   - relay assist / traffic relay fallback: relay 受付を止める。直接P2Pや別relayへの再接続が可能か確認する。代替先がなければ未接続のままとなる。
    - topic rendezvous: rendezvous 受付を止める。
    - community index / moderation / trust signal: 新規 index / event 発行を止める。既存 signed moderation event は配布物として残せる。
    - report endpoint: 通報受付を止める。abuse contact は最終窓口として案内を残すか、shutdown notice に移行先を記載する。
@@ -77,7 +78,7 @@ node-local な補助 capability は、その node の停止で利用できなく
 
 ## 3. Manifest shutdown notice の形
 
-manifest に shutdown notice を載せ、client が事前・事中に影響を表示できるようにする。提案する形:
+以下はmanifest拡張の提案であり、現在の配布物に対応があるとは扱わない。採用は明示的な機能変更として対象と受入条件を別途定める。node停止作業から自動的に実装対象へ追加しない。提案する形:
 
 ```json
 {
@@ -96,11 +97,11 @@ manifest に shutdown notice を載せ、client が事前・事中に影響を�
 - `affected_capabilities`: 停止対象の capability キー（manifest の capability scope と同じ語彙）。
 - `alternative_nodes`: 任意。client が代替 node 追加導線に使える候補。強制ではなく参考。
 
-shutdown notice は manifest の他フィールド同様 unauthenticated に取得できる（public manifest endpoint）。private secret は含めない。
+採用時はpublic manifestから取得する公開情報として扱い、private secretを含めない。
 
 ## 4. Client UX
 
-client は manifest の shutdown notice と capability scope（client settings の node 依存度表示）を使って、次を行う。
+次は前節の拡張を採用する場合のUX案であり、現行機能の完了報告や停止作業の追加条件にはしない。
 
 - settings の node dependency 表示に **affected capabilities** と shutdown status / effective_at を表示する。
 - manifest の **shutdown notice message** を表示する。

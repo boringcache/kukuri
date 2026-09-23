@@ -145,6 +145,24 @@ pub(crate) async fn persist_media_manifest(
     Ok(())
 }
 
+/// live session・game room の署名つき envelope を、state と同じ replica の `envelopes/<envelope id>` へ置く(#1252)。
+pub(crate) async fn persist_session_envelope(
+    docs_sync: &dyn DocsSync,
+    replica: &ReplicaId,
+    envelope: &KukuriEnvelope,
+) -> Result<()> {
+    docs_sync.open_replica(replica).await?;
+    docs_sync
+        .apply_doc_op(
+            replica,
+            DocOp::SetJson {
+                key: stable_key("envelopes", envelope.id.as_str()),
+                value: serde_json::to_value(envelope)?,
+            },
+        )
+        .await
+}
+
 pub(crate) async fn persist_live_session_state(
     docs_sync: &dyn DocsSync,
     replica: &ReplicaId,
@@ -491,22 +509,6 @@ pub(crate) fn projection_blob_status_timeout() -> tokio::time::Duration {
     }
 }
 
-pub(crate) fn session_projection_retry_attempts() -> usize {
-    if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
-        20
-    } else {
-        10
-    }
-}
-
-pub(crate) fn session_projection_retry_delay() -> tokio::time::Duration {
-    if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
-        tokio::time::Duration::from_millis(500)
-    } else {
-        tokio::time::Duration::from_millis(250)
-    }
-}
-
 pub(crate) async fn fetch_projection_blob_text(
     blob_service: &dyn BlobService,
     hash: &kukuri_core::BlobHash,
@@ -522,13 +524,19 @@ pub(crate) async fn fetch_projection_blob_text(
     }
 }
 
+/// 表示用 projection に記録する blob の状態。ローカルの有無だけを見て、remote から取得しない。
+///
+/// #1152: 投稿の添付は受信・hydration の時点では成人向け advisory が未判明のため、ここで取得すると
+/// 表示設定 OFF の取得ゲート（ADR 0046 §4 / §6.2、`blob_media_payload`）を迂回して bytes を
+/// 永続化してしまう。remote 取得はゲートを持つ表示要求（`blob_media_payload`）と本文取得
+/// （`fetch_projection_blob_text`）に限る。
 pub(crate) async fn best_effort_blob_cache_status(
     blob_service: &dyn BlobService,
     hash: &kukuri_core::BlobHash,
 ) -> BlobCacheStatus {
     match tokio::time::timeout(
         projection_blob_status_timeout(),
-        blob_service.blob_status(hash),
+        blob_service.local_blob_status(hash),
     )
     .await
     {
@@ -537,13 +545,14 @@ pub(crate) async fn best_effort_blob_cache_status(
     }
 }
 
+/// view に載せる blob の状態。`best_effort_blob_cache_status` と同じく remote から取得しない（#1152）。
 pub(crate) async fn best_effort_blob_view_status(
     blob_service: &dyn BlobService,
     hash: &kukuri_core::BlobHash,
 ) -> BlobViewStatus {
     match tokio::time::timeout(
         projection_blob_status_timeout(),
-        blob_service.blob_status(hash),
+        blob_service.local_blob_status(hash),
     )
     .await
     {
@@ -552,49 +561,14 @@ pub(crate) async fn best_effort_blob_view_status(
     }
 }
 
-pub(crate) async fn fetch_live_session_state_from_replica(
-    docs_sync: &dyn DocsSync,
-    replica: &ReplicaId,
-    session_id: &str,
-) -> Result<Option<LiveSessionStateDocV1>> {
-    let records = docs_sync
-        .query_replica(
-            replica,
-            DocQuery::Exact(stable_key("sessions/live", &format!("{session_id}/state"))),
-        )
-        .await?;
-    let Some(record) = records.into_iter().next() else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::from_slice(&record.value)?))
-}
-
-pub(crate) async fn fetch_game_room_state_from_replica(
-    docs_sync: &dyn DocsSync,
-    replica: &ReplicaId,
-    room_id: &str,
-) -> Result<Option<GameRoomStateDocV1>> {
-    let records = docs_sync
-        .query_replica(
-            replica,
-            DocQuery::Exact(stable_key("sessions/game", &format!("{room_id}/state"))),
-        )
-        .await?;
-    let Some(record) = records.into_iter().next() else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::from_slice(&record.value)?))
-}
-
-pub(crate) fn live_projection_row_from_state(
-    state: &LiveSessionStateDocV1,
-    manifest: &LiveSessionManifestBlobV1,
-    topic_id: &str,
-    source_replica_id: &ReplicaId,
-) -> LiveSessionProjectionRow {
+/// 行は検証済みの live session からしか作れない(#1252)。
+pub(crate) fn live_projection_row(verified: &VerifiedLiveSession) -> LiveSessionProjectionRow {
+    let state = verified.state();
+    let manifest = verified.manifest();
     LiveSessionProjectionRow {
         session_id: state.session_id.clone(),
-        topic_id: topic_id.to_string(),
+        revision: manifest.revision,
+        topic_id: verified.topic_id().to_string(),
         channel_id: channel_storage_id(state.channel_id.as_ref()),
         host_pubkey: state.owner_pubkey.as_str().to_string(),
         title: manifest.title.clone(),
@@ -603,24 +577,23 @@ pub(crate) fn live_projection_row_from_state(
         started_at: manifest.started_at,
         ended_at: manifest.ended_at,
         updated_at: state.updated_at,
-        source_replica_id: source_replica_id.clone(),
+        source_replica_id: verified.replica().clone(),
         source_key: stable_key("sessions/live", &format!("{}/state", state.session_id)),
         manifest_blob_hash: state.current_manifest.hash.clone(),
         derived_at: Utc::now().timestamp_millis(),
-        projection_version: 1,
+        projection_version: kukuri_store::VERIFIED_SESSION_PROJECTION_VERSION,
         viewer_count: 0,
     }
 }
 
-pub(crate) fn game_projection_row_from_state(
-    state: &GameRoomStateDocV1,
-    manifest: &GameRoomManifestBlobV1,
-    topic_id: &str,
-    source_replica_id: &ReplicaId,
-) -> GameRoomProjectionRow {
+/// 行は検証済みの game room からしか作れない(#1252)。
+pub(crate) fn game_projection_row(verified: &VerifiedGameRoom) -> GameRoomProjectionRow {
+    let state = verified.state();
+    let manifest = verified.manifest();
     GameRoomProjectionRow {
         room_id: state.room_id.clone(),
-        topic_id: topic_id.to_string(),
+        score_revision: manifest.score_revision,
+        topic_id: verified.topic_id().to_string(),
         channel_id: channel_storage_id(state.channel_id.as_ref()),
         host_pubkey: state.owner_pubkey.as_str().to_string(),
         title: manifest.title.clone(),
@@ -631,19 +604,22 @@ pub(crate) fn game_projection_row_from_state(
         room_kind: manifest.room_kind.clone(),
         metaverse: manifest.metaverse.clone(),
         updated_at: state.updated_at,
-        source_replica_id: source_replica_id.clone(),
+        source_replica_id: verified.replica().clone(),
         source_key: stable_key("sessions/game", &format!("{}/state", state.room_id)),
         manifest_blob_hash: state.current_manifest.hash.clone(),
         derived_at: Utc::now().timestamp_millis(),
-        projection_version: 1,
+        projection_version: kukuri_store::VERIFIED_SESSION_PROJECTION_VERSION,
     }
 }
 
-pub(crate) fn projection_row_from_header(
-    header: &CanonicalPostHeader,
+/// 投稿の行は、検証済みの投稿(`VerifiedPost`)からしか作れない(#1248)。docs の `state` の値から行を作る経路を
+/// 型で塞ぐ。
+pub(crate) fn projection_row_from_post(
+    post: &VerifiedPost,
     content: Option<String>,
-    source_replica_id: &ReplicaId,
 ) -> ObjectProjectionRow {
+    let header = post.header();
+    let source_replica_id = post.replica();
     let source_blob_hash = match &header.payload_ref {
         PayloadRef::BlobText { hash, .. } => Some(hash.clone()),
         PayloadRef::InlineText { .. } => None,
@@ -666,15 +642,16 @@ pub(crate) fn projection_row_from_header(
         source_key: stable_key("objects", &format!("{}/state", header.object_id.as_str())),
         source_envelope_id: header.envelope_id.clone(),
         source_blob_hash,
+        source_docs_author: post.docs_author().map(str::to_string),
         derived_at: Utc::now().timestamp_millis(),
-        projection_version: 2,
+        projection_version: kukuri_store::VERIFIED_OBJECT_PROJECTION_VERSION,
     }
 }
 
-pub(crate) fn reaction_projection_row_from_doc(
-    reaction: &ReactionDocV1,
-    source_replica_id: &ReplicaId,
-) -> ReactionProjectionRow {
+/// 行は検証済みの reaction からしか作れない(#1252)。
+pub(crate) fn reaction_projection_row(verified: &VerifiedReaction) -> ReactionProjectionRow {
+    let reaction = verified.doc();
+    let source_replica_id = verified.replica();
     ReactionProjectionRow {
         source_replica_id: source_replica_id.clone(),
         target_object_id: reaction.target_object_id.clone(),
@@ -698,7 +675,7 @@ pub(crate) fn reaction_projection_row_from_doc(
         ),
         source_envelope_id: reaction.envelope_id.clone(),
         derived_at: Utc::now().timestamp_millis(),
-        projection_version: 1,
+        projection_version: kukuri_store::VERIFIED_REACTION_PROJECTION_VERSION,
     }
 }
 

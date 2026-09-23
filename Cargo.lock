@@ -2599,8 +2599,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460de6bc52163b41b1646931f2897e5ab986f0966ade444467fec25024751a72"
+source = "git+https://github.com/n0-computer/iroh?rev=adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155#adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155"
 dependencies = [
  "axum",
  "backon",
@@ -2651,8 +2650,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6be73e16ee21c923aca9b3121aaa0db936f7c7ecc156ff47b8dac944c68d59a8"
+source = "git+https://github.com/n0-computer/iroh?rev=adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155#adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2711,8 +2709,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46f6a9b39d18e6345f5c151afd299f2488e2cb5c520fe41b107b6bd3dc4c3349"
+source = "git+https://github.com/n0-computer/iroh?rev=adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155#adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2735,8 +2732,7 @@ dependencies = [
 [[package]]
 name = "iroh-docs"
 version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd1bd5e39d0321a3c4a2bcef9650476c076e2df41a0e84577eca23d6de6c8ab"
+source = "git+https://github.com/n0-computer/iroh-docs?rev=e7233d14853cb4db9966e30050bac1e689cdeec8#e7233d14853cb4db9966e30050bac1e689cdeec8"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2775,8 +2771,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e1dc4b05f73e7a1b9e83b531eb63c3fd671b0af3aeb13b59c546dd7ca747515"
+source = "git+https://github.com/n0-computer/iroh-gossip?rev=c42f40a1346200ae2b18d41596a2a8a02047e600#c42f40a1346200ae2b18d41596a2a8a02047e600"
 dependencies = [
  "blake3",
  "bytes",
@@ -2868,8 +2863,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24bd586cf927f7b700f56ec3639b53cb5fa901ce284784051ff71092bfbf8193"
+source = "git+https://github.com/n0-computer/iroh?rev=adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155#adf5b0e0a5f36f73f11934bcbf2f4ce04ccd4155"
 dependencies = [
  "blake3",
  "bytes",
@@ -3133,7 +3127,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-app-api"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3165,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-blob-service"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3183,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cli"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3204,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-cli"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3230,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-core"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3266,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-e2e"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3299,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-indexer"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3331,11 +3325,12 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-iroh-relay"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "iroh-relay",
  "kukuri-cn-runtime-support",
+ "kukuri-transport",
  "rcgen",
  "rustls",
  "tempfile",
@@ -3345,7 +3340,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-operator"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3363,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-protocol"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "kukuri-cn-safety",
@@ -3376,14 +3371,14 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-runtime-support"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "kukuri-cn-safety"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "kukuri-cn-safety",
@@ -3396,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-safety-arachnid"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "kukuri-cn-safety",
@@ -3411,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-safety-openai"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3429,7 +3424,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-safety-runtime"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3448,7 +3443,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-safety-video"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "hex",
@@ -3464,7 +3459,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-safety-vlm"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3480,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-trust"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3495,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-cn-user-api"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -3513,6 +3508,7 @@ dependencies = [
  "kukuri-core",
  "kukuri-metaverse-host",
  "kukuri-test-support",
+ "kukuri-transport",
  "redis",
  "reqwest 0.13.4",
  "serde",
@@ -3531,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-core"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3552,7 +3548,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-desktop-runtime"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3591,7 +3587,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-docs-sync"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3616,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-harness"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -3643,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-iroh-node"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -3653,6 +3649,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-docs",
  "iroh-gossip",
+ "kukuri-core",
  "kukuri-transport",
  "serde",
  "serde_json",
@@ -3663,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-metaverse-host"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "kukuri-core",
@@ -3674,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-store"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3691,7 +3688,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-test-support"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "thiserror 2.0.20",
@@ -3700,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "kukuri-transport"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3711,8 +3708,11 @@ dependencies = [
  "iroh-gossip",
  "iroh-mainline-address-lookup",
  "kukuri-core",
+ "n0-future",
  "n0-mainline",
  "pkarr",
+ "postcard",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "tokio",
@@ -8150,7 +8150,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

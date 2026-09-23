@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -61,11 +61,51 @@ pub(crate) fn desktop_package() -> Result<()> {
             "[xtask] TAURI_SIGNING_PRIVATE_KEY is not set; building installer without updater artifacts"
         );
     }
-    run_pnpm(args, &desktop_dir())?;
     if cfg!(target_os = "linux") {
+        // Tauri bundlerには同梱除外の設定がないため、AppImage出力の直前で除く（#1222）。
+        crate::linuxdeploy::install_wrapper()?;
+        let host_libraries = crate::linuxdeploy::host_libraries_env_value();
+        run_pnpm_with_env(
+            args,
+            &desktop_dir(),
+            &[(crate::linuxdeploy::HOST_LIBRARIES_ENV, &host_libraries)],
+        )?;
         crate::appimage::verify_package()?;
+    } else {
+        run_pnpm(args, &desktop_dir())?;
     }
     Ok(())
+}
+
+pub(crate) fn windows_store_package(args: impl Iterator<Item = String>) -> Result<()> {
+    if !cfg!(target_os = "windows") {
+        bail!("windows-store-package requires a Windows host");
+    }
+    let mut script_args = vec![
+        "-NoProfile".to_string(),
+        "-File".to_string(),
+        root_dir()
+            .join("scripts")
+            .join("release")
+            .join("build-windows-store-msix.ps1")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--allow-dirty" => script_args.push("-AllowDirty".to_string()),
+            "--output" => {
+                let value = args
+                    .next()
+                    .with_context(|| format!("{arg} requires a value"))?;
+                script_args.push("-OutputDirectory".to_string());
+                script_args.push(value);
+            }
+            _ => bail!("unsupported windows-store-package flag: {arg}"),
+        }
+    }
+    run("pwsh", script_args, &root_dir())
 }
 
 fn desktop_package_args(os: &str, signed: bool) -> Result<Vec<String>> {
@@ -120,6 +160,25 @@ mod package_tests {
     #[test]
     fn unsupported_package_host_is_rejected() {
         assert!(desktop_package_args("macos", true).is_err());
+    }
+
+    #[test]
+    fn store_manifest_fixes_the_partner_center_identity() {
+        let manifest = std::fs::read_to_string(
+            root_dir().join("apps/desktop/src-tauri/windows/store/Package.appxmanifest"),
+        )
+        .expect("Store manifest exists");
+        for expected in [
+            r#"Name="KingYoSun.kukuri""#,
+            r#"Publisher="CN=33EB763C-4859-4E44-886F-1784E16DD6D5""#,
+            // Packaging replaces this sentinel with the derived app version.
+            r#"Version="0.0.0.0""#,
+            r#"ProcessorArchitecture="x64""#,
+            r#"<uap:Protocol Name="kukuri" />"#,
+            r#"<rescap:Capability Name="runFullTrust" />"#,
+        ] {
+            assert!(manifest.contains(expected), "missing {expected}");
+        }
     }
 
     #[test]

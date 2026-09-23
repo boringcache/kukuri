@@ -3,13 +3,24 @@ use kukuri_core::{BlobHash, ChannelAudienceKind, CreatePrivateChannelInput, Kuku
 use std::collections::HashMap;
 
 #[derive(Clone, Default)]
-struct CountingDocsSync {
+pub(super) struct CountingDocsSync {
     inner: kukuri_docs_sync::MemoryDocsSync,
     queries: Arc<TokioMutex<Vec<(String, DocQuery)>>>,
+    restarts: Arc<TokioMutex<Vec<String>>>,
+    /// query が返した record(または key)の総数。replica の大きさに比例する読み出しを検出する。
+    records_returned: Arc<std::sync::atomic::AtomicUsize>,
     assist_peer_ids: Vec<String>,
 }
 
 impl CountingDocsSync {
+    /// 書き込みの名義(docs author)を持つ docs(ADR 0053)。
+    fn with_docs_author(docs_author: &str) -> Self {
+        Self {
+            inner: kukuri_docs_sync::MemoryDocsSync::with_docs_author(docs_author),
+            ..Self::default()
+        }
+    }
+
     fn with_assist_peer_ids(peer_ids: Vec<&str>) -> Self {
         Self {
             assist_peer_ids: peer_ids.into_iter().map(str::to_string).collect(),
@@ -17,12 +28,36 @@ impl CountingDocsSync {
         }
     }
 
-    async fn clear_queries(&self) {
+    pub(super) async fn clear_queries(&self) {
         self.queries.lock().await.clear();
     }
 
-    async fn queries(&self) -> Vec<(String, DocQuery)> {
+    pub(super) async fn queries(&self) -> Vec<(String, DocQuery)> {
         self.queries.lock().await.clone()
+    }
+
+    /// replica 全件走査(`objects/` の prefix 読み)の回数。
+    async fn object_scans(&self) -> usize {
+        self.queries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, query)| *query == DocQuery::Prefix("objects/".into()))
+            .count()
+    }
+
+    async fn restarts(&self) -> usize {
+        self.restarts.lock().await.len()
+    }
+
+    pub(super) fn records_returned(&self) -> usize {
+        self.records_returned
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn reset_records_returned(&self) {
+        self.records_returned
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -60,7 +95,58 @@ impl DocsSync for CountingDocsSync {
             .lock()
             .await
             .push((replica_id.as_str().to_string(), query.clone()));
-        self.inner.query_replica(replica_id, query).await
+        let records = self.inner.query_replica(replica_id, query).await?;
+        self.records_returned
+            .fetch_add(records.len(), std::sync::atomic::Ordering::SeqCst);
+        Ok(records)
+    }
+
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        let page = self.inner.query_replica_keys(replica_id, query).await?;
+        self.records_returned
+            .fetch_add(page.entries.len(), std::sync::atomic::Ordering::SeqCst);
+        Ok(page)
+    }
+
+    async fn query_replica_keys_by_author(
+        &self,
+        replica_id: &ReplicaId,
+        docs_author: &str,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        let page = self
+            .inner
+            .query_replica_keys_by_author(replica_id, docs_author, query)
+            .await?;
+        self.records_returned
+            .fetch_add(page.entries.len(), std::sync::atomic::Ordering::SeqCst);
+        Ok(page)
+    }
+
+    async fn local_docs_author(&self) -> Result<Option<String>> {
+        self.inner.local_docs_author().await
+    }
+
+    async fn query_replica_by_author(
+        &self,
+        replica_id: &ReplicaId,
+        docs_author: &str,
+        key: &str,
+        policy: kukuri_docs_sync::DocFetchPolicy,
+    ) -> Result<Option<kukuri_docs_sync::DocRecord>> {
+        let record = self
+            .inner
+            .query_replica_by_author(replica_id, docs_author, key, policy)
+            .await?;
+        self.records_returned.fetch_add(
+            usize::from(record.is_some()),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        Ok(record)
     }
 
     async fn subscribe_replica(
@@ -76,6 +162,14 @@ impl DocsSync for CountingDocsSync {
 
     async fn assist_peer_ids(&self) -> Result<Vec<String>> {
         Ok(self.assist_peer_ids.clone())
+    }
+
+    async fn restart_replica_sync(&self, replica_id: &ReplicaId) -> Result<()> {
+        self.restarts
+            .lock()
+            .await
+            .push(replica_id.as_str().to_string());
+        Ok(())
     }
 }
 
@@ -121,6 +215,14 @@ impl DocsSync for HangingRemoteOnMissDocsSync {
         Ok(records)
     }
 
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        self.inner.query_replica_keys(replica_id, query).await
+    }
+
     async fn subscribe_replica(
         &self,
         replica_id: &ReplicaId,
@@ -150,6 +252,26 @@ impl DelayedBlobService {
 
 #[async_trait]
 impl BlobService for DelayedBlobService {
+    async fn prepare_display_fetch(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::DisplayBlobFetch> {
+        let blobs = self.clone();
+        let hash = hash.clone();
+        Ok(Box::pin(async move { blobs.fetch_blob(&hash).await }))
+    }
+    async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        if self
+            .remaining_misses
+            .lock()
+            .await
+            .get(hash.as_str())
+            .is_some_and(|n| *n > 0)
+        {
+            return Ok(None);
+        }
+        self.inner.fetch_local_blob(hash).await
+    }
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(data, mime).await
     }
@@ -183,6 +305,21 @@ impl BlobService for DelayedBlobService {
             return Ok(BlobStatus::Missing);
         }
         self.inner.blob_status(hash).await
+    }
+
+    async fn local_blob_status(&self, hash: &BlobHash) -> Result<BlobStatus> {
+        if self
+            .remaining_misses
+            .lock()
+            .await
+            .get(hash.as_str())
+            .copied()
+            .unwrap_or_default()
+            > 0
+        {
+            return Ok(BlobStatus::Missing);
+        }
+        self.inner.local_blob_status(hash).await
     }
 
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
@@ -281,9 +418,42 @@ fn app_with_hanging_remote_docs(
     )
 }
 
+mod author_docs_author;
+mod author_key_reflection;
+mod bucket_integrity;
 mod diagnostics;
+mod docs_author_reads;
 mod gossip_toggle;
 mod hint_rehydration;
+mod hydration_integrity;
+mod hydration_integrity_contract;
+mod hydration_integrity_sessions;
+mod hydration_integrity_sessions_contract;
+mod hydration_limits;
+#[cfg(feature = "iroh-integration-tests")]
+mod non_utf8_key;
+mod page_bounds;
+mod profile_index;
+mod profile_index_attacks;
+mod profile_index_stranger;
+mod range_reconcile;
+mod range_reconcile_access;
+mod range_reconcile_faults;
+mod range_reconcile_ledger;
+mod range_reconcile_reactions;
+mod range_reconcile_walk;
+mod reply_target_background;
+mod scale_counts;
+mod scale_independence;
+mod session_catch_up;
+mod session_event_progress;
+mod session_manifest_fetch;
+mod shadowing_docs;
+pub(super) use shadowing_docs::ShadowingDocsSync;
+mod subscription_catch_up;
 mod subscription_restarts;
 #[cfg(feature = "iroh-integration-tests")]
 mod transport_replication;
+mod unavailable_range;
+mod withdrawal_record_selection;
+mod withdrawal_reflection;

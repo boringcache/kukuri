@@ -182,6 +182,17 @@ impl IndexerWorker {
                                 }
                             }
                         }
+                        // heartbeat registration can change between full passes. Refresh once for
+                        // the whole debounce batch so docs and blob fetches can reach the authoring
+                        // peer before any changed object is ingested.
+                        if let Err(error) = self.participant.refresh_seed_peers().await {
+                            warn!(
+                                error = %format!("{error:#}"),
+                                "failed to refresh seed peers before event ingest; will retry"
+                            );
+                            self.state.record_error(None, &format!("{error:#}"));
+                            continue;
+                        }
                         for (replica_id, keys) in pending {
                             if let Some(scope) = active.get(&replica_id).cloned() {
                                 let mut keys: Vec<String> = keys.into_iter().collect();
@@ -224,7 +235,9 @@ impl IndexerWorker {
         backoff: &mut HashMap<String, BackoffEntry>,
     ) {
         // 1. 対象であるべき scope。
-        let desired = match self.participant.desired_scopes().await {
+        // 日付境界をまたいでも、このpassの選択とopenは同じ時刻の窓を使う。
+        let now = chrono::Utc::now().timestamp();
+        let desired = match self.participant.desired_scopes_at(now).await {
             Ok(desired) => desired,
             Err(error) => {
                 warn!(error = %format!("{error:#}"), "failed to list desired scopes; will retry");
@@ -236,13 +249,17 @@ impl IndexerWorker {
             .iter()
             .map(|scope| scope.replica_id.as_str())
             .collect();
+        let desired_logical: HashSet<_> = desired
+            .iter()
+            .map(|scope| (scope.kind, scope.id.as_str()))
+            .collect();
 
         // 2. 対象でなくなった scope の索引解除（索引の実在 scope との差分。再起動をまたいでも効く）。
         match self.participant.indexed_scopes().await {
             Ok(indexed) => {
                 for (kind, id) in indexed {
                     let scope = ScopeReplica::from_scope(kind, id.as_str());
-                    if desired_keys.contains(scope.replica_id.as_str()) {
+                    if desired_logical.contains(&(kind, id.as_str())) {
                         continue;
                     }
                     match self.participant.stop_and_deindex_scope(kind, &id).await {
@@ -276,7 +293,7 @@ impl IndexerWorker {
         }
 
         // 購読が残っている「対象外」scope（索引が空で差分に出ないもの）も止める。
-        let stale: Vec<String> = subscriptions
+        let stale: Vec<String> = active
             .keys()
             .filter(|key| !desired_keys.contains(key.as_str()))
             .cloned()
@@ -285,12 +302,23 @@ impl IndexerWorker {
             if let Some(handle) = subscriptions.remove(&key) {
                 handle.abort();
             }
-            active.remove(&key);
-            backoff.remove(&key);
+            if let Some(scope) = active.get(&key) {
+                match self.participant.stop_replica(scope).await {
+                    Ok(()) => {
+                        active.remove(&key);
+                        backoff.remove(&key);
+                    }
+                    Err(error) => {
+                        // activeに残して次のpassで停止を再試行する。bucket終了では索引を消さない。
+                        warn!(replica_id = %key, error = %error, "failed to stop stale replica; will retry");
+                        self.state.record_error(Some(&key), &format!("{error:#}"));
+                    }
+                }
+            }
         }
 
         // 3. 秘密鍵の登録とレプリカ open。open できたものだけを active / 購読対象にする。
-        let opened = match self.participant.restore_scopes().await {
+        let opened = match self.participant.restore_scopes_at(now).await {
             Ok(opened) => opened,
             Err(error) => {
                 warn!(error = %format!("{error:#}"), "failed to restore scopes; will retry");

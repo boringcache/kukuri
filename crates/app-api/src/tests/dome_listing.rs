@@ -1,18 +1,26 @@
+use super::sync::{CountingDocsSync, ShadowingDocsSync};
 use super::*;
-use kukuri_core::{BlobHash, DomePresetRefV1};
+use kukuri_core::{BlobHash, DomePresetRefV1, SpatialContextV1};
 
 #[derive(Default)]
 struct DelayedPresetBlob {
     inner: MemoryBlobService,
     held_hash: TokioMutex<Option<BlobHash>>,
+    failing_hash: TokioMutex<Option<BlobHash>>,
 }
 
 #[async_trait]
 impl BlobService for DelayedPresetBlob {
+    async fn fetch_local_blob(&self, hash: &kukuri_core::BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetch_blob(hash).await
+    }
     async fn put_blob(&self, bytes: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.inner.put_blob(bytes, mime).await
     }
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        if self.failing_hash.lock().await.as_ref() == Some(hash) {
+            anyhow::bail!("simulated blob read failure");
+        }
         if self.held_hash.lock().await.as_ref() == Some(hash) {
             return Ok(None);
         }
@@ -23,6 +31,9 @@ impl BlobService for DelayedPresetBlob {
     }
     async fn blob_status(&self, hash: &BlobHash) -> Result<BlobStatus> {
         self.inner.blob_status(hash).await
+    }
+    async fn local_blob_status(&self, hash: &BlobHash) -> Result<BlobStatus> {
+        self.inner.local_blob_status(hash).await
     }
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
         self.inner.import_peer_ticket(ticket).await
@@ -62,15 +73,218 @@ async fn owner_can_manage_and_delete_without_preset_bytes() {
 }
 
 #[tokio::test]
+async fn unreadable_unrelated_instance_does_not_break_game_room_listing() {
+    let f = fixture().await;
+    f.docs
+        .apply_doc_op(
+            &topic_replica_id(TOPIC),
+            DocOp::SetBytes {
+                key: stable_key(
+                    "metaverse/dome-instances",
+                    &format!("{}/state", "0".repeat(64)),
+                ),
+                value: b"not-json".to_vec(),
+            },
+        )
+        .await
+        .expect("write unrelated unreadable Instance");
+
+    let rooms = f
+        .app
+        .list_game_rooms(TOPIC)
+        .await
+        .expect("an unrelated invalid Instance must be skipped");
+    assert!(rooms.iter().any(|room| room.room_id == f.dome_id));
+    assert!(rooms.iter().any(|room| room.room_id == f.game_id));
+}
+
+#[tokio::test]
+async fn invalid_first_record_for_owner_slot_does_not_shadow_valid_instance() {
+    let f = fixture().await;
+    let key = stable_key(
+        "metaverse/dome-instances",
+        &format!("{}/state", f.app.keys().public_key().as_str()),
+    );
+    f.docs
+        .shadow(&key, serde_json::json!("not an Instance state"))
+        .await;
+
+    let rooms = f
+        .app
+        .list_game_rooms(TOPIC)
+        .await
+        .expect("a valid bounded candidate must remain readable");
+    assert!(rooms.iter().any(|room| room.room_id == f.dome_id));
+}
+
+#[tokio::test]
+async fn invalid_first_envelope_record_does_not_shadow_valid_instance() {
+    let f = fixture().await;
+    let state_key = stable_key(
+        "metaverse/dome-instances",
+        &format!("{}/state", f.app.keys().public_key().as_str()),
+    );
+    let state_record = f
+        .docs
+        .query_replica(&topic_replica_id(TOPIC), DocQuery::Exact(state_key))
+        .await
+        .expect("read Instance state")
+        .pop()
+        .expect("Instance state");
+    let state: DomeInstanceStateDocV1 =
+        serde_json::from_slice(&state_record.value).expect("decode Instance state");
+    f.docs
+        .shadow(
+            &stable_key("envelopes", state.last_envelope_id.as_str()),
+            serde_json::json!("not a signed envelope"),
+        )
+        .await;
+
+    let rooms = f
+        .app
+        .list_game_rooms(TOPIC)
+        .await
+        .expect("a valid signed candidate must remain readable");
+    assert!(rooms.iter().any(|room| room.room_id == f.dome_id));
+}
+
+#[tokio::test]
+async fn instance_blob_io_failure_is_returned() {
+    let f = fixture().await;
+    let state_key = stable_key(
+        "metaverse/dome-instances",
+        &format!("{}/state", f.app.keys().public_key().as_str()),
+    );
+    let state_record = f
+        .docs
+        .query_replica(&topic_replica_id(TOPIC), DocQuery::Exact(state_key))
+        .await
+        .expect("read Instance state")
+        .pop()
+        .expect("Instance state");
+    let state: DomeInstanceStateDocV1 =
+        serde_json::from_slice(&state_record.value).expect("decode Instance state");
+    *f.blobs.failing_hash.lock().await = Some(state.current_manifest.hash);
+
+    let error = f
+        .app
+        .list_game_rooms(TOPIC)
+        .await
+        .expect_err("blob I/O failure must remain an error");
+    assert!(error.to_string().contains("simulated blob read failure"));
+}
+
+#[tokio::test]
+async fn instance_docs_io_failure_is_returned() {
+    let f = fixture().await;
+    let state_key = stable_key(
+        "metaverse/dome-instances",
+        &format!("{}/state", f.app.keys().public_key().as_str()),
+    );
+    f.docs.fail_on_key(&state_key).await;
+
+    let error = f
+        .app
+        .list_game_rooms(TOPIC)
+        .await
+        .expect_err("docs I/O failure must remain an error");
+    assert!(error.to_string().contains("simulated docs read failure"));
+}
+
+#[tokio::test]
+async fn instance_lookup_reads_a_constant_number_of_docs_records() {
+    let store = Arc::new(MemoryStore::default());
+    let docs = Arc::new(CountingDocsSync::default());
+    let blobs = Arc::new(MemoryBlobService::default());
+    let transport = Arc::new(FakeTransport::new(
+        "bounded-instance",
+        FakeNetwork::default(),
+    ));
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store,
+        transport.clone(),
+        transport,
+        docs.clone(),
+        blobs,
+        generate_keys(),
+    );
+    let instance_id = app
+        .create_metaverse_room(
+            TOPIC,
+            CreateMetaverseRoomInput {
+                title: "bounded Dome".into(),
+                description: String::new(),
+                max_peers: Some(4),
+            },
+        )
+        .await
+        .expect("create Dome");
+    let replica = topic_replica_id(TOPIC);
+    let owner_key = stable_key(
+        "metaverse/dome-instances",
+        &format!("{}/state", app.keys().public_key().as_str()),
+    );
+    let state_record = docs
+        .query_replica(&replica, DocQuery::Exact(owner_key))
+        .await
+        .expect("read Instance state")
+        .pop()
+        .expect("Instance state");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&state_record.value).expect("decode Instance state");
+
+    // このtestが数えるのは同期的なInstance lookupだけ。createで起動した購読taskを止め、
+    // 並行するsession catch-upの読み出しを同じcounterへ混ぜない。
+    app.shutdown().await;
+
+    docs.reset_records_returned();
+    docs.clear_queries().await;
+    let context = SpatialContextV1::Topic {
+        topic_id: TopicId::new(TOPIC),
+    };
+    app.hosting_instance(&replica, &context, &instance_id)
+        .await
+        .expect("baseline lookup")
+        .expect("baseline Instance");
+    let baseline_records = docs.records_returned();
+
+    for index in 0..24 {
+        state["instance_id"] = serde_json::json!(format!("unrelated-{index}"));
+        docs.apply_doc_op(
+            &replica,
+            DocOp::SetJson {
+                key: stable_key(
+                    "metaverse/dome-instances",
+                    &format!("unrelated-{index}/state"),
+                ),
+                value: state.clone(),
+            },
+        )
+        .await
+        .expect("write unrelated Instance state");
+    }
+
+    docs.reset_records_returned();
+    docs.clear_queries().await;
+    app.hosting_instance(&replica, &context, &instance_id)
+        .await
+        .expect("bounded lookup")
+        .expect("bounded Instance");
+    assert_eq!(docs.records_returned(), baseline_records);
+    assert!(docs.queries().await.into_iter().all(|(_, query)| {
+        query != DocQuery::Prefix(stable_key("metaverse/dome-instances", ""))
+    }));
+}
+
+#[tokio::test]
 async fn owner_can_delete_without_derived_game_manifest() {
     let f = fixture().await;
     let row = f
         .store
-        .list_topic_game_rooms(TOPIC)
+        .get_game_room(TOPIC, f.dome_id.as_str())
         .await
         .unwrap()
-        .into_iter()
-        .find(|r| r.room_id == f.dome_id)
         .unwrap();
     *f.blobs.held_hash.lock().await = Some(row.manifest_blob_hash);
     let mut handles = f.app.services.clone();
@@ -140,7 +354,7 @@ async fn missing_other_instance_keeps_owner_management_topology_available() {
 
 struct Fixture {
     app: AppService,
-    docs: Arc<MemoryDocsSync>,
+    docs: Arc<ShadowingDocsSync>,
     blobs: Arc<DelayedPresetBlob>,
     store: Arc<MemoryStore>,
     dome_id: String,
@@ -150,7 +364,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let store = Arc::new(MemoryStore::default());
-    let docs = Arc::new(MemoryDocsSync::default());
+    let docs = Arc::new(ShadowingDocsSync::default());
     let blobs = Arc::new(DelayedPresetBlob::default());
     let transport = Arc::new(FakeTransport::new("listing", FakeNetwork::default()));
     let app = app_service_from_dependencies(
@@ -227,7 +441,7 @@ async fn assert_pending_then_available(f: &Fixture) {
     // Pending is a read result, not removal of the canonical/projection record.
     assert_eq!(
         f.store
-            .list_topic_game_rooms(TOPIC)
+            .list_channel_game_rooms(TOPIC, "public", 100)
             .await
             .expect("stored rooms")
             .len(),
@@ -412,11 +626,9 @@ async fn current_instance_preset_controls_readiness_even_with_an_old_cache_row()
     let f = fixture().await;
     let old_row = f
         .store
-        .list_topic_game_rooms(TOPIC)
+        .get_game_room(TOPIC, f.dome_id.as_str())
         .await
         .expect("rows")
-        .into_iter()
-        .find(|row| row.room_id == f.dome_id)
         .expect("Dome row");
     let mut customization = old_row
         .metaverse

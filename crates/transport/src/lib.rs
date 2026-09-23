@@ -18,15 +18,18 @@ mod discovery;
 mod fake;
 mod iroh;
 mod peers;
+mod receive_binding;
 #[cfg(test)]
 mod test_support;
 mod tickets;
 mod traits;
+pub mod work_admission;
 
 pub use config::*;
 pub use discovery::*;
 pub use fake::*;
 pub use iroh::*;
 pub use peers::*;
+pub use receive_binding::*;
 pub use tickets::*;
 pub use traits::*;

@@ -59,24 +59,6 @@ pub(crate) async fn blob_view_status_for_payload(
     }
 }
 
-pub(crate) async fn attachment_views(
-    blob_service: &dyn BlobService,
-    header: &CanonicalPostHeader,
-) -> Result<Vec<AttachmentView>> {
-    let mut attachments = Vec::with_capacity(header.attachments.len());
-    for attachment in &header.attachments {
-        attachments.push(AttachmentView {
-            hash: attachment.hash.as_str().to_string(),
-            mime: attachment.mime.clone(),
-            bytes: attachment.bytes,
-            role: attachment_role_name(&attachment.role).to_string(),
-            status: best_effort_blob_view_status(blob_service, &attachment.hash).await,
-            provenance: None,
-        });
-    }
-    Ok(attachments)
-}
-
 pub(crate) async fn attachment_views_from_refs(
     blob_service: &dyn BlobService,
     refs: &[kukuri_core::AssetRef],
@@ -147,8 +129,26 @@ pub(crate) fn direct_message_preview(row: &DirectMessageMessageRow) -> String {
     }
 }
 
+pub(crate) struct DirectMessageMaterializationGuard<'a> {
+    pub(crate) projection_store: &'a dyn ProjectionStore,
+    pub(crate) local_author_pubkey: &'a str,
+    pub(crate) peer_pubkey: &'a str,
+}
+
+impl DirectMessageMaterializationGuard<'_> {
+    async fn is_mutual(&self) -> Result<bool> {
+        Ok(self
+            .projection_store
+            .get_author_relationship(self.local_author_pubkey, self.peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual))
+    }
+}
+
 pub(crate) async fn materialize_direct_message_manifest(
     blob_service: &dyn BlobService,
+    guard: &DirectMessageMaterializationGuard<'_>,
     keys: &KukuriKeys,
     sender_pubkey: &Pubkey,
     message_id: &str,
@@ -159,23 +159,32 @@ pub(crate) async fn materialize_direct_message_manifest(
     };
     let original = materialize_direct_message_blob_ref(
         blob_service,
+        guard,
         keys,
         sender_pubkey,
         message_id,
         &manifest.original,
     )
     .await?;
+    let Some(original) = original else {
+        return Ok(None);
+    };
     let poster = match manifest.poster.as_ref() {
-        Some(poster) => Some(
-            materialize_direct_message_blob_ref(
+        Some(poster) => {
+            let poster = materialize_direct_message_blob_ref(
                 blob_service,
+                guard,
                 keys,
                 sender_pubkey,
                 message_id,
                 poster,
             )
-            .await?,
-        ),
+            .await?;
+            let Some(poster) = poster else {
+                return Ok(None);
+            };
+            Some(poster)
+        }
         None => None,
     };
     Ok(Some(DirectMessageAttachmentManifestV1 {
@@ -188,27 +197,37 @@ pub(crate) async fn materialize_direct_message_manifest(
 
 pub(crate) async fn materialize_direct_message_blob_ref(
     blob_service: &dyn BlobService,
+    guard: &DirectMessageMaterializationGuard<'_>,
     keys: &KukuriKeys,
     sender_pubkey: &Pubkey,
     message_id: &str,
     encrypted_ref: &DirectMessageEncryptedBlobRefV1,
-) -> Result<DirectMessageEncryptedBlobRefV1> {
+) -> Result<Option<DirectMessageEncryptedBlobRefV1>> {
+    if !guard.is_mutual().await? {
+        return Ok(None);
+    }
     let Some(bytes) = blob_service.fetch_blob(&encrypted_ref.hash).await? else {
         anyhow::bail!("direct message attachment blob is missing");
     };
+    if !guard.is_mutual().await? {
+        return Ok(None);
+    }
     let encrypted: DirectMessageEncryptedAttachmentV1 = serde_json::from_slice(bytes.as_slice())
         .context("failed to decode direct message attachment blob")?;
     let decrypted = decrypt_direct_message_attachment(keys, sender_pubkey, message_id, &encrypted)?;
+    if !guard.is_mutual().await? {
+        return Ok(None);
+    }
     let local = blob_service
         .put_blob(decrypted, encrypted_ref.mime.as_str())
         .await?;
-    Ok(DirectMessageEncryptedBlobRefV1 {
+    Ok(Some(DirectMessageEncryptedBlobRefV1 {
         blob_id: encrypted_ref.blob_id.clone(),
         hash: local.hash,
         mime: encrypted_ref.mime.clone(),
         bytes: encrypted_ref.bytes,
         nonce_hex: String::new(),
-    })
+    }))
 }
 
 pub(crate) async fn direct_message_topic_peer_count(

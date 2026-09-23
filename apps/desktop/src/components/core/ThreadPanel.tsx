@@ -1,6 +1,7 @@
 import type {
   BookmarkedCustomReactionView,
   CommunityNodeManifestFetch,
+  CommunityNodePoliciesResponse,
   CustomReactionAssetView,
   ReactionKeyInput,
   RecentReactionView,
@@ -36,6 +37,8 @@ type ThreadPanelProps = {
   onCopyPostLink?: (link: string) => void;
   focusedPostObjectId?: string | null;
   hasMore?: boolean;
+  /** 読んだ範囲にあるが、まだ取得できていない返信の数(#1239 AC-4)。 */
+  unavailableCount?: number;
   loadingMore?: boolean;
   onLoadMore?: () => void;
   onSubmitReport?: (
@@ -43,6 +46,8 @@ type ThreadPanelProps = {
   ) => Promise<SubmitCommunityNodeReportResult>;
   onCopyReportContact?: (value: string) => void;
   onFetchReportManifest?: (baseUrl: string) => Promise<CommunityNodeManifestFetch>;
+  /// #1192: 権利侵害を選んだときに提示する権利侵害申出ポリシーの取得(読み取りのみ)。
+  onFetchNodePolicies?: (baseUrl: string, language?: string) => Promise<CommunityNodePoliciesResponse>;
   onMuteReportAuthor?: (authorPubkey: string) => Promise<void> | void;
 };
 
@@ -70,11 +75,13 @@ export function ThreadPanel({
   onCopyPostLink,
   focusedPostObjectId,
   hasMore = false,
+  unavailableCount = 0,
   loadingMore = false,
   onLoadMore,
   onSubmitReport,
   onCopyReportContact,
   onFetchReportManifest,
+  onFetchNodePolicies,
   onMuteReportAuthor,
 }: ThreadPanelProps) {
   return (
@@ -103,11 +110,13 @@ export function ThreadPanel({
         onCopyPostLink={onCopyPostLink}
         focusedPostObjectId={focusedPostObjectId}
         hasMore={hasMore}
+        unavailableCount={unavailableCount}
         loadingMore={loadingMore}
         onLoadMore={onLoadMore}
         onSubmitReport={onSubmitReport}
         onCopyReportContact={onCopyReportContact}
         onFetchReportManifest={onFetchReportManifest}
+        onFetchNodePolicies={onFetchNodePolicies}
         onMuteReportAuthor={onMuteReportAuthor}
       />
     </div>

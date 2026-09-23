@@ -16,6 +16,7 @@
 
 mod community_index;
 mod direct_messages;
+pub use direct_messages::PendingReceiveDestinationPage;
 mod dome_connections;
 mod dome_delete;
 pub use dome_delete::{DeleteDomeInput, DeleteDomeView, PendingDomeDeletionView};
@@ -24,6 +25,8 @@ mod dome_management;
 mod dome_move;
 mod game;
 mod live;
+mod session_display;
+pub use session_display::{SessionCandidateView, SessionDisplayRequest};
 mod media;
 mod notifications;
 mod private_channel_indexing;
@@ -36,7 +39,7 @@ mod sync;
 mod timeline;
 mod views;
 
-pub use kukuri_store::NotificationKind;
+pub use kukuri_store::{NOTIFICATION_DISPATCH_PAGE_SIZE, NotificationKind};
 pub use private_channels::{
     is_retryable_friend_only_grant_import_error, is_retryable_friend_plus_share_import_error,
 };

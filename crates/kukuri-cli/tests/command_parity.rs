@@ -111,6 +111,10 @@ fn exclusion_allowed(tauri: &str, kind: &str) -> bool {
                 | "app_update::install_app_update"
                 | "commands::external_url::open_external_url"
                 | "commands::system_locale::get_system_locales"
+                | "desktop_lifecycle::get_window_close_preference"
+                | "desktop_lifecycle::set_window_close_preference"
+                | "desktop_lifecycle::get_pending_window_close_request"
+                | "desktop_lifecycle::respond_window_close_request"
         ),
         "frontend_state" => matches!(
             tauri,
@@ -125,6 +129,10 @@ fn exclusion_allowed(tauri: &str, kind: &str) -> bool {
             "commands::developer_logs::set_developer_mode_enabled"
                 | "commands::developer_logs::read_desktop_logs"
         ),
+        // #1174: GUIでviewport内に表示した公開投稿だけの一時link preview。
+        "gui_content_preview" => tauri == "commands::link_preview::fetch_link_preview",
+        // #1284: 表示中の投稿cardだけに作用する局所的な欠損blobの回復。
+        "gui_content_recovery" => tauri == "commands::posts::retry_post_elements",
         _ => false,
     }
 }
@@ -163,13 +171,13 @@ fn baseline_inventory_is_classified_once() {
     let manifest = manifest();
     assert_eq!(
         manifest.baseline,
-        "c4616fc706b94150ac6c2ac06aec68bc1c2b0f5a"
+        "d372c91bdc963bda07308a359fe3baeca8e06150"
     );
     assert_eq!(
         manifest.scope_revision,
-        "2026-09-14-1020-dome-management-v1"
+        "2026-09-22-1262-session-display-v1"
     );
-    assert_eq!(manifest.entries.len(), 160);
+    assert_eq!(manifest.entries.len(), 168);
     check_inventory(&registrations(TAURI_SOURCE), &manifest.entries).expect("全入口の分類");
 }
 

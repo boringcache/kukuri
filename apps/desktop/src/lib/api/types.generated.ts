@@ -39,7 +39,7 @@ export type ContentDisplaySettings = { adult_content_enabled: boolean, };
 
 export type ReplyPreviewAuthorView = { pubkey: string, name?: string | null, display_name?: string | null, picture_asset?: ProfileAssetView | null, };
 
-export type ReplyPreviewView = { object_id: string, topic: string, author: ReplyPreviewAuthorView, content: string, attachments: Array<AttachmentView>, content_labels?: Array<string> | null, root_id?: string | null, reply_to?: string | null, };
+export type ReplyPreviewView = { object_id: string, topic: string, author: ReplyPreviewAuthorView, content: string, content_status: BlobViewStatus, attachments: Array<AttachmentView>, content_labels?: Array<string> | null, root_id?: string | null, reply_to?: string | null, };
 
 export type ReactionKeyView = { reaction_key_kind: string, normalized_reaction_key: string, emoji?: string | null, custom_asset?: CustomReactionAssetView | null, };
 
@@ -65,7 +65,7 @@ export type BookmarkedPostView = { bookmarked_at: number, post: PostView, };
 
 export type AuthorSocialView = { author_pubkey: string, name?: string | null, display_name?: string | null, about?: string | null, picture_asset?: ProfileAssetView | null, updated_at?: number | null, following: boolean, followed_by: boolean, mutual: boolean, friend_of_friend: boolean, friend_of_friend_via_pubkeys: Array<string>, provenance?: ContentProvenanceView | null, muted: boolean, blocking: boolean, blocked_by: boolean, };
 
-export type DirectMessageStatusView = { peer_pubkey: string, dm_id: string, mutual: boolean, send_enabled: boolean, peer_count: number, pending_outbox_count: number, };
+export type DirectMessageStatusView = { peer_pubkey: string, dm_id: string, mutual: boolean, send_enabled: boolean, peer_count: number, pending_outbox_count: number, pending_outbox_has_more: boolean, };
 
 export type DirectMessageTopicStatusView = { topic: string, joined: boolean, peer_count: number, connected_peers: Array<string>, status_detail: string, last_error?: string | null, };
 
@@ -77,7 +77,12 @@ export type NotificationView = { notification_id: string, kind: NotificationKind
 
 export type NotificationStatusView = { unread_count: number, };
 
-export type TimelineView = { items: Array<PostView>, next_cursor?: TimelineCursor | null, };
+export type TimelineView = { items: Array<PostView>, next_cursor?: TimelineCursor | null, 
+/**
+ * このページの範囲の索引にあるが、本体が手元に無く表示できない投稿の数(#1239 AC-4)。取得側が範囲を照合した
+ * ページ(遡ったページ、projection が尽きたページ、thread)でだけ数える。0 なら、画面は何も示さない。
+ */
+unavailable_count?: number | null, };
 
 export type DirectMessageTimelineView = { items: Array<DirectMessageMessageView>, next_cursor?: TimelineCursor | null, };
 
@@ -263,7 +268,7 @@ export type ChannelId = string;
 
 export type ChannelRef = { "kind": "public" } | { "kind": "private_channel", channel_id: ChannelId, };
 
-export type TimelineScope = { "kind": "public" } | { "kind": "all_joined" } | { "kind": "channel", channel_id: ChannelId, };
+export type TimelineScope = { "kind": "public" } | { "kind": "channel", channel_id: ChannelId, };
 
 export type SeedPeer = { endpoint_id: string, addr_hint?: string | null, };
 
@@ -307,7 +312,13 @@ previously_accepted_version?: number | null, effective_date?: string | null, lan
 
 export type CommunityNodeConsentStatus = { all_required_accepted: boolean, items: Array<CommunityNodeConsentItem>, policy_snapshot_revision?: string | null, };
 
-export type CommunityNodePolicyDocument = { policy_slug: string, policy_version: number, title: string, body_markdown: string, required: boolean, effective_date?: string | null, language?: string | null, policy_snapshot_revision?: string | null, authoritative_language?: string | null, reference_translation: boolean, translation_revision?: number | null, translation_of_version?: number | null, fallback: boolean, requested_language?: string | null, material_change: boolean, requires_reconsent: boolean, is_current: boolean, publication_status?: string | null, published_at?: string | null, retired_at?: string | null, previous_policy_version?: number | null, previous_policy_snapshot_revision?: string | null, next_policy_version?: number | null, next_policy_snapshot_revision?: string | null, };
+export type CommunityNodePolicyDocument = { policy_slug: string, policy_version: number, title: string, body_markdown: string, required: boolean, 
+/**
+ * operator config の `legal.documents[].kind`(#1192)。slug は operator が自由に決める
+ * ため、client が文書の役割(利用規約 / 権利侵害申出ポリシー等)を判別するのに使う。
+ * node が現在公開していない slug(退役 revision 等)では欠落する。
+ */
+policy_kind?: string | null, effective_date?: string | null, language?: string | null, policy_snapshot_revision?: string | null, authoritative_language?: string | null, reference_translation: boolean, translation_revision?: number | null, translation_of_version?: number | null, fallback: boolean, requested_language?: string | null, material_change: boolean, requires_reconsent: boolean, is_current: boolean, publication_status?: string | null, published_at?: string | null, retired_at?: string | null, previous_policy_version?: number | null, previous_policy_snapshot_revision?: string | null, next_policy_version?: number | null, next_policy_snapshot_revision?: string | null, };
 
 export type CommunityNodePoliciesResponse = { policies: Array<CommunityNodePolicyDocument>, policy_snapshot_revision?: string | null, };
 
@@ -415,7 +426,7 @@ signal_id: string,
  */
 basis: Basis, };
 
-export type IndexEntryView = { scope_kind: IndexScopeKind, scope_id: string, object_id: string, author_pubkey: string, text: string, created_at: number, content_advisories: Array<ContentAdvisory>, };
+export type IndexEntryView = { scope_kind: IndexScopeKind, scope_id: string, object_id: string, author_pubkey: string, text: string, created_at: number, source_replica_id?: string, content_advisories: Array<ContentAdvisory>, };
 
 export type IndexQueryResponse = { entries: Array<IndexEntryView>, };
 
@@ -443,7 +454,7 @@ export type CommunityNodeContentAdvisoryLookupResult = {
  */
 nodes: Array<CommunityNodeContentAdvisoryNodeResult>, };
 
-export type CommunityIndexPostResolveInput = { key: string, topic: string, object_id: string, author_pubkey: string, channel_ref: ChannelRef, };
+export type CommunityIndexPostResolveInput = { key: string, topic: string, object_id: string, author_pubkey: string, channel_ref: ChannelRef, source_replica_id?: string, };
 
 export type CommunityIndexPostActionCapabilitiesView = { open_thread: boolean, reply: boolean, repost: boolean, quote_repost: boolean, react: boolean, copy_link: boolean, bookmark: boolean, withdraw: boolean, };
 
@@ -747,6 +758,8 @@ export type ListThreadRequest = { topic: string, thread_id: string, cursor?: Tim
 
 export type ListProfileTimelineRequest = { pubkey: string, cursor?: TimelineCursor | null, limit?: number | null, };
 
+export type RetryPostElementsRequest = { object_id: string, body_object_id?: string | null, manual: boolean, };
+
 export type ImportPeerTicketRequest = { ticket: string, };
 
 export type UnsubscribeTopicRequest = { topic: string, };
@@ -784,6 +797,10 @@ export type ListLiveSessionsRequest = { topic: string, scope: TimelineScope, };
 export type CreateLiveSessionRequest = { topic: string, channel_ref: ChannelRef, title: string, description: string, };
 
 export type LiveSessionCommandRequest = { topic: string, session_id: string, };
+
+export type SessionDisplayRequest = { topic: string, scope: TimelineScope, replica_id: string, session_id: string, kind: string, observer: string, visible: boolean, retry: boolean, };
+
+export type SessionCandidateView = { replica_id: string, session_id: string, kind: string, };
 
 export type ListGameRoomsRequest = { topic: string, scope: TimelineScope, };
 

@@ -93,6 +93,7 @@ export const postViewFull = {
       }
     },
     "content": "parent content",
+    "content_status": "Available",
     "attachments": [
       {
         "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -239,7 +240,8 @@ export const timelineView = {
   "next_cursor": {
     "created_at": 1700000001,
     "object_id": "post-2"
-  }
+  },
+  "unavailable_count": 2
 } satisfies TimelineView;
 
 // bookmarked_post_view.json
@@ -466,7 +468,8 @@ export const dmConversationView = {
     "mutual": true,
     "send_enabled": true,
     "peer_count": 1,
-    "pending_outbox_count": 2
+    "pending_outbox_count": 2,
+    "pending_outbox_has_more": false
   }
 } satisfies DirectMessageConversationView;
 

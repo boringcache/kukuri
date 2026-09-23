@@ -1,19 +1,27 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use kukuri_blob_service::{BlobService, BlobStatus, IrohBlobService, StoredBlob};
-use kukuri_core::{BlobHash, GossipHint, ReplicaId, TopicId};
+use kukuri_core::{
+    BlobHash, GossipHint, KukuriKeys, Pubkey, ReplicaId, SealedReceiveOfferV1, TopicId,
+    VerifiedReceiveOffer,
+};
 use kukuri_docs_sync::{
-    DocEventStream, DocFetchPolicy, DocOp, DocQuery, DocRecord, DocsSync, IrohDocsSync,
+    DocEventStream, DocFetchPolicy, DocKeyPage, DocKeyQuery, DocOp, DocQuery, DocRecord, DocsSync,
+    IrohDocsSync, ReplicaNoticeStream,
 };
 use kukuri_iroh_node::IrohDocsNode;
 use kukuri_transport::{
-    ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, HintStream, HintTransport,
-    IrohGossipTransport, PeerSnapshot, SeedPeer, Transport, TransportNetworkConfig,
-    TransportRelayConfig,
+    ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, EndpointAddr, HintStream,
+    HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveCandidateFence, ReceiveOfferLease,
+    ReceiveOfferSubscription, SeedPeer, Transport, TransportNetworkConfig, TransportRelayConfig,
 };
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
@@ -106,6 +114,20 @@ reloadable_service! {
         async fn subscribe_hints(topic: &TopicId) -> Result<HintStream>;
         async fn unsubscribe_hints(topic: &TopicId) -> Result<()>;
         async fn publish_hint(topic: &TopicId, hint: GossipHint) -> Result<()>;
+        async fn resolve_receive_destination(recipient: &Pubkey) -> Result<Option<EndpointAddr>>;
+        async fn receive_candidate_fence() -> Result<ReceiveCandidateFence>;
+        async fn offer_receive_candidates(source: &str, recipient: &Pubkey, candidates: Vec<EndpointAddr>, fence: ReceiveCandidateFence) -> Result<()>;
+        async fn clear_receive_candidates(source: Option<&str>) -> Result<()>;
+        async fn invalidate_receive_destination(recipient: &Pubkey, endpoint_id: &str) -> Result<()>;
+        async fn verify_receive_provider(sender: &Pubkey, provider: EndpointAddr) -> Result<()>;
+        async fn subscribe_receive_offers(recipient: &Pubkey) -> Result<ReceiveOfferSubscription>;
+        async fn resubscribe_receive_offers_if_current(recipient: &Pubkey, expected: ReceiveOfferLease) -> Result<Option<ReceiveOfferSubscription>>;
+        async fn subscribe_receive_offers_if_vacant(recipient: &Pubkey) -> Result<Option<ReceiveOfferSubscription>>;
+        async fn receive_offer_transport_instance() -> Result<u64>;
+        async fn unsubscribe_receive_offers(recipient: &Pubkey, lease: ReceiveOfferLease) -> Result<()>;
+        async fn publish_receive_offer(
+            recipient: &Pubkey, destination: EndpointAddr, offer: SealedReceiveOfferV1,
+        ) -> Result<()>;
     }
 }
 
@@ -114,7 +136,11 @@ reloadable_service! {
 
     #[async_trait]
     impl DocsSync {
+        async fn query_local_source(
+            replica: &ReplicaId, key: &str, author: Option<&str>, limit: usize,
+        ) -> Result<Vec<DocRecord>>;
         async fn open_replica(replica_id: &ReplicaId) -> Result<()>;
+        async fn close_replica(replica_id: &ReplicaId) -> Result<()>;
         async fn register_private_replica_secret(
             replica_id: &ReplicaId,
             namespace_secret_hex: &str,
@@ -126,7 +152,34 @@ reloadable_service! {
             query: DocQuery,
             policy: DocFetchPolicy,
         ) -> Result<Vec<DocRecord>>;
+        // #1248: 宣言が無いと trait の既定実装(読んでから切り詰める)に落ち、query の上限が効かない。
+        async fn query_replica_exact_bounded(
+            replica_id: &ReplicaId,
+            key: &str,
+            limit: usize,
+            policy: DocFetchPolicy,
+        ) -> Result<Vec<DocRecord>>;
+        // #1239: 宣言が無いと trait の既定実装(エラー)に落ちる。上限つきの読み出しは必ず内側へ転送する。
+        async fn query_replica_keys(
+            replica_id: &ReplicaId,
+            query: DocKeyQuery,
+        ) -> Result<DocKeyPage>;
+        async fn query_replica_keys_by_author(
+            replica_id: &ReplicaId,
+            docs_author: &str,
+            query: DocKeyQuery,
+        ) -> Result<DocKeyPage>;
+        // #1258: 宣言が無いと trait の既定実装に落ちる(docs author なし / 読み出しはエラー)。
+        async fn local_docs_author() -> Result<Option<String>>;
+        async fn query_replica_by_author(
+            replica_id: &ReplicaId,
+            docs_author: &str,
+            key: &str,
+            policy: DocFetchPolicy,
+        ) -> Result<Option<DocRecord>>;
         async fn subscribe_replica(replica_id: &ReplicaId) -> Result<DocEventStream>;
+        // #1239: 宣言が無いと trait の既定実装(entry だけ)に落ち、取りこぼしと同期の区切りが購読側へ届かない。
+        async fn subscribe_replica_notices(replica_id: &ReplicaId) -> Result<ReplicaNoticeStream>;
         async fn import_peer_ticket(ticket: &str) -> Result<()>;
         async fn learn_peer(endpoint_id: &str) -> Result<()>;
         async fn restart_replica_sync(replica_id: &ReplicaId) -> Result<()>;
@@ -138,12 +191,25 @@ reloadable_service! {
 reloadable_service! {
     pub(crate) struct ReloadableBlobService wrapping IrohBlobService;
 
+    // 宣言の無い trait メソッドは内側へ転送されず、trait の既定実装に落ちる(#1157)。
+    // `fetch_blob_ephemeral_bounded` は CN の indexer 専用で desktop からは呼ばれないため
+    // 宣言しない(既定実装は bail なので、誤って呼ばれても無制限取得にはならない)。
     #[async_trait]
     impl BlobService {
         async fn put_blob(data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
         async fn fetch_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn fetch_local_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn prepare_display_fetch(hash: &BlobHash) -> Result<kukuri_blob_service::DisplayBlobFetch>;
+        // #1152: trait の既定実装は永続化する `fetch_blob` へ委譲するため、必ず実体へ転送する
+        // (成人向け表示 ON の取得は ephemeral で永続化しない。ADR 0046 §6.2)。
+        async fn fetch_blob_ephemeral(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+        async fn fetch_verified_receive_offer_payload(
+            offer: &VerifiedReceiveOffer, provider: EndpointAddr,
+        ) -> Result<Vec<u8>>;
         async fn pin_blob(hash: &BlobHash) -> Result<()>;
+        async fn unpin_blob(hash: &BlobHash) -> Result<()>;
         async fn blob_status(hash: &BlobHash) -> Result<BlobStatus>;
+        async fn local_blob_status(hash: &BlobHash) -> Result<BlobStatus>;
         async fn import_peer_ticket(ticket: &str) -> Result<()>;
         async fn learn_peer(endpoint_id: &str) -> Result<()>;
         async fn set_seed_peers(peers: Vec<SeedPeer>) -> Result<()>;
@@ -153,12 +219,23 @@ reloadable_service! {
 
 pub(crate) struct SharedIrohStack {
     pub(crate) current: Mutex<Option<BoundIrohStack>>,
+    generation: AtomicU64,
     pub(crate) transport: Arc<ReloadableTransport>,
     pub(crate) docs_sync: Arc<ReloadableDocsSync>,
     pub(crate) blob_service: Arc<ReloadableBlobService>,
     pub(crate) root: PathBuf,
     pub(crate) network_config: TransportNetworkConfig,
     pub(crate) dht_options: DhtDiscoveryOptions,
+    /// アカウントの署名鍵から導出した docs author の種(ADR 0053)。stack を作り直すたびに設定し直す。
+    docs_author_seed: Mutex<Option<kukuri_core::DocsAuthorSeed>>,
+    /// 再構築するendpointでも同じaccountだけを広告する。stack/account寿命に限定する。
+    receive_binding_keys: Mutex<Option<Arc<KukuriKeys>>>,
+    /// `current` の stack が shutdown 済みか。作り直しが古い stack の shutdown の後で失敗すると、shutdown 済みの stack が残る。
+    /// その stack の docs actor への要求は、返事が来ないまま時間切れになりうるので、健全性の確認をせず、作り直しが要るとみなす。
+    current_shut_down: AtomicBool,
+    /// Test-only cancellation point immediately before rebuild starts shutting down the old stack.
+    #[cfg(test)]
+    rebuild_before_shutdown_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 fn should_rebuild_runtime_connectivity(
@@ -196,6 +273,10 @@ pub(crate) fn effective_dht_options(
 }
 
 impl SharedIrohStack {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
     pub(crate) async fn new(
         root: &Path,
         network_config: TransportNetworkConfig,
@@ -212,6 +293,7 @@ impl SharedIrohStack {
             bootstrap_seed_peers,
             dht_options.clone(),
             relay_config,
+            false,
         )
         .await?;
         let transport = Arc::new(ReloadableTransport::new(current.transport.clone()));
@@ -219,13 +301,49 @@ impl SharedIrohStack {
         let blob_service = Arc::new(ReloadableBlobService::new(current.blob_service.clone()));
         Ok(Self {
             current: Mutex::new(Some(current)),
+            generation: AtomicU64::new(0),
             transport,
             docs_sync,
             blob_service,
             root: root.to_path_buf(),
             network_config,
             dht_options,
+            docs_author_seed: Mutex::new(None),
+            receive_binding_keys: Mutex::new(None),
+            current_shut_down: AtomicBool::new(false),
+            #[cfg(test)]
+            rebuild_before_shutdown_gate: Mutex::new(None),
         })
+    }
+
+    /// docs の書き込みを、アカウントの署名鍵から導出した docs author の名義にする(ADR 0053 §1)。
+    ///
+    /// runtime の起動時に、docs へ何かを書く前に呼ぶ。アカウントの切り替えと復元は runtime を作り直すので、
+    /// 同じ経路を通る。`rebuild` は、作り直した stack へ同じ設定を入れてから差し替える。
+    pub(crate) async fn use_account_docs_author(
+        &self,
+        seed: kukuri_core::DocsAuthorSeed,
+    ) -> Result<String> {
+        let current = self.current.lock().await;
+        let docs_sync = &current
+            .as_ref()
+            .context("missing active iroh stack")?
+            .docs_sync;
+        let id = docs_sync.use_account_docs_author(&seed).await?;
+        *self.docs_author_seed.lock().await = Some(seed);
+        Ok(id)
+    }
+
+    pub(crate) async fn use_account_receive_binding(&self, keys: Arc<KukuriKeys>) -> Result<()> {
+        let current = self.current.lock().await;
+        current
+            .as_ref()
+            .context("missing active iroh stack")?
+            .node
+            .install_receive_binding(keys.clone())
+            .await?;
+        *self.receive_binding_keys.lock().await = Some(keys);
+        Ok(())
     }
 
     pub(crate) async fn rebuild(
@@ -237,20 +355,31 @@ impl SharedIrohStack {
         let relay_config = relay_config.normalized();
         let dht_options =
             effective_dht_options(&self.dht_options, bootstrap_seed_peers, &relay_config);
-        let previous = self
-            .current
-            .lock()
-            .await
-            .take()
+        // Keep the last stack and its peer snapshots until replacement commits.
+        // A failed/cancelled bind must not leave current=None forever. Holding
+        // the lock also serializes concurrent rebuild/shutdown operations.
+        let mut current = self.current.lock().await;
+        let previous = current
+            .as_ref()
             .context("missing active iroh stack during rebuild")?;
         let transport_peer_state = previous.transport.peer_state().await;
         let docs_peer_state = previous.docs_sync.peer_state().await;
         let blob_peer_state = previous.blob_service.peer_state().await;
-        info!(
+        info!(target: "kukuri_connectivity",
+            generation = self.generation.load(Ordering::Relaxed),
             relay_url_count = relay_config.iroh_relay_urls.len(),
             discovery_mode = ?discovery_config.mode,
             "rebuilding iroh stack after runtime relay connectivity change"
         );
+        // ここから差し替えが済むまでに失敗または取消されると、`current` には shutdown を
+        // 開始した stack が残る。最初の await より前に印を立て、途中で future が drop
+        // されても停止中または停止済みの actor を probe しない。
+        self.current_shut_down.store(true, Ordering::SeqCst);
+        #[cfg(test)]
+        if let Some((reached, resume)) = self.rebuild_before_shutdown_gate.lock().await.take() {
+            let _ = reached.send(());
+            let _ = resume.await;
+        }
         previous.shutdown().await;
         let next = BoundIrohStack::new(
             &self.root,
@@ -259,20 +388,61 @@ impl SharedIrohStack {
             bootstrap_seed_peers,
             dht_options,
             relay_config,
+            true,
         )
         .await?;
         next.transport
             .restore_peer_state(transport_peer_state)
             .await?;
         next.docs_sync.restore_peer_state(docs_peer_state).await?;
+        // 差し替える前に設定する。設定の無い stack が、端末ごとの docs author で書くことが無いようにする。
+        if let Some(seed) = self.docs_author_seed.lock().await.as_ref() {
+            next.docs_sync.use_account_docs_author(seed).await?;
+        }
+        if let Some(keys) = self.receive_binding_keys.lock().await.as_ref() {
+            next.node.install_receive_binding(keys.clone()).await?;
+        }
         next.blob_service
             .restore_peer_state(blob_peer_state)
             .await?;
         self.transport.replace(next.transport.clone()).await;
         self.docs_sync.replace(next.docs_sync.clone()).await;
         self.blob_service.replace(next.blob_service.clone()).await;
-        *self.current.lock().await = Some(next);
+        *current = Some(next);
+        self.current_shut_down.store(false, Ordering::SeqCst);
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        info!(target: "kukuri_connectivity", generation, "iroh stack replacement committed");
         Ok(())
+    }
+
+    /// Read-only actor probe. A slow actor is not proof that its store needs
+    /// rebuilding: a timeout is an error and the caller retries with backoff.
+    /// ただし、作り直しの失敗で shutdown 済みの stack が残っているときは、確認をせずに使えないとみなす
+    /// (shutdown 済みの actor への要求は、返事が来ないまま時間切れになりうる。時間切れをエラーで返すと、
+    /// 呼び出し側は作り直しへ進まず、再試行しても回復しない)。
+    pub(crate) async fn local_docs_available(&self) -> Result<bool> {
+        let current = self.current.lock().await;
+        let node = &current.as_ref().context("missing active iroh stack")?.node;
+        if self.current_shut_down.load(Ordering::SeqCst) {
+            tracing::warn!(target: "kukuri_connectivity",
+                generation = self.generation.load(Ordering::Relaxed),
+                "the active iroh stack was shut down by a failed rebuild; stack repair required");
+            return Ok(false);
+        }
+        let probe = async {
+            let mut namespaces = node.docs().list().await?;
+            namespaces.try_next().await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+            .await
+            .context("local docs actor health probe timed out")?;
+        if let Err(error) = &result {
+            tracing::warn!(target: "kukuri_connectivity",
+                generation = self.generation.load(Ordering::Relaxed), %error,
+                "local docs actor unavailable; stack repair required");
+        }
+        Ok(result.is_ok())
     }
 
     pub(crate) async fn apply_runtime_connectivity(
@@ -299,7 +469,9 @@ impl SharedIrohStack {
                 .map(|url| url.to_string())
                 .collect::<Vec<_>>()
         };
-        if should_rebuild_runtime_connectivity(&current_relay_urls, &next_relay_urls) {
+        if should_rebuild_runtime_connectivity(&current_relay_urls, &next_relay_urls)
+            || !self.local_docs_available().await?
+        {
             info!(
                 current_relay_url_count = current_relay_urls.len(),
                 next_relay_url_count = next_relay_urls.len(),
@@ -360,6 +532,16 @@ impl SharedIrohStack {
     }
 
     #[cfg(test)]
+    pub(crate) async fn pause_next_rebuild_before_shutdown(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        *self.rebuild_before_shutdown_gate.lock().await = Some((reached_tx, resume_rx));
+        (reached_rx, resume_tx)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn endpoint(&self) -> iroh::Endpoint {
         self.current
             .lock()
@@ -380,15 +562,26 @@ impl BoundIrohStack {
         bootstrap_seed_peers: &[SeedPeer],
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
+        reopening: bool,
     ) -> Result<Self> {
         let relay_config = relay_config.normalized();
-        let node = IrohDocsNode::persistent_with_discovery_config(
-            root,
-            network_config.clone(),
-            dht_options,
-            relay_config.clone(),
-        )
-        .await?;
+        let node = if reopening {
+            IrohDocsNode::reopen_with_discovery_config(
+                root,
+                network_config.clone(),
+                dht_options,
+                relay_config.clone(),
+            )
+            .await?
+        } else {
+            IrohDocsNode::persistent_with_discovery_config(
+                root,
+                network_config.clone(),
+                dht_options,
+                relay_config.clone(),
+            )
+            .await?
+        };
         let transport = Arc::new(IrohGossipTransport::from_shared_parts(
             node.endpoint().clone(),
             node.gossip().clone(),
@@ -427,186 +620,4 @@ impl BoundIrohStack {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use kukuri_blob_service::BlobService;
-    use kukuri_docs_sync::DocsSync;
-    use kukuri_transport::Transport;
-    use tempfile::tempdir;
-    use tokio::time::{Duration, timeout};
-
-    #[test]
-    fn runtime_connectivity_rebuild_helper_skips_rebuild_when_relay_urls_are_unchanged() {
-        let relay_url = "https://relay.example.com".to_string();
-        assert!(!should_rebuild_runtime_connectivity(
-            std::slice::from_ref(&relay_url),
-            std::slice::from_ref(&relay_url),
-        ));
-    }
-
-    #[test]
-    fn runtime_connectivity_rebuild_helper_rebuilds_for_static_peer_relay_change() {
-        let current = "https://relay-a.example.com".to_string();
-        let next = "https://relay-b.example.com".to_string();
-        assert!(should_rebuild_runtime_connectivity(
-            std::slice::from_ref(&current),
-            std::slice::from_ref(&next),
-        ));
-    }
-
-    #[test]
-    fn runtime_connectivity_rebuild_helper_rebuilds_for_non_static_peer_relay_change() {
-        let current = "https://relay-a.example.com".to_string();
-        let next = "https://relay-b.example.com".to_string();
-        assert!(should_rebuild_runtime_connectivity(
-            std::slice::from_ref(&current),
-            std::slice::from_ref(&next),
-        ));
-    }
-
-    #[tokio::test]
-    async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
-        let (_relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server()
-            .await
-            .expect("relay server");
-        let dir = tempdir().expect("tempdir");
-        let discovery_config = DiscoveryConfig::static_peer_default();
-        let stack_a = SharedIrohStack::new(
-            &dir.path().join("stack-a"),
-            TransportNetworkConfig::loopback(),
-            &discovery_config,
-            &[],
-            DhtDiscoveryOptions::disabled(),
-            TransportRelayConfig::default(),
-        )
-        .await
-        .expect("stack a");
-        let stack_b = SharedIrohStack::new(
-            &dir.path().join("stack-b"),
-            TransportNetworkConfig::loopback(),
-            &discovery_config,
-            &[],
-            DhtDiscoveryOptions::disabled(),
-            TransportRelayConfig::default(),
-        )
-        .await
-        .expect("stack b");
-
-        let ticket_b = stack_b
-            .transport
-            .current()
-            .await
-            .export_ticket()
-            .await
-            .expect("export ticket b")
-            .expect("ticket b value");
-        stack_a
-            .transport
-            .current()
-            .await
-            .import_ticket(ticket_b.as_str())
-            .await
-            .expect("import transport ticket");
-        stack_a
-            .docs_sync
-            .current()
-            .await
-            .import_peer_ticket(ticket_b.as_str())
-            .await
-            .expect("import docs ticket");
-        stack_a
-            .blob_service
-            .current()
-            .await
-            .import_peer_ticket(ticket_b.as_str())
-            .await
-            .expect("import blob ticket");
-
-        let current_guard = stack_a.current.lock().await;
-        let current = current_guard
-            .as_ref()
-            .expect("current stack before rebuild");
-        let transport_before = current.transport.peer_state().await;
-        let docs_before = current.docs_sync.peer_state().await;
-        let blob_before = current.blob_service.peer_state().await;
-        drop(current_guard);
-
-        timeout(
-            Duration::from_secs(30),
-            stack_a.rebuild(
-                &discovery_config,
-                &[],
-                TransportRelayConfig {
-                    iroh_relay_urls: vec![relay_url.to_string()],
-                },
-            ),
-        )
-        .await
-        .expect("stack rebuild timeout")
-        .expect("stack rebuild");
-
-        let current_guard = stack_a.current.lock().await;
-        let current = current_guard.as_ref().expect("current stack after rebuild");
-        let transport_after = current.transport.peer_state().await;
-        let docs_after = current.docs_sync.peer_state().await;
-        let blob_after = current.blob_service.peer_state().await;
-        drop(current_guard);
-
-        assert_eq!(
-            transport_after.imported_peers,
-            transport_before.imported_peers
-        );
-        assert_eq!(docs_after.imported_peers, docs_before.imported_peers);
-        assert_eq!(blob_after.imported_peers, blob_before.imported_peers);
-
-        timeout(Duration::from_secs(30), stack_a.shutdown_checked())
-            .await
-            .expect("stack a shutdown timeout")
-            .expect("stack a shutdown");
-        timeout(Duration::from_secs(30), stack_b.shutdown_checked())
-            .await
-            .expect("stack b shutdown timeout")
-            .expect("stack b shutdown");
-    }
-
-    #[tokio::test]
-    async fn shared_stack_initializes_with_configured_relay_on_first_bind() {
-        let (_relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server()
-            .await
-            .expect("relay server");
-        let dir = tempdir().expect("tempdir");
-        let discovery_config = DiscoveryConfig::static_peer_default();
-        let relay_config = TransportRelayConfig {
-            iroh_relay_urls: vec![relay_url.to_string()],
-        };
-        let stack = SharedIrohStack::new(
-            &dir.path().join("stack-relay"),
-            TransportNetworkConfig::loopback(),
-            &discovery_config,
-            &[],
-            DhtDiscoveryOptions::disabled(),
-            relay_config,
-        )
-        .await
-        .expect("stack");
-
-        let current_guard = stack.current.lock().await;
-        let current = current_guard.as_ref().expect("current stack");
-        assert_eq!(current.node.relay_urls().await, vec![relay_url.clone()]);
-        assert_eq!(
-            current
-                .transport
-                .discovery()
-                .await
-                .expect("discovery")
-                .connect_mode,
-            ConnectMode::DirectOrRelay
-        );
-        drop(current_guard);
-
-        timeout(Duration::from_secs(30), stack.shutdown_checked())
-            .await
-            .expect("stack shutdown timeout")
-            .expect("stack shutdown");
-    }
-}
+mod tests;

@@ -81,6 +81,53 @@ impl NotificationStore for SqliteStore {
         rows.into_iter().map(row_to_notification).collect()
     }
 
+    async fn list_notification_dispatch_after(
+        &self,
+        after_sequence: i64,
+    ) -> Result<Vec<(i64, NotificationRow)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+              dispatch_seq,
+              notification_id,
+              recipient_pubkey,
+              kind,
+              actor_pubkey,
+              source_envelope_id,
+              source_replica_id,
+              topic_id,
+              channel_id,
+              object_id,
+              dm_id,
+              message_id,
+              preview_text,
+              content_labels_json,
+              created_at,
+              received_at,
+              read_at
+            FROM notifications
+            WHERE dispatch_seq > ?1
+            ORDER BY dispatch_seq ASC
+            LIMIT ?2
+            "#,
+        )
+        .bind(after_sequence)
+        .bind(crate::NOTIFICATION_DISPATCH_PAGE_SIZE as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok((row.try_get("dispatch_seq")?, row_to_notification(row)?)))
+            .collect()
+    }
+
+    async fn notification_dispatch_head(&self) -> Result<i64> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT last_seq FROM notification_dispatch_clock WHERE singleton = 1",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     async fn mark_notification_read(&self, notification_id: &str, read_at: i64) -> Result<()> {
         sqlx::query(
             r#"

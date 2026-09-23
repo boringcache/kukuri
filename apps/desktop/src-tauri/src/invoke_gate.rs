@@ -8,6 +8,8 @@ const NON_READY_COMMAND_ALLOWLIST: &[&str] = &[
     "get_app_consent_status",
     "accept_app_consents",
     "cancel_device_backup",
+    "get_pending_window_close_request",
+    "respond_window_close_request",
 ];
 
 fn command_allowed(command: &str, status: &DesktopStartupStatus) -> bool {
@@ -129,6 +131,7 @@ mod tests {
             for command in [
                 "create_post",
                 "fetch_community_node_policies",
+                "fetch_link_preview",
                 "get_pending_device_restore_frontend_state",
                 "acknowledge_pending_device_restore_frontend_state",
                 "set_developer_mode_enabled",
@@ -190,6 +193,11 @@ mod tests {
             "fetch_community_node_policies",
             &DesktopStartupStatus::Ready
         ));
+        assert!(!command_allowed("fetch_link_preview", &consent_required));
+        assert!(command_allowed(
+            "fetch_link_preview",
+            &DesktopStartupStatus::Ready
+        ));
     }
 
     #[test]
@@ -203,6 +211,10 @@ mod tests {
                 "get_app_consent_status",
                 "accept_app_consents",
                 "cancel_device_backup",
+                // Window close confirmation is owned by the app shell and must remain
+                // answerable while runtime startup or consent is still pending.
+                "get_pending_window_close_request",
+                "respond_window_close_request",
             ]
         );
         for command in NON_READY_COMMAND_ALLOWLIST {
@@ -214,6 +226,7 @@ mod tests {
             "preview_device_backup_command",
             "list_accounts",
             "check_app_update",
+            "fetch_link_preview",
             "download_app_update",
             "install_app_update",
             "set_developer_mode_enabled",

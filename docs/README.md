@@ -31,7 +31,7 @@
 - current connectivity scope は `static-peer + seeded DHT + community-node connectivity/auth`
 - current product scope には `social graph v1 + private channel audience v1` を含む
 - root 実行入口は `cargo xtask ...`
-- 日常 validation は `cargo xtask check` + `cargo xtask test`
+- ローカルのvalidationは変更関連箇所を選び、全体確認はPR CIで行う。`cargo xtask check` + `cargo xtask test` は全体確認の実行入口
 - browser-level UI change は `cargo xtask desktop-ui-check`
 - community-node / Postgres slice は `cargo xtask cn-check` + `cargo xtask cn-test`
 - targeted rerun は `cargo xtask rust-check|rust-test|tauri-check|desktop-lint|desktop-test|desktop-storybook|desktop-browser-test`
@@ -51,6 +51,8 @@
 
 | 判断すること | 正本 |
 | --- | --- |
+| 作業の開始・選択・終了、最終コード量と対象範囲 | root `AGENTS.md` の作業原則。個別手順・条件・分類はこの原則に従う |
+| 件数非依存・欠損許容・資源の上限と削除 | root `AGENTS.md` の設計原則。矛盾する既存ADRは改訂対象 |
 | 製品・protocol・データ境界の仕様 | 関連する `docs/adr/`。UIの製品・視覚契約は root `DESIGN.md` |
 | 実装済みの挙動 | 現行実装と tests / contracts / `harness/scenarios/` |
 | Issue工程、承認、再現、リスク別記録、独立監査、Close | `docs/runbooks/issue-lifecycle.md` |
@@ -64,11 +66,14 @@
 
 Issue・PR・セッションの記述だけで「実装済み」「検証成功」と判断しない。一方、ユーザーが今回承認した変更要求は作業範囲と判断権限の根拠であり、既存仕様と異なることだけを理由に拒否・再承認しない。変更要求を対応する正本文書・実装・testsへ反映し、変更前の事実と区別する。
 
-規則が食い違う場合は、適用対象と上表の責務を確認する。読む順番、日付の新しさ、強い表現だけで優先順位を決めない。承認済み範囲内の参照漏れ・要約・雛形は担当者が同期し、製品契約や依頼範囲を変える未承認の判断だけをユーザーへ確認する。
+すべてのrunbookにAGENTS.mdの作業原則・設計原則を適用する。実行前に今回の対象操作・入力・期待結果・判定方法を定め、該当する手順だけを選ぶ。配備・復旧・公開等の分岐や過去の検証一覧を全件必須にしない。固定された配布物の照合や明示依頼されたバックアップの全量処理を、通常の同期・復旧で全履歴を走査する根拠にはしない。
+
+個別規則が食い違う場合は、原則に照らして適用対象と上表の責務を確認する。読む順番、日付の新しさ、強い表現だけで優先順位を決めない。承認済み範囲内の参照漏れ・要約・雛形は担当者が同期し、製品契約や依頼範囲を変える未承認の判断だけをユーザーへ確認する。
 
 入口の短い要約は正本へのリンクとともに維持し、正本の変更時に参照元・雛形・例を同じ差分で確認する。機械検査されるミラーは同期検査を維持する。規則の見直しでは観測した効果・負担・環境変化を根拠に維持・強化・緩和・統合・撤廃を選び、理由を作業記録へ残す。過去の判断本文は書き換えず、再流入する経路に後継先や失効範囲を示す。
 
 ## Ops
+- Windows x64 MSIXのbuild、identity、local署名、WACK、Microsoft Store提出: `docs/runbooks/windows-microsoft-store.md`
 - Dome Hosting の有効化・割当・終了・split-brain復旧: `docs/runbooks/dome-hosting.md`
 - Dome prop、layout commit、manifest/asset保持: `docs/adr/0040-dome-prop-layout-retention.md`
 - Metaverse resource budget: `docs/adr/0041-metaverse-resource-budget.md`
@@ -83,6 +88,12 @@ Issue・PR・セッションの記述だけで「実装済み」「検証成功�
 ## Architecture
 - P2P-first community node の責任境界: `docs/architecture/p2p-first-community-node-responsibility-boundary.md`（operator docs / safety / report routing の共通前提）
 - desktop UI のCSS / state / data配置: `docs/architecture/desktop-ui-implementation.md`（製品・視覚契約はroot `DESIGN.md`、開発フローはADR 0014）
+- desktop の blob キャッシュと取得の再試行: `docs/architecture/blob-cache.md`（保持範囲、取得経路と I/O、自動再試行の回数・リセット条件、既知の欠落）
+- タイムラインの反映と復旧を総件数に依存させない設計: `docs/adr/0052-scale-independent-timeline-sync.md`（#1239。同期は best effort、反映は個別反映・窓の追いつき・遡りの取得の 3 つ、docs の読み出しは key の索引と上限つき、replica の時間分割の方向）
+- アカウントの署名鍵から docs author を導出し、著者の record を docs author と key の組で読む: `docs/adr/0053-account-derived-docs-author.md`（#1258。同じ key に不正な record を積まれても、著者の投稿と取り下げを定数の読み出しで反映する）
+- docs replica の時間分割: `docs/adr/0054-time-bucketed-docs-replicas.md`（#1243、Proposed。ID・同期停止の基盤から段階実装し、writer切替とCN追従は作業記録で管理する）
+- replica の読み出しの inventory: `docs/architecture/replica-read-inventory.md`（prefix の全件読みの全 caller、比例する総数、解消する段階）
+- 通信の需要・容量・停止の統合設計: `docs/adr/0055-demand-owned-network-work.md`（#1221、Proposed。画面外の通知対象を維持する受信経路と移行を含む）。調査中の入口・連鎖・上流APIは `docs/architecture/network-work-inventory.md`。
 - Linux GUI配布とCLIのローカル制御経路: `docs/adr/0049-linux-gui-cli-control-plane.md`（#885。CLI専用profile、常駐プロセス／IPC、command登録簿、要求単位の実行、配布成果物のデータ分類）
 - moderation event / safety advisory の trust semantics + deterministic (CSAM / known-hash) critical safety: `docs/adr/0027-deterministic-moderation-critical-safety.md`（optional trust input であり network-wide command ではないことを固定。旧 `community-node-critical-safety.md` / `moderation-event-trust-semantics.md` を集約）
 - community node trust / relation foundation: `docs/adr/0026-community-node-trust-relation-foundation.md`
@@ -97,6 +108,7 @@ Issue・PR・セッションの記述だけで「実装済み」「検証成功�
 - 18歳以上の自己申告と成人向け表現の既定非表示(#858): 仕様は `docs/adr/0046-age-attestation-adult-content-gating.md`、分類は `docs/legal/age-attestation-data-classification.md` / `docs/legal/adult-content-display-data-classification.md`
 - 端末バックアップ / 復元(#855): 仕様・脅威モデルは `docs/adr/0048-device-backup-restore.md`、移行対象分類は `docs/legal/device-backup-data-classification.md`
 - 開発者向けアプリ内ログの閲覧・書き出し(#978): 分類は `docs/legal/developer-log-viewer-data-classification.md`、外部送信一覧の行は `docs/legal/app-data-flow-inventory.md`
+- 公開投稿の外部URL link／OGP preview(#1174): 取得・SSRF・cache境界は `docs/adr/0051-link-preview-fetch-boundary.md`、分類は `docs/legal/link-preview-data-classification.md`、外部送信一覧は `docs/legal/external-transmission-notice.md` / `docs/legal/app-data-flow-inventory.md`
 
 ## UI/UX
 - flow: `docs/adr/0014-uiux-dev-flow.md`

@@ -5,6 +5,7 @@ import { expect, test, vi } from 'vitest';
 
 import { PostCard } from './PostCard';
 import { type PostCardView } from './types';
+import type { LinkPreviewOutcome } from '@/lib/api';
 
 import { createView } from './PostCard.testHelpers';
 function setViewportWidth(width: number) {
@@ -29,6 +30,122 @@ test('post card hides the object kind and shows a placeholder avatar when no pic
   expect(screen.queryByText(/^post$/i)).not.toBeInTheDocument();
   expect(screen.getByText('core contributors')).toHaveClass('post-meta-chip');
   expect(screen.getByTestId('post-1-author-avatar')).toHaveTextContent('A');
+});
+
+test('post card renders an absolute HTTP URL as an external link without changing adjacent text', () => {
+  const url = 'https://example.test/articles/1174?q=ogp';
+  const base = createView();
+  const onOpenThread = vi.fn();
+
+  render(
+    <PostCard
+      view={createView({
+        post: {
+          ...base.post,
+          content: `URL before ${url}. URL after`,
+        },
+      })}
+      onOpenAuthor={() => undefined}
+      onOpenThread={onOpenThread}
+      onReply={() => undefined}
+    />
+  );
+
+  const link = screen.getByRole('link', { name: url });
+  expect(link).toHaveAttribute('href', url);
+  expect(screen.getByText('URL before')).toBeInTheDocument();
+  expect(screen.getByText('. URL after')).toBeInTheDocument();
+  link.addEventListener('click', (event) => event.preventDefault());
+  fireEvent.click(link);
+  expect(onOpenThread).not.toHaveBeenCalled();
+});
+
+test('post card requests one preview for an eligible public primary URL', async () => {
+  const url = 'https://example.test/articles/1174';
+  const base = createView();
+  const onOpenThread = vi.fn();
+  const fetcher = vi.fn(async (requestedUrl: string): Promise<LinkPreviewOutcome> => ({
+    status: 'available',
+    preview: {
+      url: requestedUrl,
+      source_label: 'example.test',
+      title: 'Issue 1174 preview',
+      description: null,
+      image_data_url: null,
+    },
+  }));
+
+  render(
+    <PostCard
+      enableLinkPreview
+      linkPreviewFetcher={fetcher}
+      view={createView({
+        post: {
+          ...base.post,
+          content: `first ${url} second https://second.example/path`,
+          channel_id: null,
+        },
+      })}
+      onOpenAuthor={() => undefined}
+      onOpenThread={onOpenThread}
+      onReply={() => undefined}
+    />
+  );
+
+  const preview = await screen.findByRole('link', {
+    name: 'Issue 1174 preview — example.test',
+  });
+  expect(preview).toHaveAttribute('href', url);
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher).toHaveBeenCalledWith(url);
+  expect(screen.getByRole('link', { name: 'https://second.example/path' })).toBeInTheDocument();
+  preview.addEventListener('click', (event) => event.preventDefault());
+  fireEvent.click(preview);
+  expect(onOpenThread).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['private channel', { channel_id: 'private-1' }, {}],
+  ['local pending', { channel_id: null, local_state: 'pending' as const }, {}],
+  ['adult gate', { channel_id: null }, { adultContentGated: true }],
+  [
+    'trust gate',
+    { channel_id: null },
+    {
+      trustGate: {
+        authorPubkey: 'a'.repeat(64),
+        nodeBaseUrl: 'https://node.example',
+        reasons: ['risk_signals' as const],
+        fromRepostSource: false,
+      },
+    },
+  ],
+])('post card does not request a preview for %s content', async (_label, postOverride, viewOverride) => {
+  const base = createView();
+  const fetcher = vi.fn(async (): Promise<LinkPreviewOutcome> => ({
+    status: 'unavailable',
+    reason: 'network',
+  }));
+
+  render(
+    <PostCard
+      enableLinkPreview
+      linkPreviewFetcher={fetcher}
+      view={createView({
+        ...viewOverride,
+        post: {
+          ...base.post,
+          content: 'https://example.test/private',
+          ...postOverride,
+        },
+      })}
+      onOpenAuthor={() => undefined}
+      onOpenThread={() => undefined}
+      onReply={() => undefined}
+    />
+  );
+
+  await waitFor(() => expect(fetcher).not.toHaveBeenCalled());
 });
 
 test('post card renders the author image when one is available', () => {
@@ -83,7 +200,9 @@ test('post card omits unavailable body and media from normal UI', () => {
 
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
   expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
-  expect(screen.queryByText('Media unavailable.')).not.toBeInTheDocument();
+  // #1284: 取得不可の本文とメディアは通常 mode でも、それぞれ失敗表示に置き換える。
+  expect(screen.getAllByText('Failed to load.')).toHaveLength(2);
+  expect(screen.queryByRole('button', { name: 'Retry loading' })).not.toBeInTheDocument();
   expect(screen.queryByText('image/png')).not.toBeInTheDocument();
   expect(screen.queryByText('2.0 KB')).not.toBeInTheDocument();
 });
@@ -111,8 +230,8 @@ test('post card exposes concise unavailable diagnostics in developer mode', () =
     />
   );
 
-  expect(screen.getByText('Content unavailable.')).toHaveAttribute('role', 'status');
-  expect(screen.getByText('Media unavailable.')).toHaveAttribute('role', 'status');
+  expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
+  expect(screen.getAllByText('Failed to load.')).toHaveLength(2);
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
 });
 
@@ -237,6 +356,7 @@ function createReplyView(overrides?: Partial<PostCardView>): PostCardView {
           picture_asset: null,
         },
         content: 'parent body',
+        content_status: 'Available',
         attachments: [],
         root_id: 'parent-1',
         reply_to: null,
@@ -654,13 +774,27 @@ test('post card opens a custom reaction context menu and keeps the reaction popo
   await user.click(screen.getAllByRole('button', { name: /👍/ })[0]);
   expect(onToggleReaction).toHaveBeenNthCalledWith(1, view.post, { kind: 'emoji', emoji: '👍' });
 
-  const customReactionChip = screen.getByAltText(customAsset.search_key).closest('button');
-  if (!(customReactionChip instanceof HTMLButtonElement)) {
-    throw new Error('custom reaction chip not found');
-  }
-  expect(customReactionChip).toHaveAccessibleName(/party-parrot/i);
+  const customReactionChip = screen.getByRole('button', {
+    name: `${customAsset.search_key} 1`,
+  });
+  expect(within(customReactionChip).queryByText(customAsset.search_key)).not.toBeInTheDocument();
+  expect(customReactionChip).toHaveAttribute('aria-label', `${customAsset.search_key} 1`);
+  expect(customReactionChip).toHaveAttribute('data-tooltip', customAsset.search_key);
+  expect(customReactionChip).toHaveAccessibleName(`${customAsset.search_key} 1`);
   expect(customReactionChip).not.toHaveAccessibleName(new RegExp(customAsset.asset_id, 'i'));
   expect(screen.queryByText(customAsset.asset_id.slice(0, 6))).not.toBeInTheDocument();
+
+  await user.hover(customReactionChip);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(customAsset.search_key);
+  await user.unhover(customReactionChip);
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+
+  customReactionChip.focus();
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(customAsset.search_key);
+  customReactionChip.blur();
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
 
   fireEvent.contextMenu(customReactionChip);
   await user.click(screen.getByRole('menuitem', { name: 'Copy hash' }));
@@ -712,6 +846,64 @@ test('post card opens a custom reaction context menu and keeps the reaction popo
   expect(onToggleReaction).toHaveBeenNthCalledWith(3, view.post, {
     kind: 'custom_asset',
     asset: bookmarkedAsset,
+  });
+});
+
+test('post card keeps an unresolved custom reaction identifiable without showing its full name', async () => {
+  const user = userEvent.setup();
+  const onToggleReaction = vi.fn();
+  const customAsset = {
+    asset_id: 'unresolved-asset',
+    owner_pubkey: 'b'.repeat(64),
+    blob_hash: 'blob-unresolved',
+    search_key: 'very-long-custom-reaction-name',
+    mime: 'image/png',
+    bytes: 128,
+    width: 128,
+    height: 128,
+  };
+  const view = createView({
+    post: {
+      ...createView().post,
+      reaction_summary: [
+        {
+          reaction_key_kind: 'custom_asset',
+          normalized_reaction_key: `custom_asset:${customAsset.asset_id}`,
+          emoji: null,
+          custom_asset: customAsset,
+          count: 3,
+        },
+      ],
+      my_reactions: [],
+    },
+  });
+
+  render(
+    <PostCard
+      view={view}
+      onOpenAuthor={() => undefined}
+      onOpenThread={() => undefined}
+      onReply={() => undefined}
+      onToggleReaction={onToggleReaction}
+    />
+  );
+
+  const customReactionChip = screen.getByRole('button', {
+    name: `${customAsset.search_key} 3`,
+  });
+  expect(within(customReactionChip).queryByText(customAsset.search_key)).not.toBeInTheDocument();
+  expect(within(customReactionChip).getByText(customAsset.search_key.slice(0, 2))).toHaveAttribute(
+    'aria-hidden',
+    'true'
+  );
+  expect(customReactionChip).toHaveAttribute('data-tooltip', customAsset.search_key);
+
+  await user.hover(customReactionChip);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(customAsset.search_key);
+  await user.click(customReactionChip);
+  expect(onToggleReaction).toHaveBeenCalledWith(view.post, {
+    kind: 'custom_asset',
+    asset: customAsset,
   });
 });
 

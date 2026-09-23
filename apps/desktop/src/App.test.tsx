@@ -84,12 +84,30 @@ test('settings drawer can open the release section', async () => {
   );
 });
 
+test('settings drawer exposes the window close behavior under System', async () => {
+  const user = userEvent.setup();
+  render(<App api={createDesktopMockApi()} />);
+
+  await user.click(await screen.findByTestId('control-center-trigger'));
+  await user.click(
+    within(screen.getByRole('complementary', { name: 'Control Center' })).getByRole('button', {
+      name: 'Settings',
+    })
+  );
+  await user.click(screen.getByRole('button', { name: 'System' }));
+
+  expect(screen.getByRole('heading', { name: 'System' })).toBeVisible();
+  expect(screen.getByRole('combobox', { name: 'When closing the window' })).toHaveValue('ask');
+  expect(screen.getByRole('option', { name: 'Quit kukuri' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Keep kukuri in the task tray' })).toBeInTheDocument();
+});
+
 // #857: startup gate は文書単位の同意状態を受け取る。
 function consentDocuments(acceptedVersion: number | null) {
   return ['terms', 'privacy'].map((slug) => ({
     slug,
-    currentVersion: 6,
-    effectiveDate: '2026-09-03',
+    currentVersion: 8,
+    effectiveDate: '2026-09-19',
     authoritativeLanguage: 'ja',
     materialChange: true,
     controllerName: 'Preview Distributor',
@@ -152,7 +170,7 @@ test('pending consent fixes the display language and retry sends the newly displ
   await user.selectOptions(language, 'en');
   expect(language).toHaveValue('ja');
   expect(invokeMock).toHaveBeenLastCalledWith('accept_app_consents', {
-    documents: [{slug:'terms',version:6},{slug:'privacy',version:6}], language:'ja', ageAttested:true,
+    documents: [{slug:'terms',version:8},{slug:'privacy',version:8}], language:'ja', ageAttested:true,
   });
   rejectSave(new Error('storage unavailable'));
   await screen.findByText('同意の保存に失敗しました。もう一度お試しください。');
@@ -161,7 +179,7 @@ test('pending consent fixes the display language and retry sends the newly displ
   expect(screen.getByRole('checkbox')).toBeChecked();
   await user.click(screen.getByRole('button', { name: 'Accept and continue' }));
   expect(invokeMock).toHaveBeenLastCalledWith('accept_app_consents', {
-    documents: [{slug:'terms',version:6},{slug:'privacy',version:6}], language:'en', ageAttested:true,
+    documents: [{slug:'terms',version:8},{slug:'privacy',version:8}], language:'en', ageAttested:true,
   });
   rejectSave(new Error('retry result'));
   await screen.findByText('Failed to save your consent. Please try again.');
@@ -311,7 +329,7 @@ test('desktop app blocks startup until app-level legal consent is accepted', asy
   expect(await screen.findByRole('heading', { name: 'Before you continue' })).toBeInTheDocument();
   expect(screen.getByText('Terms of Service')).toBeInTheDocument();
   expect(screen.getByText('Privacy Policy')).toBeInTheDocument();
-  expect(screen.getAllByText(/Effective date: 2026-09-03/)).toHaveLength(2);
+  expect(screen.getAllByText(/Effective date: 2026-09-19/)).toHaveLength(2);
   expect(
     screen.getAllByText(
       'This is a reference translation of the authoritative Japanese version. The Japanese version controls if there is any discrepancy.'
@@ -344,8 +362,8 @@ test('desktop app blocks startup until app-level legal consent is accepted', asy
   await waitFor(() => {
     expect(invokeMock).toHaveBeenCalledWith('accept_app_consents', {
       documents: [
-        { slug: 'terms', version: 6 },
-        { slug: 'privacy', version: 6 },
+        { slug: 'terms', version: 8 },
+        { slug: 'privacy', version: 8 },
       ],
       language: 'en',
       ageAttested: true,
@@ -355,11 +373,11 @@ test('desktop app blocks startup until app-level legal consent is accepted', asy
   expect(screen.getByDisplayValue(/runtime starts after consent/)).toBeInTheDocument();
 });
 
-test('desktop app requires renewed consent for legal bundle version 6 (#1056)', async () => {
+test('desktop app requires renewed consent for legal bundle version 8 (#1174)', async () => {
   const user = userEvent.setup();
   invokeMock.mockResolvedValueOnce({
     status: 'consent_required',
-    documents: consentDocuments(5),
+    documents: consentDocuments(7),
     age_attestation: ageAttestation(1),
   });
   invokeMock.mockResolvedValueOnce({
@@ -387,7 +405,7 @@ test('desktop app requires renewed consent for legal bundle version 6 (#1056)', 
       'This is a draft and is not legal advice. Final decisions should be made in consultation with appropriate experts or regulators.'
     )
   ).not.toBeInTheDocument();
-  expect(screen.getAllByText('v6')).toHaveLength(2);
+  expect(screen.getAllByText('v8')).toHaveLength(2);
   expect(screen.queryByTestId('control-center-trigger')).not.toBeInTheDocument();
 
   // #858: 現行版で申告済みならチェックボックスは再表示されず、ボタンは有効のまま。
@@ -398,8 +416,8 @@ test('desktop app requires renewed consent for legal bundle version 6 (#1056)', 
   await waitFor(() => {
     expect(invokeMock).toHaveBeenCalledWith('accept_app_consents', {
       documents: [
-        { slug: 'terms', version: 6 },
-        { slug: 'privacy', version: 6 },
+        { slug: 'terms', version: 8 },
+        { slug: 'privacy', version: 8 },
       ],
       language: 'en',
       ageAttested: false,

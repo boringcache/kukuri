@@ -450,11 +450,22 @@ impl AppService {
         topic_id: &str,
         channel_id: &str,
     ) -> Result<Option<JoinedPrivateChannelState>> {
+        let _display_access = self.services.session_display_access.lock().await;
         let removed = self
             .joined_private_channels
             .lock()
             .await
             .remove(joined_private_channel_key(topic_id, channel_id).as_str());
+        if let Some(state) = &removed {
+            let replicas = private_channel_epoch_capabilities(state)
+                .iter()
+                .map(|epoch| private_channel_replica_for_epoch(channel_id, epoch.epoch_id.as_str()))
+                .collect::<Vec<_>>();
+            self.services
+                .session_projections
+                .remove_replicas(&replicas)
+                .await;
+        }
         if removed.is_some() {
             self.persist_private_channel_capabilities_if_configured()
                 .await?;
@@ -647,7 +658,11 @@ impl AppService {
                 .await;
         }
         services.docs_sync.open_replica(&replica).await?;
-        let mut doc_stream = services.docs_sync.subscribe_replica(&replica).await?;
+        // #1239: entry の event のほかに、取りこぼしと同期の区切りも受け取る(窓の追いつきの契機にする)。
+        let mut doc_stream = services
+            .docs_sync
+            .subscribe_replica_notices(&replica)
+            .await?;
         let mut hint_stream = services.hint_transport.subscribe_hints(&hint_topic).await?;
         let replica_for_task = replica.clone();
         let hint_topic_for_task = hint_topic.clone();
@@ -657,10 +672,9 @@ impl AppService {
             let blob_service = &services.blob_service;
             let hint_transport = &services.hint_transport;
             let transport = &services.transport;
-            let notification_baseline = match snapshot_object_notification_baseline(
+            let notification_baseline = match snapshot_window_notification_baseline(
                 docs_sync.as_ref(),
                 &replica_for_task,
-                DocFetchPolicy::LocalOnly,
             )
             .await
             {
@@ -677,11 +691,13 @@ impl AppService {
             };
             let mut recovery_tick = tokio::time::interval(std::time::Duration::from_secs(1));
             recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            if let Err(error) = hydrate_subscription_state(
+            // #1239: replica を走査しない。起動時は、窓(新しい側の固定件数)だけを手元の docs から追いつく。
+            if let Err(error) = catch_up_replica_window(
                 &services,
                 topic.as_str(),
                 &replica_for_task,
                 DocFetchPolicy::LocalOnly,
+                true,
             )
             .await
             {
@@ -696,14 +712,39 @@ impl AppService {
             let mut recovery_probe_due_at = Utc::now()
                 .timestamp_millis()
                 .saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
+            let mut catch_up = CatchUpSchedule::default();
             loop {
                 tokio::select! {
-                    Some(event) = doc_stream.next() => {
+                    Some(notice) = doc_stream.next() => {
+                        let event = match notice {
+                            Ok(kukuri_docs_sync::ReplicaNotice::Entry(event)) => Ok(event),
+                            Ok(kukuri_docs_sync::ReplicaNotice::Lagged { .. }) => {
+                                catch_up.request_after_lag();
+                                continue;
+                            }
+                            Ok(kukuri_docs_sync::ReplicaNotice::ContentReady) => {
+                                for (pending_topic, key, expected_hash) in services.session_projections.take_ready_entries(&replica_for_task).await {
+                                    let event = DocEvent { replica_id: replica_for_task.clone(), key,
+                                        content_hash: expected_hash.unwrap_or_default(), source_peer: None, docs_author: None };
+                                    match hydrate_subscription_doc_event(&services, &pending_topic, &replica_for_task, &event).await {
+                                        Ok(count) if count > 0 => { *last_sync.lock().await = Some(Utc::now().timestamp_millis()); }
+                                        Ok(_) => {}
+                                        Err(error) => { warn!(%error, "failed to reflect an available session entry"); }
+                                    }
+                                }
+                                catch_up.request_now();
+                                continue;
+                            }
+                            Ok(kukuri_docs_sync::ReplicaNotice::SyncFinished) => {
+                                catch_up.request();
+                                continue;
+                            }
+                            Err(error) => Err(error),
+                        };
                         if let Ok(event) = event {
                             let now = Utc::now().timestamp_millis();
                             let had_source_peer = event.source_peer.is_some();
-                            if let Some(source_peer) = event.source_peer.as_deref()
-                            {
+                            if let Some(source_peer) = event.source_peer.as_deref() {
                                 if let Err(error) = docs_sync.learn_peer(source_peer).await {
                                     warn!(
                                         topic = %topic,
@@ -726,6 +767,7 @@ impl AppService {
                                 docs_sync.as_ref(),
                                 blob_service.as_ref(),
                                 local_author_pubkey.as_str(),
+                                topic.as_str(),
                                 &notification_baseline,
                                 &event,
                             ).await {
@@ -743,11 +785,11 @@ impl AppService {
                                     );
                                 }
                             }
-                            let mut hydrated = match hydrate_subscription_event(
+                            let hydrated = match hydrate_subscription_doc_event(
                                 &services,
                                 topic.as_str(),
                                 &replica_for_task,
-                                event.key.as_str(),
+                                &event,
                             ).await {
                                 Ok(count) => count,
                                 Err(error) => {
@@ -760,27 +802,18 @@ impl AppService {
                                     0
                                 }
                             };
-                            if hydrated == 0 && !is_public_topic {
-                                hydrated = match hydrate_subscription_state(
-                                    &services,
-                                    topic.as_str(),
-                                    &replica_for_task,
-                                    DocFetchPolicy::LocalThenRemote,
-                                )
-                                .await {
-                                    Ok(count) => count,
-                                    Err(error) => {
-                                        warn!(
-                                            topic = %topic,
-                                            replica = %replica_for_task.as_str(),
-                                            error = %error,
-                                            "failed to hydrate subscription from docs-event recovery"
-                                        );
-                                        0
-                                    }
-                                };
+                            let session_notice = hydrated == 0 && super::hydration_support::is_session_notice(&services, &replica_for_task, &event.key).await;
+                            // 相手から届いた、個別反映の対象でない key や、本体がまだ届いていない entry。走査はせず、
+                            // 追いつきを依頼する(自分が書いた entry と、反映済みの object を指す索引は依頼しない)。
+                            if hydrated == 0
+                                && !session_notice
+                                && had_source_peer
+                                && missed_entry_needs_catch_up(projection_store.as_ref(), &event.key).await
+                            {
+                                catch_up.request_now();
                             }
                             if hydrated > 0 {
+                                catch_up.record_progress();
                                 recovery_backoff.reset();
                                 if is_public_topic && event.source_peer.is_some() {
                                     record_public_topic_docs_activity_if_current(
@@ -795,7 +828,7 @@ impl AppService {
                                         now.saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
                                 }
                                 *last_sync.lock().await = Some(now);
-                            } else {
+                            } else if !session_notice {
                                 restart_replica_sync_with_backoff(
                                     docs_sync.as_ref(),
                                     topic.as_str(),
@@ -887,7 +920,7 @@ impl AppService {
                                     *last_sync.lock().await = Some(now);
                                 }
                                 _ => {
-                                    let mut hydrated = match hydrate_subscription_hint(
+                                    let hydrated = match hydrate_subscription_hint(
                                         &services,
                                         topic.as_str(),
                                         &replica_for_task,
@@ -904,27 +937,22 @@ impl AppService {
                                             0
                                         }
                                     };
+                                    if matches!(&event.hint, GossipHint::SessionChanged { object_kind, .. }
+                                        if matches!(object_kind.as_str(), "live-session" | "game-session")) {
+                                        services.session_projections.schedule(&services).await;
+                                        if hydrated == 0 { continue; }
+                                    }
                                     let now = Utc::now().timestamp_millis();
+                                    // #1239: 個別反映が 0 件でも走査しない。replica の内容を指す hint だけ、
+                                    // 追いつきを依頼する(docs の同期より先に hint が届いた場合など)。
                                     if hydrated == 0 {
-                                        hydrated = match hydrate_subscription_state(
-                                            &services,
-                                            topic.as_str(),
-                                            &replica_for_task,
-                                            DocFetchPolicy::LocalThenRemote,
-                                        )
-                                        .await {
-                                            Ok(count) => count,
-                                            Err(error) => {
-                                                warn!(
-                                                    topic = %topic,
-                                                    error = %error,
-                                                    "failed to hydrate subscription from docs-first recovery probe"
-                                                );
-                                                0
-                                            }
-                                        };
+                                        if !hint_refers_to_replica_content(&event.hint) {
+                                            continue;
+                                        }
+                                        catch_up.request_now();
                                     }
                                     if hydrated > 0 {
+                                        catch_up.record_progress();
                                         recovery_backoff.reset();
                                         if is_public_topic && !event.source_peer.is_empty() {
                                             record_public_topic_docs_activity_if_current(
@@ -954,96 +982,67 @@ impl AppService {
                             }
                         }
                     }
-                    _ = recovery_tick.tick(), if is_public_topic => {
+                    _ = recovery_tick.tick() => {
                         let now = Utc::now().timestamp_millis();
-                        if recovery_probe_due_at > now {
-                            continue;
-                        }
-                        let (has_live_topic_peer, has_configured_topic_peer) =
-                            match transport.peers().await {
-                            Ok(snapshot) => snapshot
-                                .topic_diagnostics
-                                .iter()
-                                .find(|diagnostic| {
-                                    normalize_topic_name(diagnostic.topic.clone()).as_deref()
-                                        == Some(topic.as_str())
-                                })
-                                .map(|diagnostic| {
-                                    (
-                                        diagnostic.joined
-                                            && !diagnostic.connected_peers.is_empty(),
-                                        !diagnostic.configured_peer_ids.is_empty(),
-                                    )
-                                })
-                                .unwrap_or((false, false)),
-                            Err(error) => {
-                                warn!(
-                                    topic = %topic,
-                                    error = %error,
-                                    "failed to inspect live topic peer state during recovery tick"
-                                );
-                                (false, false)
-                            }
-                        };
-                        let docs_assist_peer_count = match docs_sync.assist_peer_ids().await {
-                            Ok(peer_ids) => peer_ids.len(),
-                            Err(error) => {
-                                warn!(
-                                    topic = %topic,
-                                    error = %error,
-                                    "failed to inspect docs-assisted peers during recovery tick"
-                                );
-                                0
-                            }
-                        };
-                        if has_live_topic_peer && docs_assist_peer_count == 0 {
-                            continue;
-                        }
-                        if docs_assist_peer_count == 0 && !has_configured_topic_peer {
-                            continue;
-                        }
-                        let hydrated = match hydrate_subscription_state(
-                            &services,
-                            topic.as_str(),
-                            &replica_for_task,
-                            DocFetchPolicy::LocalThenRemote,
-                        )
-                        .await {
-                            Ok(count) => count,
-                            Err(error) => {
-                                warn!(
-                                    topic = %topic,
-                                    error = %error,
-                                    "failed to hydrate subscription during periodic docs-first recovery"
-                                );
-                                0
-                            }
-                        };
-                        if hydrated > 0 {
-                            if docs_assist_peer_count > 0 {
-                                record_public_topic_docs_activity_if_current(
-                                    &public_topic_delivery,
-                                    topic.as_str(),
-                                    generation,
-                                    now,
-                                )
-                                .await;
-                            }
-                            recovery_backoff.reset();
-                            recovery_probe_due_at =
-                                now.saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
-                            *last_sync.lock().await = Some(now);
-                        } else {
-                            restart_replica_sync_with_backoff(
-                                docs_sync.as_ref(),
+                        if let Some(run) = catch_up.take_due(now) {
+                            let hydrated = match catch_up_replica_window(
+                                &services,
                                 topic.as_str(),
                                 &replica_for_task,
-                                &mut recovery_backoff,
+                                DocFetchPolicy::LocalThenRemote,
+                                run.refresh_reactions,
+                            )
+                            .await {
+                                Ok(count) => count,
+                                Err(error) => {
+                                    warn!(
+                                        topic = %topic,
+                                        replica = %replica_for_task.as_str(),
+                                        error = %error,
+                                        "failed to catch up the replica window"
+                                    );
+                                    catch_up.restore(run);
+                                    0
+                                }
+                            };
+                            let now = Utc::now().timestamp_millis();
+                            catch_up.record_finished(now, hydrated);
+                            if hydrated > 0 {
+                                recovery_backoff.reset();
+                                recovery_probe_due_at =
+                                    now.saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
+                                *last_sync.lock().await = Some(now);
+                            }
+                            continue;
+                        }
+                        if !is_public_topic || recovery_probe_due_at > now {
+                            continue;
+                        }
+                        let (has_live_topic_peer, has_configured_topic_peer, docs_assist_peer_count) =
+                            recovery_probe_peer_state(
+                                transport.as_ref(),
+                                docs_sync.as_ref(),
+                                topic.as_str(),
                             )
                             .await;
+                        // #1225: 走査しない場合も次の期限を置く。置かないと毎秒 peer を照会し続ける。
+                        if docs_assist_peer_count == 0
+                            && (has_live_topic_peer || !has_configured_topic_peer)
+                        {
                             recovery_probe_due_at =
                                 now.saturating_add(PUBLIC_TOPIC_RECOVERY_GRACE_MS);
+                            continue;
                         }
+                        // #1239: recovery tick は docs を読まない。再 sync を backoff つきで促すだけで、
+                        // 届いた entry は docs の event が、取りこぼしは同期の区切りの通知からの追いつきが反映する。
+                        restart_replica_sync_with_backoff(
+                            docs_sync.as_ref(),
+                            topic.as_str(),
+                            &replica_for_task,
+                            &mut recovery_backoff,
+                        )
+                        .await;
+                        recovery_probe_due_at = recovery_backoff.next_probe_at(now);
                     }
                     else => {
                         let _ = hint_transport.unsubscribe_hints(&hint_topic_for_task).await;

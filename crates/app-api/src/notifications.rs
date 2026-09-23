@@ -9,6 +9,29 @@ impl AppService {
         Ok(items)
     }
 
+    pub async fn list_notification_dispatch_after(
+        &self,
+        after_sequence: i64,
+    ) -> Result<Vec<(i64, NotificationView)>> {
+        let mut items = Vec::new();
+        for (sequence, row) in self
+            .services
+            .projection_store
+            .list_notification_dispatch_after(after_sequence)
+            .await?
+        {
+            items.push((sequence, self.notification_view_from_row(row).await?));
+        }
+        Ok(items)
+    }
+
+    pub async fn notification_dispatch_head(&self) -> Result<i64> {
+        self.services
+            .projection_store
+            .notification_dispatch_head()
+            .await
+    }
+
     pub async fn mark_notification_read(
         &self,
         notification_id: &str,

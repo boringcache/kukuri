@@ -137,7 +137,8 @@ fn status_schema() -> Value {
     schema::object(
         json!({"peer_pubkey": {"type": "string"}, "dm_id": {"type": "string"},
         "mutual": {"type": "boolean"}, "send_enabled": {"type": "boolean"},
-        "peer_count": {"type": "integer", "minimum": 0}, "pending_outbox_count": {"type": "integer", "minimum": 0}}),
+        "peer_count": {"type": "integer", "minimum": 0}, "pending_outbox_count": {"type": "integer", "minimum": 0},
+        "pending_outbox_has_more": {"type": "boolean"}}),
         &[
             "peer_pubkey",
             "dm_id",
@@ -145,6 +146,7 @@ fn status_schema() -> Value {
             "send_enabled",
             "peer_count",
             "pending_outbox_count",
+            "pending_outbox_has_more",
         ],
     )
 }

@@ -36,6 +36,7 @@ async fn late_joiner_backfills_live_session_manifest() {
         .expect("ticket b value");
     app_a.import_peer_ticket(&ticket_b).await.expect("import b");
     app_b.import_peer_ticket(&ticket_a).await.expect("import a");
+    display_remote_session(&app_b, topic, &session_id, "live").await;
 
     let received = timeout(Duration::from_secs(10), async {
         loop {
@@ -103,7 +104,7 @@ async fn live_presence_expires_without_heartbeat() {
     timeout(Duration::from_secs(2), async {
         loop {
             let sessions = store
-                .list_topic_live_sessions(topic)
+                .list_channel_live_sessions(topic, "public", 100)
                 .await
                 .expect("list cached live sessions");
             if sessions
@@ -128,6 +129,59 @@ async fn live_presence_expires_without_heartbeat() {
         .find(|session| session.session_id == session_id)
         .expect("session present");
     assert_eq!(session.viewer_count, 0);
+}
+
+// #1292: 一覧の100件窓より古いsessionでも、heartbeat自身が終了projectionを単一行で確認して止まる。
+#[tokio::test]
+async fn live_presence_heartbeat_stops_when_its_projection_ends() {
+    let (viewer, _viewer_keys, owner, _owner_keys, _store, _docs_sync, _blob_service) =
+        shared_apps_with_memory_services();
+    let topic = "kukuri:topic:ended-heartbeat";
+    let session_id = owner
+        .create_live_session(
+            topic,
+            CreateLiveSessionInput {
+                title: "heartbeat".into(),
+                description: "self stop".into(),
+            },
+        )
+        .await
+        .expect("create live session");
+    viewer
+        .join_live_session(topic, session_id.as_str())
+        .await
+        .expect("join live session");
+    let task_key = live_presence_task_key(topic, PUBLIC_CHANNEL_ID, session_id.as_str());
+    assert!(
+        viewer
+            .subscription_registry
+            .live_presence_tasks
+            .lock()
+            .await
+            .contains_key(task_key.as_str())
+    );
+
+    owner
+        .end_live_session(topic, session_id.as_str())
+        .await
+        .expect("end live session");
+
+    timeout(Duration::from_secs(12), async {
+        loop {
+            if !viewer
+                .subscription_registry
+                .live_presence_tasks
+                .lock()
+                .await
+                .contains_key(task_key.as_str())
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ended heartbeat task must stop");
 }
 
 #[tokio::test]

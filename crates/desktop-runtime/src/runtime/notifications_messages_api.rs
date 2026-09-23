@@ -5,6 +5,19 @@ impl DesktopRuntime {
         self.app_service.list_notifications().await
     }
 
+    pub async fn list_notification_dispatch_after(
+        &self,
+        after_sequence: i64,
+    ) -> Result<Vec<(i64, NotificationView)>> {
+        self.app_service
+            .list_notification_dispatch_after(after_sequence)
+            .await
+    }
+
+    pub async fn notification_dispatch_head(&self) -> Result<i64> {
+        self.app_service.notification_dispatch_head().await
+    }
+
     pub async fn mark_notification_read(
         &self,
         request: NotificationIdRequest,

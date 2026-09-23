@@ -15,17 +15,28 @@ import {
 } from './DesktopShellPage.testHelpers';
 import type { BlobViewStatus } from '@/lib/api';
 import { DEVELOPER_MODE_STORAGE_KEY } from '@/lib/developerMode';
+import {
+  MEDIA_FETCH_MAX_AUTO_ATTEMPTS,
+  MEDIA_FETCH_RETRY_DELAYS_MS,
+  mediaFetchRetryPolicy,
+} from '@/shell/data/mediaFetchLedger';
+
+// #1207: 上限到達までに取得の往復を複数回はさむ。全体実行の負荷でも待てる長さにする。
+const FAILURE_WAIT = { timeout: 10_000 };
 
 beforeEach(() => {
+  // #1207: 自動再試行の待ち時間を 0 にし、実時間を待たずに上限到達まで進める。
+  mediaFetchRetryPolicy.retryDelaysMs = [0, 0];
   setViewportWidth(1024);
   window.history.replaceState(null, '', '/');
 });
 
 afterEach(() => {
+  mediaFetchRetryPolicy.retryDelaysMs = MEDIA_FETCH_RETRY_DELAYS_MS;
   vi.useRealTimers();
 });
 
-test('timeline image stops loading and hides unavailable media after a null response in normal mode', async () => {
+test('timeline image stops loading and shows the fetch failure after null responses in normal mode', async () => {
   window.localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, 'false');
   const payload = createDeferred<null>();
   const api = createDesktopMockApi({
@@ -46,10 +57,12 @@ test('timeline image stops loading and hides unavailable media after a null resp
     expect(screen.queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
   });
   expect(screen.queryByText('image/png')).not.toBeInTheDocument();
-  expect(screen.queryByText('Media unavailable.')).not.toBeInTheDocument();
+  const timeline = getActiveColumn('Timeline');
+  expect(await within(timeline).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
+  expect(within(timeline).getByRole('button', { name: 'Retry loading' })).toBeInTheDocument();
 });
 
-test('timeline image stops loading and hides unavailable media after a rejected response in normal mode', async () => {
+test('timeline image stops loading and shows the fetch failure after rejected responses in normal mode', async () => {
   window.localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, 'false');
   const payload = createDeferred<null>();
   const api = createDesktopMockApi({
@@ -71,6 +84,9 @@ test('timeline image stops loading and hides unavailable media after a rejected 
   });
   expect(screen.queryByText('image/png')).not.toBeInTheDocument();
   expect(screen.queryByText('blob unavailable')).not.toBeInTheDocument();
+  expect(
+    await within(getActiveColumn('Timeline')).findByText('Failed to load.', {}, FAILURE_WAIT)
+  ).toBeInTheDocument();
 });
 
 test('missing text body does not occupy normal UI', async () => {
@@ -94,7 +110,7 @@ test('missing text body does not occupy normal UI', async () => {
   expect(screen.queryByText('Content unavailable.')).not.toBeInTheDocument();
 });
 
-test('developer mode shows concise diagnostics after body and media become unavailable', async () => {
+test('body and media failures expose separate retry states', async () => {
   const api = createDesktopMockApi({
     seedPosts: {
       'kukuri:topic:general': [buildImagePost()],
@@ -104,8 +120,11 @@ test('developer mode shows concise diagnostics after body and media become unava
 
   render(<App api={api} />);
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Content unavailable.')).toBeInTheDocument();
-  expect(await within(getActiveColumn('Timeline')).findByText('Media unavailable.')).toBeInTheDocument();
+  await waitFor(
+    () =>
+      expect(within(getActiveColumn('Timeline')).getAllByText('Failed to load.')).toHaveLength(2),
+    FAILURE_WAIT
+  );
   expect(screen.queryByTestId('text-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
@@ -121,7 +140,7 @@ test('developer mode replaces a missing image skeleton with a diagnostic', async
 
   render(<App api={api} />);
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Media unavailable.')).toBeInTheDocument();
+  expect(await within(getActiveColumn('Timeline')).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
   expect(screen.queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('image/png')).not.toBeInTheDocument();
 });
@@ -283,11 +302,14 @@ test('thread pane reuses the same unavailable media renderer', async () => {
   await waitFor(() => expect(getDetailPane('Thread')).toBeInTheDocument());
   const threadPanel = getDetailPane('Thread');
 
-  expect(await within(threadPanel).findByText('Media unavailable.')).toBeInTheDocument();
+  await waitFor(
+    () => expect(within(threadPanel).getAllByText('Failed to load.')).toHaveLength(2),
+    FAILURE_WAIT
+  );
   expect(within(threadPanel).queryByTestId('media-skeleton-image-post')).not.toBeInTheDocument();
 });
 
-test('developer mode reports an unavailable text body without rendering its placeholder', async () => {
+test('an unavailable text body shows its retry state without rendering the placeholder', async () => {
   render(
     <App
       api={createDesktopMockApi({
@@ -298,7 +320,10 @@ test('developer mode reports an unavailable text body without rendering its plac
     />
   );
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Content unavailable.')).toBeInTheDocument();
+  expect(await within(getActiveColumn('Timeline')).findByText('Failed to load.')).toBeInTheDocument();
+  expect(
+    within(getActiveColumn('Timeline')).getByRole('button', { name: 'Retry loading' })
+  ).toBeInTheDocument();
   expect(screen.queryByTestId('text-skeleton-image-post')).not.toBeInTheDocument();
   expect(screen.queryByText('[blob pending]')).not.toBeInTheDocument();
 });
@@ -313,7 +338,7 @@ test('developer mode replaces an unavailable video skeleton with a diagnostic', 
 
   render(<App api={api} />);
 
-  expect(await within(getActiveColumn('Timeline')).findByText('Media unavailable.')).toBeInTheDocument();
+  expect(await within(getActiveColumn('Timeline')).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
   expect(screen.queryByTestId('media-skeleton-video-post')).not.toBeInTheDocument();
   expect(screen.queryByText('video/mp4')).not.toBeInTheDocument();
 });
@@ -591,3 +616,147 @@ test('video card falls back to poster preview when playback is unsupported on th
   expect(screen.getByAltText('video preview')).toBeInTheDocument();
 });
 
+
+// #1207 TR-1 / TR-9: 自動取得は上限回数で止まり、その後の定期 refresh では取り直さない。
+test('automatic media fetch stops at the attempt limit and later refreshes do not retry', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const post = buildImagePost({ content: 'caption', content_status: 'Available' });
+  const imageHash = post.attachments[0].hash;
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const requested: string[] = [];
+  api.getBlobMediaPayload = async (hash) => {
+    requested.push(hash);
+    return null;
+  };
+
+  render(<App api={api} />);
+
+  const timeline = getActiveColumn('Timeline');
+  expect(await within(timeline).findByText('Failed to load.', {}, FAILURE_WAIT)).toBeInTheDocument();
+  const attempts = () => requested.filter((hash) => hash === imageHash).length;
+  expect(attempts()).toBe(MEDIA_FETCH_MAX_AUTO_ATTEMPTS);
+
+  // 3 秒 refresh を複数回またぐ。timeline の参照は毎回変わるが、失敗した hash は取り直さない。
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15_000);
+  });
+  expect(attempts()).toBe(MEDIA_FETCH_MAX_AUTO_ATTEMPTS);
+  expect(within(timeline).getByText('Failed to load.')).toBeInTheDocument();
+});
+
+// #1207 TR-2: 明示再試行は対象 hash だけを 1 回取り直し、再試行中は操作を重複させない。
+test('manual retry refetches only the failed hash and recovers when the blob arrives', async () => {
+  installObjectUrlMocks();
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'caption', content_status: 'Available' });
+  const imageHash = post.attachments[0].hash;
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const requested: string[] = [];
+  let retryPayload = createDeferred<{ bytes_base64: string; mime: string } | null>();
+  let failing = true;
+  api.getBlobMediaPayload = async (hash, mime) => {
+    requested.push(hash);
+    if (failing) {
+      return null;
+    }
+    void mime;
+    return retryPayload.promise;
+  };
+
+  render(<App api={api} />);
+
+  const timeline = getActiveColumn('Timeline');
+  const retryButton = await within(timeline).findByRole('button', { name: 'Retry loading' }, FAILURE_WAIT);
+  const before = requested.length;
+  failing = false;
+
+  await user.click(retryButton);
+  await waitFor(() => expect(retryButton).toHaveAttribute('aria-disabled', 'true'));
+  expect(within(timeline).getByText('Retrying…')).toBeInTheDocument();
+  // 再試行中の追加 click は新しい取得を起こさない。
+  await user.click(retryButton);
+  expect(requested.slice(before)).toEqual([imageHash]);
+
+  act(() => retryPayload.resolve({ bytes_base64: 'ZmFrZS1pbWFnZQ==', mime: 'image/png' }));
+  expect(await within(timeline).findByTestId('media-preview-image-post')).toHaveAttribute(
+    'src',
+    expect.stringContaining('blob:mock-')
+  );
+  expect(within(timeline).queryByText('Failed to load.')).not.toBeInTheDocument();
+
+  retryPayload = createDeferred();
+});
+
+// #1207 TR-2: 明示再試行が失敗したら失敗表示へ戻り、自動では取り直さない。
+test('manual retry that fails returns to the failure display without looping', async () => {
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'caption', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  let calls = 0;
+  api.getBlobMediaPayload = async () => {
+    calls += 1;
+    return null;
+  };
+
+  render(<App api={api} />);
+
+  const timeline = getActiveColumn('Timeline');
+  const retryButton = await within(timeline).findByRole('button', { name: 'Retry loading' }, FAILURE_WAIT);
+  const before = calls;
+  await user.click(retryButton);
+
+  await waitFor(() => expect(calls).toBe(before + 1));
+  await waitFor(() =>
+    expect(within(timeline).getByRole('button', { name: 'Retry loading' })).toHaveAttribute(
+      'aria-disabled',
+      'false'
+    )
+  );
+  expect(within(timeline).getByText('Failed to load.')).toBeInTheDocument();
+  expect(calls).toBe(before + 1);
+});
+
+test('post reload action is rightmost and requests the whole card', async () => {
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'reloadable post', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  api.retryPostElements = vi.fn(async () => post);
+
+  render(<App api={api} />);
+
+  const timeline = getActiveColumn('Timeline');
+  const reload = await within(timeline).findByRole('button', { name: 'Reload post' });
+  const actions = reload.closest('.post-actions');
+  expect(actions).not.toBeNull();
+  expect(within(actions as HTMLElement).getAllByRole('button').at(-1)).toBe(reload);
+
+  await user.click(reload);
+  expect(api.retryPostElements).toHaveBeenCalledWith(post.object_id, null, true);
+});
+
+test('post reload stays busy until its failed media retry settles', async () => {
+  installObjectUrlMocks();
+  const user = userEvent.setup();
+  const post = buildImagePost({ content: 'reload media with the card', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const retryPayload = createDeferred<{ bytes_base64: string; mime: string } | null>();
+  let recovering = false;
+  api.getBlobMediaPayload = async () =>
+    recovering ? retryPayload.promise : Promise.resolve(null);
+  api.retryPostElements = vi.fn(async () => post);
+
+  render(<App api={api} />);
+  const timeline = getActiveColumn('Timeline');
+  await within(timeline).findByTestId(`media-fetch-failure-${post.object_id}`, {}, FAILURE_WAIT);
+  const reload = within(timeline).getByRole('button', { name: 'Reload post' });
+  recovering = true;
+  await user.click(reload);
+
+  await waitFor(() => expect(reload).toHaveAttribute('aria-busy', 'true'));
+  expect(api.retryPostElements).toHaveBeenCalledWith(post.object_id, null, true);
+  expect(reload).toHaveAttribute('aria-busy', 'true');
+
+  act(() => retryPayload.resolve({ bytes_base64: 'ZmFrZS1pbWFnZQ==', mime: 'image/png' }));
+  await within(timeline).findByTestId(`media-preview-${post.object_id}`);
+  await waitFor(() => expect(reload).toHaveAttribute('aria-busy', 'false'));
+}, 10_000);

@@ -23,6 +23,8 @@ import { type MockRuntime } from '../mockRuntime';
 
 type LiveGameMock = Pick<
   DesktopApi,
+  | 'listSessionCandidates'
+  | 'setSessionDisplay'
   | 'listLiveSessions'
   | 'createLiveSession'
   | 'endLiveSession'
@@ -61,7 +63,6 @@ export function createLiveGameMock(runtime: MockRuntime): LiveGameMock {
   const {
     liveSessionsByTopic,
     gameRoomsByTopic,
-    joinedChannelsByTopic,
     syncStatus,
     metaverseRoomEventsByRoom,
     metaverseAssetPayloads,
@@ -171,12 +172,13 @@ export function createLiveGameMock(runtime: MockRuntime): LiveGameMock {
   };
 
   return {
+    async listSessionCandidates() { return []; },
+    async setSessionDisplay() {},
     async listLiveSessions(topic, scope: TimelineScope = { kind: 'public' }) {
       const muted = mutedAuthorPubkeys();
       return filterChannelScopedItems(
         liveSessionsByTopic[topic] ?? [],
-        scope,
-        joinedChannelsByTopic[topic] ?? []
+        scope
       ).filter((session) => !muted.has(session.host_pubkey));
     },
     async createLiveSession(topic, title, description, channelRef = { kind: 'public' }) {
@@ -230,8 +232,7 @@ export function createLiveGameMock(runtime: MockRuntime): LiveGameMock {
       const muted = mutedAuthorPubkeys();
       return filterChannelScopedItems(
         gameRoomsByTopic[topic] ?? [],
-        scope,
-        joinedChannelsByTopic[topic] ?? []
+        scope
       ).filter((room) => !muted.has(room.host_pubkey));
     },
     async createGameRoom(topic, title, description, participants, channelRef = { kind: 'public' }) {

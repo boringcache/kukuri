@@ -19,6 +19,8 @@ mod posts;
 mod private_channels;
 mod profile;
 mod reactions;
+mod receive_endpoint_binding;
+mod receive_offer;
 mod rendezvous;
 mod trust_observations;
 pub mod wire;
@@ -27,7 +29,8 @@ pub mod wire;
 mod tests;
 
 pub use crypto::{
-    KukuriKeys, LEGACY_SECRET_HRP, encode_secret_key_bech32, generate_keys, is_placeholder_secret,
+    DocsAuthorSeed, KukuriKeys, LEGACY_SECRET_HRP, encode_secret_key_bech32, generate_keys,
+    is_placeholder_secret,
 };
 pub use device_backup::{
     DEVICE_BACKUP_CHUNK_BYTES, DEVICE_BACKUP_COMPONENT_VERSION, DEVICE_BACKUP_FORMAT_VERSION,
@@ -99,6 +102,7 @@ pub use dome_transition::{
 pub(crate) use envelope::sign_envelope_at;
 pub use envelope::{
     GossipHint, HintObjectRef, KukuriAuthEnvelopeContentV1, KukuriEnvelope, sign_envelope_json,
+    sign_envelope_json_at,
 };
 pub use game::{
     DomeCustomizationV1, DomeDirection, DomeEnvironmentV1, DomeInstanceManifestV1,
@@ -149,13 +153,14 @@ pub use metaverse_resource_budget::{
     validate_metaverse_asset_metadata,
 };
 pub use posts::{
-    ADULT_CONTENT_LABEL, CanonicalPostHeader, ChannelRef, KukuriPostEnvelopeContentV1,
-    KukuriPostObjectV1, KukuriPostWithdrawalEnvelopeContentV1, ObjectStatus, ObjectVisibility,
-    PayloadRef, PostWithdrawalReason, PostWithdrawalV1, RepostSourceSnapshotV1, ThreadRef,
-    TimelineScope, WithdrawalReasonVisibility, build_post_envelope,
-    build_post_envelope_with_payload, build_post_envelope_with_payload_in_channel,
-    build_post_withdrawal_envelope, build_repost_envelope, has_adult_content_label,
-    timeline_sort_key, verify_post_withdrawal,
+    ADULT_CONTENT_LABEL, CanonicalPostHeader, ChannelRef, DOCS_AUTHOR_TAG,
+    KukuriPostEnvelopeContentV1, KukuriPostObjectV1, KukuriPostWithdrawalEnvelopeContentV1,
+    ObjectStatus, ObjectVisibility, PayloadRef, PostWithdrawalReason, PostWithdrawalV1,
+    RepostSourceSnapshotV1, ThreadRef, TimelineScope, WithdrawalReasonVisibility,
+    build_post_envelope, build_post_envelope_with_docs_author, build_post_envelope_with_payload,
+    build_post_envelope_with_payload_in_channel, build_post_withdrawal_envelope,
+    build_repost_envelope, build_repost_envelope_with_docs_author, has_adult_content_label,
+    is_docs_author_id, timeline_sort_key, verify_post_withdrawal,
 };
 pub use private_channels::{
     ChannelAudienceKind, ChannelSharingState, CreatePrivateChannelInput, FriendOnlyGrantPreview,
@@ -179,15 +184,28 @@ pub use profile::{
     KukuriBlockEdgeEnvelopeContentV1, KukuriFollowEdgeEnvelopeContentV1,
     KukuriProfileEnvelopeContentV1, KukuriProfilePostEnvelopeContentV1,
     KukuriProfileRepostEnvelopeContentV1, Profile, ProfilePost, ProfileRepost,
-    build_block_edge_envelope, build_follow_edge_envelope, build_profile_envelope,
-    build_profile_post_envelope, build_profile_repost_envelope, parse_block_edge,
-    parse_follow_edge, parse_profile, parse_profile_post, parse_profile_repost,
+    build_block_edge_envelope, build_block_edge_envelope_with_docs_author,
+    build_follow_edge_envelope, build_follow_edge_envelope_with_docs_author,
+    build_profile_envelope, build_profile_envelope_with_docs_author, build_profile_post_envelope,
+    build_profile_repost_envelope, parse_block_edge, parse_follow_edge, parse_profile,
+    parse_profile_post, parse_profile_repost,
 };
 pub use reactions::{
     CustomReactionAssetDocV1, CustomReactionAssetSnapshotV1,
     KukuriCustomReactionAssetEnvelopeContentV1, KukuriReactionEnvelopeContentV1, ReactionDocV1,
-    ReactionKeyKind, ReactionKeyV1, build_custom_reaction_asset_envelope, build_reaction_envelope,
+    ReactionKeyKind, ReactionKeyV1, build_custom_reaction_asset_envelope,
+    build_custom_reaction_asset_envelope_with_docs_author, build_reaction_envelope,
     deterministic_reaction_id, parse_custom_reaction_asset, parse_reaction,
+};
+pub use receive_endpoint_binding::{
+    RECEIVE_ENDPOINT_BINDING_MAX_BYTES, RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS,
+    ReceiveEndpointBindingV1, VerifiedReceiveEndpointBinding, receive_route_for_account,
+};
+pub use receive_offer::{
+    PRIVATE_RECEIVE_PAYLOAD_MAX_PLAINTEXT_BYTES, PrivateReceivePayloadV1, RECEIVE_OFFER_MAX_BYTES,
+    RECEIVE_OFFER_MAX_LIFETIME_MS, RECEIVE_PAYLOAD_MAX_BYTES, ReceiveOfferReferenceV1,
+    ReceiveOfferScopeV1, SealedReceiveOfferV1, VerifiedReceiveOffer, receive_epoch_key_id,
+    seal_private_receive_payload, seal_receive_offer,
 };
 pub use rendezvous::{private_topic_rendezvous_key_hex_secret, public_topic_rendezvous_key};
 pub use trust_observations::{

@@ -24,7 +24,6 @@ import type { InternalSmartReference } from '@/lib/internalLinks';
 import { copyTextToClipboard } from '@/lib/utils';
 
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Notice } from '@/components/ui/notice';
 import { CommunityNodeConsentDialog } from '@/components/settings/CommunityNodeConsentDialog';
@@ -157,6 +156,7 @@ function resolveInputForEntry(
     topic,
     object_id: entry.object_id,
     author_pubkey: entry.author_pubkey,
+    ...(entry.source_replica_id == null ? {} : { source_replica_id: entry.source_replica_id }),
     channel_ref:
       entry.scope_kind === 'public_topic'
         ? { kind: 'public' }
@@ -331,14 +331,13 @@ export function CommunityIndexWorkspace({
   const authorSequence = useRef(0);
 
   const effectiveOperation: IndexOperation = mode === 'topic' ? 'search' : operation;
-  const isAllJoined = mode === 'topic' && activeTimelineScope.kind === 'all_joined';
   // 選択値が適格一覧(認証・同意・通信・提供中能力)に含まれない間は、再調整が追いつくまで
   // 古いノードへ要求を送らない(#698)。文脈も無効化するので古い結果・通報対象は失効する。
   const activeNodeBaseUrl =
     selectedNodeBaseUrl !== null && eligibleNodeBaseUrls.includes(selectedNodeBaseUrl)
       ? selectedNodeBaseUrl
       : null;
-  const disabled = activeNodeBaseUrl === null || isAllJoined ||
+  const disabled = activeNodeBaseUrl === null ||
     (availability !== undefined && availability.reason !== 'ready');
   const retryDeadline = activeNodeBaseUrl ? queryRetryDeadlines[activeNodeBaseUrl] ?? 0 : 0;
   const queryRetrySeconds = Math.max(0, Math.ceil((retryDeadline - queryClock) / 1000));
@@ -754,17 +753,19 @@ export function CommunityIndexWorkspace({
   }
 
   return (
-    <Card className='shell-workspace-card shell-community-index-workspace space-y-4' data-testid={`community-index-${mode}`}>
-      <div className='flex flex-wrap items-start justify-between gap-3'>
-        <div className='space-y-1'>
-          <h3 className='text-lg font-semibold'>{t('shell:communityIndex.title')}</h3>
-          <p className='text-sm text-[var(--muted-foreground)]'>
-            {mode === 'topic'
-              ? t('shell:communityIndex.topicSummary')
-              : t('shell:communityIndex.exploreSummary')}
-          </p>
+    <div className='shell-column-content shell-community-index-workspace space-y-4' data-testid={`community-index-${mode}`}>
+      {/* #1192: 「見つける」カラムではカラム見出しと重複するため、
+          カード内の見出しと説明文を出さない。トピック内カードは従来どおり。 */}
+      {mode === 'topic' ? (
+        <div className='flex flex-wrap items-start justify-between gap-3'>
+          <div className='space-y-1'>
+            <h3 className='text-lg font-semibold'>{t('shell:communityIndex.title')}</h3>
+            <p className='text-sm text-[var(--muted-foreground)]'>
+              {t('shell:communityIndex.topicSummary')}
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {mode === 'explore' ? (
         <div
@@ -838,8 +839,6 @@ export function CommunityIndexWorkspace({
             </Button>
           </div>
         </Notice>
-      ) : isAllJoined ? (
-        <Notice className='shell-community-index-notice' tone='warning'>{t('shell:communityIndex.allJoinedDisabled')}</Notice>
       ) : (
         <form className='shell-community-index-form' onSubmit={(event) => void runQuery(event)}>
           {effectiveOperation === 'search' ? (
@@ -910,6 +909,7 @@ export function CommunityIndexWorkspace({
             return (
             <li key={key}>
               <PostCard
+                enableLinkPreview
                 view={view}
                 readOnly={!view.actionPost}
                 mediaObjectUrls={mediaObjectUrls}
@@ -956,6 +956,7 @@ export function CommunityIndexWorkspace({
                 onSubmitReport={(request) => api.submitCommunityNodeReport(request)}
                 onCopyReportContact={(value) => void copyTextToClipboard(value)}
                 onFetchReportManifest={(baseUrl) => api.fetchCommunityNodeManifest(baseUrl)}
+                onFetchNodePolicies={(baseUrl, language) => api.fetchCommunityNodePolicies(baseUrl, language)}
               />
             </li>
             );
@@ -964,6 +965,6 @@ export function CommunityIndexWorkspace({
       ) : null}
 
       {consentFlow.dialog ? <CommunityNodeConsentDialog {...consentFlow.dialog} /> : null}
-    </Card>
+    </div>
   );
 }

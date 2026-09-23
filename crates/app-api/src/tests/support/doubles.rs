@@ -1,4 +1,5 @@
 use super::super::*;
+use kukuri_transport::EndpointAddr;
 
 #[derive(Clone)]
 pub(crate) struct StaticTransport {
@@ -14,6 +15,11 @@ impl StaticTransport {
             hints: Arc::new(TokioMutex::new(HashMap::new())),
             local_ticket: "static-peer".into(),
         }
+    }
+
+    pub(crate) fn with_local_endpoint_id(mut self, endpoint_id: String) -> Self {
+        self.local_ticket = endpoint_id;
+        self
     }
 
     pub(crate) async fn hint_sender(&self, topic: &TopicId) -> broadcast::Sender<HintEnvelope> {
@@ -55,6 +61,14 @@ impl DocsSync for AssistedDocsSync {
         _policy: kukuri_docs_sync::DocFetchPolicy,
     ) -> Result<Vec<kukuri_docs_sync::DocRecord>> {
         Ok(Vec::new())
+    }
+
+    async fn query_replica_keys(
+        &self,
+        _replica_id: &ReplicaId,
+        _query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        Ok(kukuri_docs_sync::DocKeyPage::default())
     }
 
     async fn subscribe_replica(
@@ -101,6 +115,14 @@ impl DocsSync for TrackingDocsSync {
         Ok(Vec::new())
     }
 
+    async fn query_replica_keys(
+        &self,
+        _replica_id: &ReplicaId,
+        _query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        Ok(kukuri_docs_sync::DocKeyPage::default())
+    }
+
     async fn subscribe_replica(
         &self,
         replica_id: &ReplicaId,
@@ -143,6 +165,13 @@ impl AssistedBlobService {
 
 #[async_trait]
 impl BlobService for AssistedBlobService {
+    async fn fetch_local_blob(
+        &self,
+        _hash: &kukuri_core::BlobHash,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     async fn put_blob(&self, _data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         Ok(StoredBlob {
             hash: kukuri_core::BlobHash::new("test-hash"),
@@ -160,6 +189,10 @@ impl BlobService for AssistedBlobService {
     }
 
     async fn blob_status(&self, _hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
+        Ok(BlobStatus::Missing)
+    }
+
+    async fn local_blob_status(&self, _hash: &kukuri_core::BlobHash) -> Result<BlobStatus> {
         Ok(BlobStatus::Missing)
     }
 
@@ -183,6 +216,13 @@ impl Transport for StaticTransport {
 
     async fn import_ticket(&self, _ticket: &str) -> Result<()> {
         Ok(())
+    }
+
+    async fn discovery(&self) -> Result<kukuri_transport::DiscoverySnapshot> {
+        Ok(kukuri_transport::DiscoverySnapshot {
+            local_endpoint_id: self.local_ticket.clone(),
+            ..Default::default()
+        })
     }
 }
 
@@ -228,15 +268,15 @@ impl HintTransport for NoopHintTransport {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CountingClosingHintTransport {
+pub(crate) struct CountingPendingHintTransport {
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
 }
 
 #[async_trait]
-impl HintTransport for CountingClosingHintTransport {
+impl HintTransport for CountingPendingHintTransport {
     async fn subscribe_hints(&self, _topic: &TopicId) -> Result<HintStream> {
         *self.subscribe_count.lock().await += 1;
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(Box::pin(futures_util::stream::pending()))
     }
 
     async fn unsubscribe_hints(&self, _topic: &TopicId) -> Result<()> {
@@ -253,6 +293,14 @@ pub(crate) struct TrackingHintTransport {
     hints: Arc<TokioMutex<HashMap<String, broadcast::Sender<HintEnvelope>>>>,
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
     pub(crate) unsubscribed_topics: Arc<TokioMutex<Vec<String>>>,
+    pub(crate) published_count: Arc<AtomicUsize>,
+    pub(crate) publish_hint_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub(crate) resolved_destination: Arc<TokioMutex<Option<EndpointAddr>>>,
+    pub(crate) resolved_count: Arc<AtomicUsize>,
+    pub(crate) resolve_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub(crate) offers:
+        Arc<TokioMutex<Vec<(Pubkey, EndpointAddr, kukuri_core::SealedReceiveOfferV1)>>>,
+    pub(crate) fail_offer_publish: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TrackingHintTransport {
@@ -284,12 +332,61 @@ impl HintTransport for TrackingHintTransport {
     }
 
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()> {
+        self.published_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(barrier) = &self.publish_hint_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
         let sender = self.hint_sender(topic).await;
         let _ = sender.send(HintEnvelope {
             hint,
             received_at: Utc::now().timestamp_millis(),
             source_peer: "tracking".into(),
         });
+        Ok(())
+    }
+
+    async fn resolve_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        self.resolved_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(barrier) = &self.resolve_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
+        Ok(self.resolved_destination.lock().await.clone())
+    }
+
+    async fn invalidate_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+        endpoint_id: &str,
+    ) -> Result<()> {
+        let mut resolved = self.resolved_destination.lock().await;
+        if resolved
+            .as_ref()
+            .is_some_and(|addr| addr.id.to_string() == endpoint_id)
+        {
+            *resolved = None;
+        }
+        Ok(())
+    }
+
+    async fn publish_receive_offer(
+        &self,
+        recipient: &Pubkey,
+        destination: EndpointAddr,
+        offer: kukuri_core::SealedReceiveOfferV1,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.fail_offer_publish.load(Ordering::SeqCst),
+            "simulated account offer failure"
+        );
+        self.offers
+            .lock()
+            .await
+            .push((recipient.clone(), destination, offer));
         Ok(())
     }
 }

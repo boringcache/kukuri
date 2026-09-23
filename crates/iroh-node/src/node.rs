@@ -12,11 +12,15 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher};
 use iroh_blobs::api::Store as BlobStore;
 use iroh_blobs::store::{fs::options::Options as BlobStoreOptions, mem::MemStore};
+use iroh_docs::actor::SyncHandle;
 use iroh_docs::api::DocsApi;
+use iroh_docs::engine::{DefaultAuthorStorage, Engine};
+use iroh_docs::store::Store as DocsStore;
 use iroh_gossip::net::Gossip;
 use kukuri_transport::{
-    ConnectMode, DhtDiscoveryOptions, TransportNetworkConfig, TransportRelayConfig,
-    build_endpoint_builder, prepare_endpoint_for_discovery, sync_endpoint_relay_config,
+    ConnectMode, DhtDiscoveryOptions, RECEIVE_BINDING_ALPN, ReceiveBindingSlot,
+    TransportNetworkConfig, TransportRelayConfig, build_endpoint_builder,
+    prepare_endpoint_for_discovery, sync_endpoint_relay_config,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -46,12 +50,38 @@ async fn spawn_docs(
     endpoint: Endpoint,
     blobs: BlobStore,
     gossip: Gossip,
-) -> Result<iroh_docs::protocol::Docs> {
-    let docs_builder = match root {
-        Some(path) => iroh_docs::protocol::Docs::persistent(path.to_path_buf()),
-        None => iroh_docs::protocol::Docs::memory(),
+) -> Result<SpawnedDocs> {
+    // Keep the high-level API and its persistent store layout while retaining
+    // the public SyncHandle for demand-owned, selected-peer sessions. The
+    // high-level Docs::Builder discards this handle after creating the Engine.
+    let (replica_store, author_store) = match root {
+        Some(path) => (
+            DocsStore::persistent(path.join(DOCS_STORE_FILE_NAME))?,
+            DefaultAuthorStorage::Persistent(path.join(DEFAULT_AUTHOR_FILE_NAME)),
+        ),
+        None => (DocsStore::memory(), DefaultAuthorStorage::Mem),
     };
-    docs_builder.spawn(endpoint, blobs, gossip).await
+    let downloader = blobs.downloader(&endpoint);
+    let engine = Engine::spawn(
+        endpoint,
+        gossip,
+        replica_store,
+        blobs,
+        downloader,
+        author_store,
+        None,
+    )
+    .await?;
+    let sync = engine.sync.clone();
+    Ok(SpawnedDocs {
+        protocol: iroh_docs::protocol::Docs::new(engine),
+        sync,
+    })
+}
+
+struct SpawnedDocs {
+    protocol: iroh_docs::protocol::Docs,
+    sync: SyncHandle,
 }
 
 async fn recover_persistent_docs(
@@ -60,7 +90,7 @@ async fn recover_persistent_docs(
     blobs: BlobStore,
     gossip: Gossip,
     original_error: anyhow::Error,
-) -> Result<iroh_docs::protocol::Docs> {
+) -> Result<SpawnedDocs> {
     let recovery_dir = move_corrupt_docs_store(root)
         .with_context(|| format!("failed to recover iroh docs store at {}", root.display()))?;
     warn!(
@@ -144,7 +174,11 @@ pub struct IrohDocsNode {
     relay_urls: Arc<StdRwLock<Vec<RelayUrl>>>,
     router: Arc<Router>,
     docs: DocsApi,
+    docs_sync: SyncHandle,
     blobs: BlobStore,
+    fetch_peer_health: Arc<kukuri_transport::BlobPeerHealth>,
+    receive_binding: ReceiveBindingSlot,
+    pub(crate) network_work: Arc<crate::network_work::NetworkWorkRuntime>,
     shutdown_started: AtomicBool,
     shutdown_result: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
 }
@@ -172,6 +206,7 @@ impl IrohDocsNode {
             TransportNetworkConfig::loopback(),
             DhtDiscoveryOptions::disabled(),
             TransportRelayConfig::default(),
+            false,
         )
         .await
     }
@@ -199,21 +234,68 @@ impl IrohDocsNode {
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
     ) -> Result<Arc<Self>> {
+        Self::load_persistent(
+            root.as_ref(),
+            network_config,
+            dht_options,
+            relay_config,
+            true,
+        )
+        .await
+    }
+
+    /// Runtime repair reopens canonical data; it must never turn a failed open
+    /// into an empty replacement store or generate a new endpoint identity.
+    pub async fn reopen_with_discovery_config(
+        root: impl AsRef<Path>,
+        network_config: TransportNetworkConfig,
+        dht_options: DhtDiscoveryOptions,
+        relay_config: TransportRelayConfig,
+    ) -> Result<Arc<Self>> {
         let root = root.as_ref();
+        for name in [
+            DOCS_STORE_FILE_NAME,
+            DEFAULT_AUTHOR_FILE_NAME,
+            ENDPOINT_SECRET_FILE_NAME,
+        ] {
+            anyhow::ensure!(
+                root.join(name).is_file(),
+                "runtime repair requires the existing {name}"
+            );
+        }
+        Self::load_persistent(root, network_config, dht_options, relay_config, false).await
+    }
+
+    async fn load_persistent(
+        root: &Path,
+        network_config: TransportNetworkConfig,
+        dht_options: DhtDiscoveryOptions,
+        relay_config: TransportRelayConfig,
+        recover_corrupt_docs: bool,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(root)
             .with_context(|| format!("failed to create docs root {}", root.display()))?;
         let options = BlobStoreOptions::new(root);
         let store = iroh_blobs::store::fs::FsStore::load_with_opts(root.join("blobs.db"), options)
             .await
             .with_context(|| format!("failed to load blob store at {}", root.display()))?;
-        Self::spawn(
+        let result = Self::spawn(
             (*store).clone(),
             Some(root.to_path_buf()),
             network_config,
             dht_options,
             relay_config,
+            recover_corrupt_docs,
         )
-        .await
+        .await;
+        if result.is_err() {
+            // Early failures (e.g. relay parsing or bind) happen before a node
+            // owns this store. Wait for its actor/DB to close before a caller
+            // can reopen it; merely dropping the API races cleanup on Linux.
+            // Docs startup may already have closed it; retain the original error.
+            let _ = store.shutdown().await;
+        }
+        result
     }
 
     async fn spawn(
@@ -222,6 +304,7 @@ impl IrohDocsNode {
         network_config: TransportNetworkConfig,
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
+        recover_corrupt_docs: bool,
     ) -> Result<Arc<Self>> {
         let blobs = store.into();
         let discovery = Arc::new(MemoryLookup::new());
@@ -268,7 +351,7 @@ impl IrohDocsNode {
         {
             Ok(docs) => docs,
             Err(error) => {
-                let error = if let Some(root) = root.as_deref() {
+                let error = if let Some(root) = root.as_deref().filter(|_| recover_corrupt_docs) {
                     recover_persistent_docs(
                         root,
                         endpoint.clone(),
@@ -290,13 +373,15 @@ impl IrohDocsNode {
                 }
             }
         };
+        let receive_binding = ReceiveBindingSlot::new(endpoint.id());
         let router = Router::builder(endpoint.clone())
             .accept(
                 iroh_blobs::ALPN,
                 iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
-            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_docs::ALPN, docs.protocol.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(RECEIVE_BINDING_ALPN, receive_binding.clone())
             .spawn();
 
         let node = Arc::new(Self {
@@ -305,8 +390,12 @@ impl IrohDocsNode {
             discovery,
             relay_urls,
             router: Arc::new(router),
-            docs: docs.api().clone(),
+            docs: docs.protocol.api().clone(),
+            docs_sync: docs.sync,
             blobs,
+            fetch_peer_health: Arc::new(kukuri_transport::BlobPeerHealth::default()),
+            receive_binding,
+            network_work: Arc::new(crate::network_work::NetworkWorkRuntime::default()),
             shutdown_started: AtomicBool::new(false),
             shutdown_result: tokio::sync::watch::channel(None).0,
         });
@@ -320,12 +409,26 @@ impl IrohDocsNode {
         &self.endpoint
     }
 
+    /// The same store used by the production DocsApi; selected-peer sync must
+    /// not create a second in-memory or persistent docs store.
+    pub fn docs_sync_handle(&self) -> SyncHandle {
+        self.docs_sync.clone()
+    }
+
     pub fn gossip(&self) -> &Gossip {
         &self.gossip
     }
 
     pub fn discovery(&self) -> Arc<MemoryLookup> {
         self.discovery.clone()
+    }
+
+    pub fn fetch_peer_health(&self) -> Arc<kukuri_transport::BlobPeerHealth> {
+        self.fetch_peer_health.clone()
+    }
+
+    pub async fn install_receive_binding(&self, keys: Arc<kukuri_core::KukuriKeys>) -> Result<()> {
+        self.receive_binding.install(keys).await
     }
 
     pub async fn relay_urls(&self) -> Vec<RelayUrl> {
@@ -404,6 +507,8 @@ impl IrohDocsNode {
     }
 
     pub async fn shutdown(self: Arc<Self>) -> Result<()> {
+        self.network_work.close();
+        self.receive_binding.reject_new_requests();
         let mut result = self.shutdown_result.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let node = self.clone();
@@ -428,6 +533,8 @@ impl IrohDocsNode {
     }
 
     async fn shutdown_owned(&self) -> Result<()> {
+        self.network_work.close();
+        self.receive_binding.clear().await;
         // Flush before the router invokes BlobsProtocol::shutdown. A later
         // shutdown RPC may legitimately find that actor already closed.
         let blob_flush = self.blobs.sync_db().await;
@@ -452,6 +559,8 @@ impl IrohDocsNode {
 
 impl Drop for IrohDocsNode {
     fn drop(&mut self) {
+        self.network_work.close();
+        self.receive_binding.reject_new_requests();
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }

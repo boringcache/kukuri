@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -10,10 +10,11 @@ use kukuri_core::{
 use crate::models::{
     AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
     BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
-    DirectMessageMessageRow, DirectMessageOutboxRow, DirectMessageTombstoneRow,
-    DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
-    LiveSessionProjectionRow, MutedAuthorRow, NotificationRow, ObjectProjectionRow, Page,
-    PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,
+    DirectMessageMessageRow, DirectMessageOutboxCursor, DirectMessageOutboxPage,
+    DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
+    DomeHostingProjectionRow, GameRoomProjectionRow, LiveSessionProjectionRow, MutedAuthorRow,
+    NotificationRow, ObjectProjectionRow, Page, PostWithdrawalRow, ReactionProjectionRow,
+    TimelineCursor,
 };
 
 pub(crate) const CONTENT_OBSERVATION_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1000;
@@ -70,6 +71,15 @@ pub trait ObjectProjectionStore: Send + Sync {
         &self,
         object_id: &EnvelopeId,
     ) -> Result<Option<ObjectProjectionRow>>;
+    /// #1239: `author_pubkey` が `topic_id` に書いた、`source_object_id` の repost を新しい順に最大 `limit` 件返す。
+    /// 自分の既存の repost の検索に使う。docs の replica を走査せず、projection の索引だけで引く。
+    async fn find_author_reposts_of(
+        &self,
+        topic_id: &str,
+        author_pubkey: &str,
+        source_object_id: &EnvelopeId,
+        limit: usize,
+    ) -> Result<Vec<ObjectProjectionRow>>;
     /// #858: 成人向けラベル付き投稿の添付として観測済みの blob hash を記録する
     /// (insert-only)。projection 書き込み時は実装側が自動で記録するが、projection を
     /// 経由しない表示経路(profile timeline 等)からも明示的に記録できるようにする。
@@ -83,21 +93,17 @@ pub trait ObjectProjectionStore: Send + Sync {
         cursor: Option<TimelineCursor>,
         limit: usize,
     ) -> Result<Page<ObjectProjectionRow>>;
-    async fn list_topic_timeline_filtered(
+    /// 1 つの channel のタイムラインの 1 ページ(#1280。複数の channel をまたぐページは無い)。
+    ///
+    /// 実装は channel ごとの索引の範囲を読む。topic の全 channel の行を読んで絞る既定の実装は置かない
+    /// (他の channel の行の数に比例して読み飛ばすため)。
+    async fn list_topic_timeline_in_channel(
         &self,
         topic_id: &str,
-        allowed_channels: &BTreeSet<String>,
+        channel_id: &str,
         cursor: Option<TimelineCursor>,
         limit: usize,
-    ) -> Result<Page<ObjectProjectionRow>> {
-        scan_projection_pages_filtered(
-            cursor,
-            limit,
-            |cursor, page_size| self.list_topic_timeline(topic_id, cursor, page_size),
-            |row| allowed_channels.contains(row.channel_id.as_str()),
-        )
-        .await
-    }
+    ) -> Result<Page<ObjectProjectionRow>>;
     async fn list_thread(
         &self,
         topic_id: &str,
@@ -218,12 +224,29 @@ where
 #[async_trait]
 pub trait LiveGameProjectionStore: Send + Sync {
     async fn upsert_live_session_cache(&self, row: LiveSessionProjectionRow) -> Result<()>;
-    async fn list_topic_live_sessions(
+    async fn list_channel_live_sessions(
         &self,
         topic_id: &str,
+        channel_id: &str,
+        limit: usize,
     ) -> Result<Vec<LiveSessionProjectionRow>>;
+    async fn get_live_session(
+        &self,
+        topic_id: &str,
+        session_id: &str,
+    ) -> Result<Option<LiveSessionProjectionRow>>;
     async fn upsert_game_room_cache(&self, row: GameRoomProjectionRow) -> Result<()>;
-    async fn list_topic_game_rooms(&self, topic_id: &str) -> Result<Vec<GameRoomProjectionRow>>;
+    async fn list_channel_game_rooms(
+        &self,
+        topic_id: &str,
+        channel_id: &str,
+        limit: usize,
+    ) -> Result<Vec<GameRoomProjectionRow>>;
+    async fn get_game_room(
+        &self,
+        topic_id: &str,
+        room_id: &str,
+    ) -> Result<Option<GameRoomProjectionRow>>;
     async fn upsert_dome_connection_projection(
         &self,
         row: DomeConnectionProjectionRow,
@@ -275,6 +298,10 @@ pub trait SocialProjectionStore: Send + Sync {
     async fn get_muted_author(&self, author_pubkey: &str) -> Result<Option<MutedAuthorRow>>;
     async fn list_muted_authors(&self) -> Result<Vec<MutedAuthorRow>>;
     async fn remove_muted_author(&self, author_pubkey: &str) -> Result<()>;
+    /// author が署名つきの envelope で申告した docs author の id(#1239、ADR 0053 §6)。無ければ `None`。
+    async fn get_author_docs_author(&self, author_pubkey: &str) -> Result<Option<String>>;
+    /// author が署名つきの envelope で申告した docs author の id を書く(#1239)。同じ author は上書きする。
+    async fn put_author_docs_author(&self, author_pubkey: &str, docs_author: &str) -> Result<()>;
 }
 
 /// `list_author_relationships` の既定動作: 1 件ずつ `get_author_relationship` を呼ぶ。
@@ -417,6 +444,28 @@ pub trait DirectMessageStore: Send + Sync {
         message_id: &str,
     ) -> Result<Option<DirectMessageOutboxRow>>;
     async fn list_direct_message_outbox(&self) -> Result<Vec<DirectMessageOutboxRow>>;
+    /// Stable account-wide page for independent CN candidate discovery.
+    async fn list_direct_message_outbox_candidate_page(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage>;
+    async fn list_direct_message_outbox_for_peer_page(
+        &self,
+        peer_pubkey: &str,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage>;
+    /// One account retry tick: at most three never-attempted rows and one due
+    /// retry, each selected by an index rather than a full outbox scan.
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>>;
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,
@@ -439,10 +488,19 @@ pub trait DirectMessageStore: Send + Sync {
 }
 
 /// 通知(実装: sqlite/notifications.rs)。
+pub const NOTIFICATION_DISPATCH_PAGE_SIZE: usize = 64;
+
 #[async_trait]
 pub trait NotificationStore: Send + Sync {
     async fn put_notification_if_absent(&self, row: NotificationRow) -> Result<bool>;
     async fn list_notifications(&self) -> Result<Vec<NotificationRow>>;
+    /// Only newly inserted notifications receive a dispatch sequence. Read a
+    /// fixed-size insertion-order page without scanning the existing inbox.
+    async fn list_notification_dispatch_after(
+        &self,
+        after_sequence: i64,
+    ) -> Result<Vec<(i64, NotificationRow)>>;
+    async fn notification_dispatch_head(&self) -> Result<i64>;
     async fn mark_notification_read(&self, notification_id: &str, read_at: i64) -> Result<()>;
     async fn mark_all_notifications_read(&self, read_at: i64) -> Result<()>;
     async fn count_unread_notifications(&self) -> Result<usize>;

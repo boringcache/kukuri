@@ -12,6 +12,16 @@ use super::*;
 /// フィールドは従来と同じ粒度の Mutex map のまま(スケジューリングの挙動は不変)。
 #[derive(Clone, Default)]
 pub(crate) struct SubscriptionRegistry {
+    /// Accountごとに一つの暗号化offer受信task。dropでも実行中の取得を中止する。
+    pub(crate) account_receive_offer_task: Arc<Mutex<Option<AbortOnDropTask>>>,
+    pub(crate) account_receive_offer_lease: Arc<std::sync::Mutex<Option<ReceiveOfferLease>>>,
+    pub(crate) account_receive_offer_closed: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) account_receive_offer_shutdown: Arc<tokio::sync::Notify>,
+    /// One account-wide owner for due protected DM outbox work.
+    pub(crate) dm_outbox_retry_task: Arc<Mutex<Option<AbortOnDropTask>>>,
+    pub(crate) dm_outbox_retry_closed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) dm_outbox_retry_starts: Arc<std::sync::atomic::AtomicUsize>,
     /// 公開 topic の購読 task(key = topic_id)。
     pub(crate) subscriptions: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     /// DM の購読 task(key = dm topic)。
@@ -28,4 +38,34 @@ pub(crate) struct SubscriptionRegistry {
     pub(crate) direct_message_subscription_restart_deadlines: Arc<Mutex<HashMap<String, i64>>>,
     /// replica sync の再起動クールダウン(key = replica id、値 = 次回可能時刻)。
     pub(crate) replica_sync_restart_deadlines: Arc<Mutex<HashMap<String, i64>>>,
+}
+
+pub(crate) struct AbortOnDropTask(Option<JoinHandle<()>>);
+
+impl AbortOnDropTask {
+    pub(crate) fn new(handle: JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.0.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub(crate) fn abort(&self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+
+    pub(crate) async fn wait(mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }

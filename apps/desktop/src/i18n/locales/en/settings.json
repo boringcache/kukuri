@@ -201,8 +201,6 @@
       "updatedNotice": "This node updated its policies. Review the changes and accept again to keep connecting.",
       "noPolicies": "This node does not require any policy consent.",
       "noBody": "This policy does not provide a body text.",
-      "required": "Required",
-      "optional": "Optional",
       "updatedBadge": "Updated",
       "updatedDetail": "Updated from v{{previous}} to v{{current}}.",
       "updatedContentDetail": "The content was updated.",
@@ -445,12 +443,16 @@
   "release": {
     "title": "Release",
     "summary": "Preview channel, updater, diagnostics, and resources.",
+    "storeSummary": "Microsoft Store updates, diagnostics, and resources.",
     "update": {
       "title": "Updates",
       "version": "Version",
       "channel": "Channel",
+      "storeChannel": "Microsoft Store",
       "manifest": "Manifest",
       "status": "Status",
+      "storeManagedStatus": "Managed by Microsoft Store",
+      "storeManaged": "Microsoft Store manages updates for this build. Get the latest version from your Store library and Windows automatic update settings.",
       "statuses": {
         "available": "Update available",
         "checking": "Checking",
@@ -719,6 +721,28 @@
     "operationError": "Another app operation failed. This is separate from the current connection state.",
     "operationDetails": "Operation error details",
     "previousLabel": "{{state}} (previous snapshot)"
+  },
+  "system": {
+    "title": "System",
+    "summary": "Choose what happens when you close the main window.",
+    "windowCloseBehavior": "When closing the window",
+    "options": {
+      "ask": "Ask every time",
+      "quit": "Quit kukuri",
+      "tray": "Keep kukuri in the task tray"
+    },
+    "hint": "Task tray mode keeps kukuri running after the window closes. If the tray is unavailable, kukuri quits normally.",
+    "saveError": "The window close setting could not be saved. The previous setting is still active."
+  },
+  "windowClosePrompt": {
+    "title": "Keep kukuri in the task tray?",
+    "description": "You can keep kukuri running in the background or quit the application.",
+    "remember": "Do not ask again",
+    "cancel": "Cancel",
+    "tray": "Keep in task tray",
+    "quit": "Quit kukuri",
+    "pending": "Quitting…",
+    "error": "The choice could not be applied. Please try again."
   },
   "notifications": {
     "title": "Notifications",

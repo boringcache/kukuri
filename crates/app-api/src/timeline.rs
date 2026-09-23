@@ -11,58 +11,51 @@ impl AppService {
         let empty_recovery_key = author_empty_recovery_key(author_pubkey.as_str());
         self.ensure_author_subscription(author_pubkey.as_str())
             .await?;
-        let load_profile_items = || async {
-            let posts = load_profile_posts_from_author_replica(
+        // #1239: replica は走査しない。プロフィールの索引から、ページの行だけを読む。
+        let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
+        let docs_author = known_docs_author(
+            &self.services,
+            self.current_author_pubkey().as_str(),
+            author_pubkey.as_str(),
+        )
+        .await?;
+        let load_page = || {
+            profile_timeline_page_from_docs(
                 self.services.docs_sync.as_ref(),
                 author_pubkey.as_str(),
-                DocFetchPolicy::LocalOnly,
+                docs_author.as_deref(),
+                cursor.clone(),
+                limit,
+                &hidden_author_pubkeys,
             )
-            .await?;
-            let reposts = load_profile_reposts_from_author_replica(
-                self.services.docs_sync.as_ref(),
-                author_pubkey.as_str(),
-                DocFetchPolicy::LocalOnly,
-            )
-            .await?;
-            Ok::<_, anyhow::Error>((posts, reposts))
         };
-        let (mut posts, mut reposts) = match load_profile_items().await {
-            Ok(items) => items,
+        let mut page = match load_page().await {
+            Ok(page) => page,
             Err(error) => {
                 self.maybe_restart_author_subscription(author_pubkey.as_str())
                     .await;
-                load_profile_items().await.map_err(|retry_error| {
+                load_page().await.map_err(|retry_error| {
                     retry_error.context(format!(
                         "failed to reload profile timeline after author subscription restart: {error}"
                     ))
                 })?
             }
         };
-        if cursor.is_none() && posts.is_empty() && reposts.is_empty() {
+        if cursor.is_none() && page.items.is_empty() && page.next_cursor.is_none() {
             if self
                 .should_restart_after_empty_result(empty_recovery_key.as_str())
                 .await
             {
                 self.maybe_restart_author_subscription(author_pubkey.as_str())
                     .await;
-                (posts, reposts) = load_profile_items().await?;
+                page = load_page().await?;
             }
         } else {
             self.clear_empty_result_restart_marker(empty_recovery_key.as_str())
                 .await;
         }
-        let mut items = Vec::with_capacity(posts.len() + reposts.len());
-        items.extend(posts.drain(..).map(ProfileTimelineItem::Post));
-        items.extend(reposts.drain(..).map(ProfileTimelineItem::Repost));
-        items.sort_by(|left, right| {
-            right
-                .created_at()
-                .cmp(&left.created_at())
-                .then_with(|| right.object_id().cmp(left.object_id()))
-        });
-        let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
-        items.retain(|item| !profile_timeline_item_is_hidden(item, &hidden_author_pubkeys));
-        let page = profile_timeline_page(items, cursor, limit);
+        self.reflect_reply_targets_for_profile_items(&page.items)
+            .await;
         let mut views = Vec::with_capacity(page.items.len());
         for item in page.items {
             match item {
@@ -77,6 +70,7 @@ impl AppService {
         Ok(TimelineView {
             items: views,
             next_cursor: page.next_cursor,
+            unavailable_count: 0,
         })
     }
 
@@ -111,11 +105,14 @@ impl AppService {
             .resolve_repost_source(source_topic_id, source_object_id)
             .await?;
         let topic = TopicId::new(target_topic_id);
-        let envelope = build_repost_envelope(
+        // ADR 0053 §2: docs へ書く docs author を、署名の対象の tag と hint に入れる。
+        let docs_author = self.services.docs_sync.local_docs_author().await?;
+        let envelope = build_repost_envelope_with_docs_author(
             self.services.keys.as_ref(),
             &topic,
             source_object.repost_of.clone(),
             normalized_commentary.as_deref(),
+            docs_author.as_deref(),
         )?;
         let repost_object = envelope
             .to_post_object()?
@@ -159,6 +156,7 @@ impl AppService {
                     objects: vec![HintObjectRef {
                         object_id: envelope.id.0.clone(),
                         object_kind: envelope.kind.clone(),
+                        docs_author,
                     }],
                 },
             )
@@ -213,8 +211,14 @@ impl AppService {
                 channel_id: channel_id.clone(),
             },
         };
-        self.hydrate_scope_projection(topic_id, &scope).await?;
         let source_object_id = EnvelopeId::from(source_object_id);
+        self.ensure_object_projection(
+            topic_id,
+            &scope,
+            &source_object_id,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await?;
         let projection = self
             .services
             .projection_store
@@ -239,17 +243,11 @@ impl AppService {
         ) {
             anyhow::bail!("bookmark target must be a timeline post");
         }
+        // 添付は検証済みの行から写す(#1248)。docs の `state` は読まない。
         let attachments = if projection.object_kind == "repost" {
             Vec::new()
         } else {
-            fetch_post_object_for_projection(
-                self.services.docs_sync.as_ref(),
-                &projection.source_replica_id,
-                projection.source_key.as_str(),
-            )
-            .await?
-            .map(|post_object| post_object.attachments)
-            .unwrap_or_default()
+            projection.attachments.clone()
         };
         let row = BookmarkedPostRow {
             source_object_id: projection.object_id.clone(),
@@ -347,8 +345,14 @@ impl AppService {
                 channel_id: channel_id.clone(),
             },
         };
-        self.hydrate_scope_projection(topic_id, &scope).await?;
         let target_object_id = EnvelopeId::from(object_id);
+        self.ensure_object_projection(
+            topic_id,
+            &scope,
+            &target_object_id,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await?;
         let target = self
             .resolve_signed_post_envelope(&target_object_id)
             .await?
@@ -423,6 +427,11 @@ impl AppService {
                     objects: vec![HintObjectRef {
                         object_id: target_object_id.0.clone(),
                         object_kind: "post_withdrawal".to_string(),
+                        // 取り下げを書いた docs author(ADR 0053 §2)。private channel の hint には載せない。
+                        docs_author: match target_content.channel_id {
+                            Some(_) => None,
+                            None => self.services.docs_sync.local_docs_author().await?,
+                        },
                     }],
                 },
             )
@@ -469,7 +478,13 @@ impl AppService {
                     channel_id: channel_id.clone(),
                 },
             };
-            self.hydrate_scope_projection(topic_id, &scope).await?;
+            self.ensure_object_projection(
+                topic_id,
+                &scope,
+                &EnvelopeId::from(reply_to),
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?;
             Some(
                 self.resolve_parent_object(&EnvelopeId::from(reply_to))
                     .await?
@@ -570,7 +585,9 @@ impl AppService {
             .await?;
             vec![manifest_id]
         };
-        let envelope = build_post_envelope_with_payload_in_channel(
+        // ADR 0053 §2: docs へ書く docs author を、署名の対象の tag と hint に入れる。
+        let docs_author = self.services.docs_sync.local_docs_author().await?;
+        let envelope = build_post_envelope_with_docs_author(
             self.services.keys.as_ref(),
             &topic,
             PayloadRef::BlobText {
@@ -596,6 +613,7 @@ impl AppService {
             },
             effective_channel_id.as_ref(),
             content_labels,
+            docs_author.as_deref(),
         )?;
         let post_object = envelope
             .to_post_object()?
@@ -640,6 +658,11 @@ impl AppService {
             objects: vec![HintObjectRef {
                 object_id: envelope.id.0.clone(),
                 object_kind: envelope.kind.clone(),
+                // private channel の hint の topic は epoch の秘密に依存しないので、docs author を載せない
+                // (ADR 0053 §2)。channel の参加者は、docs の event と索引の entry から同じ手がかりを得る。
+                docs_author: docs_author
+                    .clone()
+                    .filter(|_| effective_channel_id.is_none()),
             }],
         };
         let mut hint_error = None;
@@ -728,60 +751,66 @@ impl AppService {
             topic_id,
             cursor.clone(),
             limit,
-            &self.allowed_channel_ids_for_scope(topic_id, &scope).await?,
+            &self.allowed_channel_id_for_scope(topic_id, &scope).await?,
             &hidden_author_pubkeys,
         )
         .await?;
-        let needs_hydration = projection_page_needs_hydration(&page)
-            || self
-                .scope_needs_current_private_epoch_hydration(topic_id, &scope, &page)
-                .await;
+        // #1225: 本文が欠けた行は復旧の理由にしない。欠損は行単位の取り直しへ渡す。
+        let needs_epoch_hydration = self
+            .scope_needs_current_private_epoch_hydration(topic_id, &scope, &page)
+            .await;
         let restart_after_empty = had_topic_subscription
             && page.items.is_empty()
+            && page.next_cursor.is_none()
             && self
                 .should_restart_after_empty_result(empty_recovery_key.as_str())
                 .await;
-        if (page.items.is_empty() || needs_hydration)
-            && self.hydrate_scope_projection(topic_id, &scope).await? > 0
-        {
-            *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
-            page = filtered_timeline_page(
-                self.services.projection_store.as_ref(),
-                topic_id,
-                cursor.clone(),
-                limit,
-                &self.allowed_channel_ids_for_scope(topic_id, &scope).await?,
-                &hidden_author_pubkeys,
-            )
-            .await?;
-        }
-        if needs_hydration || (page.items.is_empty() && restart_after_empty) {
-            if had_topic_subscription {
-                self.maybe_restart_scope_subscription(topic_id, &scope)
-                    .await;
-            }
-            self.maybe_restart_scope_replica_sync(topic_id, &scope)
-                .await;
-            if self.hydrate_scope_projection(topic_id, &scope).await? > 0 {
+        // #1239: replica を走査しない。利用者が遡ったページ(cursor つき)と、projection が尽きたページ
+        // (空を含む)は、その 1 ページぶんの範囲を時系列の索引と照合して、欠けている object だけを key 指定で
+        // 反映する。先頭の範囲の追いつきは購読タスクが行う。
+        let projection_exhausted = page.next_cursor.is_none();
+        let mut unavailable = 0usize;
+        if cursor.is_some() || projection_exhausted || needs_epoch_hydration {
+            let reconcile = self
+                .reconcile_timeline_range_checked(topic_id, &scope, cursor.as_ref(), limit)
+                .await?;
+            if reconcile.hydrated > 0 {
                 *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
             }
-            page = filtered_timeline_page(
-                self.services.projection_store.as_ref(),
-                topic_id,
-                cursor,
-                limit,
-                &self.allowed_channel_ids_for_scope(topic_id, &scope).await?,
-                &hidden_author_pubkeys,
-            )
-            .await?;
+            // 照合した範囲に、最初のページより多くの object が projection に在ると分かったときだけ、ページを
+            // 読み直す(今回反映した、または購読タスクが同じ範囲を先に反映していた)。それ以外は読み直さない。
+            if reconcile.page_is_stale(page.items.len(), !hidden_author_pubkeys.is_empty()) {
+                page = filtered_timeline_page(
+                    self.services.projection_store.as_ref(),
+                    topic_id,
+                    cursor,
+                    limit,
+                    &self.allowed_channel_id_for_scope(topic_id, &scope).await?,
+                    &hidden_author_pubkeys,
+                )
+                .await?;
+            }
+            unavailable = reconcile.unavailable;
+            continue_past_unavailable(&mut page, &reconcile, PageOrder::NewestFirst, None);
+            if needs_epoch_hydration || (page.items.is_empty() && restart_after_empty) {
+                if had_topic_subscription {
+                    self.maybe_restart_scope_subscription(topic_id, &scope)
+                        .await;
+                }
+                self.maybe_restart_scope_replica_sync(topic_id, &scope)
+                    .await;
+            }
         }
+        Box::pin(self.recover_missing_bodies(&mut page.items)).await;
         if !page.items.is_empty() {
             self.clear_empty_result_restart_marker(empty_recovery_key.as_str())
                 .await;
         }
         self.ensure_author_subscriptions_for_rows(&page.items)
             .await?;
-        let view = self.page_to_view(page).await?;
+        self.reflect_reply_targets_for_rows(&page.items).await;
+        let mut view = self.page_to_view(page).await?;
+        view.unavailable_count = u32::try_from(unavailable).unwrap_or(u32::MAX);
         let mut last_sync = self.last_sync_ts.lock().await;
         if !view.items.is_empty() && last_sync.is_none() {
             *last_sync = Some(Utc::now().timestamp_millis());
@@ -798,7 +827,7 @@ impl AppService {
     ) -> Result<TimelineView> {
         let had_topic_subscription = self.has_topic_subscription(topic_id).await;
         let empty_recovery_key = thread_empty_recovery_key(topic_id, thread_id);
-        self.ensure_scope_subscriptions(topic_id, &TimelineScope::AllJoined)
+        self.ensure_replica_scope_subscriptions(topic_id, &ReplicaScope::AllJoined)
             .await?;
         let hidden_author_pubkeys = self.current_hidden_author_pubkeys().await?;
         let thread_root = EnvelopeId::from(thread_id);
@@ -812,74 +841,71 @@ impl AppService {
             &hidden_author_pubkeys,
         )
         .await?;
-        let needs_hydration = projection_page_needs_hydration(&page);
+        // #1225: `list_timeline_scoped` と同じく、本文が欠けた行は復旧の理由にしない。
         let restart_after_empty = had_topic_subscription
             && page.items.is_empty()
+            && page.next_cursor.is_none()
             && self
                 .should_restart_after_empty_result(empty_recovery_key.as_str())
                 .await;
-        if (page.items.is_empty() || needs_hydration)
-            && self
-                .hydrate_scope_projection(topic_id, &TimelineScope::AllJoined)
-                .await?
-                > 0
-        {
-            *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
-            let root_channel = self
-                .services
-                .projection_store
-                .get_object_projection(&thread_root)
-                .await?
-                .map(|row| row.channel_id);
-            page = filtered_thread_page(
-                self.services.projection_store.as_ref(),
-                topic_id,
-                &thread_root,
-                cursor.clone(),
-                limit,
-                root_channel.as_deref(),
-                &hidden_author_pubkeys,
-            )
+        // #1239: replica を走査しない。このページの範囲を thread の索引と照合して、欠けている object だけを
+        // key 指定で反映する(範囲ごとに間隔を空ける)。thread は途中の返信が欠けうるので、ページが空でなくても
+        // 照合する。
+        let reconcile = self
+            .reconcile_thread_checked(topic_id, &thread_root, cursor.as_ref(), limit)
             .await?;
-        }
-        if needs_hydration || (page.items.is_empty() && restart_after_empty) {
-            if had_topic_subscription {
-                self.maybe_restart_scope_subscription(topic_id, &TimelineScope::AllJoined)
-                    .await;
-            }
-            self.maybe_restart_scope_replica_sync(topic_id, &TimelineScope::AllJoined)
-                .await;
-            if self
-                .hydrate_scope_projection(topic_id, &TimelineScope::AllJoined)
-                .await?
-                > 0
-            {
+        let page_is_stale =
+            reconcile.page_is_stale(page.items.len(), !hidden_author_pubkeys.is_empty());
+        let unavailable = reconcile.unavailable;
+        if page_is_stale || page.items.is_empty() {
+            if reconcile.hydrated > 0 {
                 *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
             }
-            let root_channel = self
-                .services
-                .projection_store
-                .get_object_projection(&thread_root)
-                .await?
-                .map(|row| row.channel_id);
-            page = filtered_thread_page(
-                self.services.projection_store.as_ref(),
-                topic_id,
-                &thread_root,
-                cursor,
-                limit,
-                root_channel.as_deref(),
-                &hidden_author_pubkeys,
-            )
-            .await?;
+            // 照合した範囲に、最初のページより多くの object が在ると分かったときだけ読み直す
+            // (`list_timeline_scoped` と同じ)。
+            if page_is_stale {
+                let root_channel = self
+                    .services
+                    .projection_store
+                    .get_object_projection(&thread_root)
+                    .await?
+                    .map(|row| row.channel_id);
+                page = filtered_thread_page(
+                    self.services.projection_store.as_ref(),
+                    topic_id,
+                    &thread_root,
+                    cursor,
+                    limit,
+                    root_channel.as_deref(),
+                    &hidden_author_pubkeys,
+                )
+                .await?;
+            }
+            if page.items.is_empty() && restart_after_empty {
+                if had_topic_subscription {
+                    self.maybe_restart_scope_subscription(topic_id, &ReplicaScope::AllJoined)
+                        .await;
+                }
+                self.maybe_restart_scope_replica_sync(topic_id, &ReplicaScope::AllJoined)
+                    .await;
+            }
         }
+        Box::pin(self.recover_missing_bodies(&mut page.items)).await;
         if !page.items.is_empty() {
             self.clear_empty_result_restart_marker(empty_recovery_key.as_str())
                 .await;
         }
         self.ensure_author_subscriptions_for_rows(&page.items)
             .await?;
-        let view = self.page_to_view(page).await?;
+        continue_past_unavailable(
+            &mut page,
+            &reconcile,
+            PageOrder::OldestFirst,
+            Some(&thread_root),
+        );
+        self.reflect_reply_targets_for_rows(&page.items).await;
+        let mut view = self.page_to_view(page).await?;
+        view.unavailable_count = u32::try_from(unavailable).unwrap_or(u32::MAX);
         let mut last_sync = self.last_sync_ts.lock().await;
         if !view.items.is_empty() && last_sync.is_none() {
             *last_sync = Some(Utc::now().timestamp_millis());
@@ -895,7 +921,6 @@ fn author_empty_recovery_key(author_pubkey: &str) -> String {
 fn scope_empty_recovery_key(topic_id: &str, scope: &TimelineScope) -> String {
     match scope {
         TimelineScope::Public => format!("empty-scope:{topic_id}:public"),
-        TimelineScope::AllJoined => format!("empty-scope:{topic_id}:all-joined"),
         TimelineScope::Channel { channel_id } => {
             format!("empty-scope:{topic_id}:channel:{}", channel_id.as_str())
         }
@@ -904,4 +929,49 @@ fn scope_empty_recovery_key(topic_id: &str, scope: &TimelineScope) -> String {
 
 fn thread_empty_recovery_key(topic_id: &str, thread_id: &str) -> String {
     format!("empty-thread:{topic_id}:{thread_id}")
+}
+
+/// ページの並び(続きの位置の向き)。
+#[derive(Clone, Copy)]
+enum PageOrder {
+    /// タイムライン(新しい順)。続きは古い側。
+    NewestFirst,
+    /// thread(古い順)。続きは新しい側。
+    OldestFirst,
+}
+
+/// 照合の結果を、取得したページへ映す(#1239 AC-4)。
+///
+/// projection が尽きたページで、照合が反映できない entry の続く範囲を読み終えていなければ、読み進めた位置を続きの位置にし、
+/// その位置より先(続きの側)の行はこのページから外す(利用者が、取得できない投稿の先へ進めるように)。外した行は次のページが
+/// 返す。外さないと、次のページが同じ行をもう一度返し、そのあいだに届いた投稿が後ろに並んで、画面の並びが崩れる(独立監査 B1)。
+/// 続きの位置の行そのものは残す(次のページはその位置を含まないので、外すと欠ける。delta 監査 N1)。thread の root 行
+/// (最初のページで先頭に 1 行引きする)は、時刻に関わらず外さない。
+fn continue_past_unavailable(
+    page: &mut Page<ObjectProjectionRow>,
+    reconcile: &RangeReconcile,
+    order: PageOrder,
+    thread_root: Option<&EnvelopeId>,
+) {
+    if page.next_cursor.is_some() {
+        return;
+    }
+    let Some(read_past) = reconcile.read_past.as_ref() else {
+        return;
+    };
+    let edge = (read_past.created_at, read_past.object_id.as_str());
+    page.items.retain(|row| {
+        if thread_root.is_some_and(|root| *root == row.object_id) {
+            return true;
+        }
+        let position = (row.created_at, row.object_id.as_str());
+        match order {
+            PageOrder::NewestFirst => position >= edge,
+            PageOrder::OldestFirst => position <= edge,
+        }
+    });
+    page.next_cursor = Some(TimelineCursor {
+        created_at: read_past.created_at,
+        object_id: EnvelopeId::from(read_past.object_id.as_str()),
+    });
 }

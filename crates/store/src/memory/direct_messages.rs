@@ -1,5 +1,99 @@
 use super::*;
 
+impl MemoryDirectMessageOutboxRows {
+    fn peer_key(row: &DirectMessageOutboxRow) -> DirectMessageOutboxPeerKey {
+        (
+            row.peer_pubkey.clone(),
+            row.created_at,
+            row.message_id.clone(),
+            row.dm_id.clone(),
+        )
+    }
+
+    fn new_key(row: &DirectMessageOutboxRow) -> DirectMessageOutboxNewKey {
+        (
+            row.created_at,
+            row.message_id.clone(),
+            row.dm_id.clone(),
+            row.peer_pubkey.clone(),
+        )
+    }
+
+    fn retry_key(row: &DirectMessageOutboxRow, attempted_at: i64) -> DirectMessageOutboxRetryKey {
+        (
+            attempted_at,
+            row.created_at,
+            row.message_id.clone(),
+            row.dm_id.clone(),
+            row.peer_pubkey.clone(),
+        )
+    }
+
+    fn index_attempt(&mut self, row: &DirectMessageOutboxRow) {
+        if let Some(attempted_at) = row.last_attempt_at {
+            self.attempted.insert(Self::retry_key(row, attempted_at));
+        } else {
+            self.never_attempted.insert(Self::new_key(row));
+        }
+    }
+
+    fn unindex_attempt(&mut self, row: &DirectMessageOutboxRow) {
+        if let Some(attempted_at) = row.last_attempt_at {
+            self.attempted.remove(&Self::retry_key(row, attempted_at));
+        } else {
+            self.never_attempted.remove(&Self::new_key(row));
+        }
+    }
+
+    fn insert(&mut self, row: DirectMessageOutboxRow) {
+        self.remove(row.dm_id.as_str(), row.message_id.as_str());
+        self.by_created
+            .insert((row.created_at, row.message_id.clone(), row.dm_id.clone()));
+        self.by_peer.insert(Self::peer_key(&row));
+        self.index_attempt(&row);
+        self.by_dm
+            .entry(row.dm_id.clone())
+            .or_default()
+            .insert(row.message_id.clone());
+        self.rows
+            .insert((row.dm_id.clone(), row.message_id.clone()), row);
+    }
+
+    fn remove(&mut self, dm_id: &str, message_id: &str) -> Option<DirectMessageOutboxRow> {
+        let row = self
+            .rows
+            .remove(&(dm_id.to_string(), message_id.to_string()))?;
+        self.by_created
+            .remove(&(row.created_at, row.message_id.clone(), row.dm_id.clone()));
+        self.by_peer.remove(&Self::peer_key(&row));
+        self.unindex_attempt(&row);
+        if let Some(messages) = self.by_dm.get_mut(dm_id) {
+            messages.remove(message_id);
+            if messages.is_empty() {
+                self.by_dm.remove(dm_id);
+            }
+        }
+        Some(row)
+    }
+
+    fn clear_dm(&mut self, dm_id: &str) {
+        let Some(messages) = self.by_dm.remove(dm_id) else {
+            return;
+        };
+        for message_id in messages {
+            if let Some(row) = self.rows.remove(&(dm_id.to_string(), message_id)) {
+                self.by_created.remove(&(
+                    row.created_at,
+                    row.message_id.clone(),
+                    row.dm_id.clone(),
+                ));
+                self.by_peer.remove(&Self::peer_key(&row));
+                self.unindex_attempt(&row);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl DirectMessageStore for MemoryStore {
     async fn upsert_direct_message_conversation(
@@ -118,6 +212,7 @@ impl DirectMessageStore for MemoryStore {
             .write()
             .await
             .get_mut(&(dm_id.to_string(), message_id.to_string()))
+            && row.acked_at.is_none()
         {
             row.acked_at = Some(acked_at);
         }
@@ -125,10 +220,7 @@ impl DirectMessageStore for MemoryStore {
     }
 
     async fn put_direct_message_outbox(&self, row: DirectMessageOutboxRow) -> Result<()> {
-        self.direct_message_outbox_rows
-            .write()
-            .await
-            .insert((row.dm_id.clone(), row.message_id.clone()), row);
+        self.direct_message_outbox_rows.write().await.insert(row);
         Ok(())
     }
 
@@ -141,6 +233,7 @@ impl DirectMessageStore for MemoryStore {
             .direct_message_outbox_rows
             .read()
             .await
+            .rows
             .get(&(dm_id.to_string(), message_id.to_string()))
             .cloned())
     }
@@ -150,6 +243,7 @@ impl DirectMessageStore for MemoryStore {
             .direct_message_outbox_rows
             .read()
             .await
+            .rows
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -161,19 +255,222 @@ impl DirectMessageStore for MemoryStore {
         Ok(items)
     }
 
+    async fn list_direct_message_outbox_candidate_page(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox candidate page limit"
+        );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing candidate cycle end"
+        );
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let rows = self.direct_message_outbox_rows.read().await;
+        let end = cycle_end.cloned().or_else(|| {
+            rows.by_created
+                .last()
+                .map(
+                    |(created_at, message_id, dm_id)| DirectMessageOutboxCursor {
+                        created_at: *created_at,
+                        message_id: message_id.clone(),
+                        dm_id: dm_id.clone(),
+                    },
+                )
+        });
+        let Some(end) = end else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
+        let start = after.map_or(Unbounded, |cursor| {
+            Excluded((
+                cursor.created_at,
+                cursor.message_id.clone(),
+                cursor.dm_id.clone(),
+            ))
+        });
+        let found = rows
+            .by_created
+            .range((
+                start,
+                Included((end.created_at, end.message_id.clone(), end.dm_id.clone())),
+            ))
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = found.len() > limit;
+        let items = found
+            .into_iter()
+            .take(limit)
+            .filter_map(|(_, message_id, dm_id)| {
+                rows.rows.get(&(dm_id.clone(), message_id.clone())).cloned()
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = has_more.then(|| {
+            let last = items.last().expect("nonempty candidate page");
+            DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            }
+        });
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end: Some(end),
+        })
+    }
+
+    async fn list_direct_message_outbox_for_peer_page(
+        &self,
+        peer_pubkey: &str,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox page limit"
+        );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing outbox cycle end"
+        );
+        use std::ops::Bound::{Excluded, Included};
+        let rows = self.direct_message_outbox_rows.read().await;
+        let cycle_end = cycle_end.cloned().or_else(|| {
+            rows.by_peer
+                .range((
+                    Included((
+                        peer_pubkey.to_string(),
+                        i64::MIN,
+                        String::new(),
+                        String::new(),
+                    )),
+                    Excluded((
+                        format!("{peer_pubkey}\0"),
+                        i64::MIN,
+                        String::new(),
+                        String::new(),
+                    )),
+                ))
+                .next_back()
+                .map(
+                    |(_, created_at, message_id, dm_id)| DirectMessageOutboxCursor {
+                        created_at: *created_at,
+                        message_id: message_id.clone(),
+                        dm_id: dm_id.clone(),
+                    },
+                )
+        });
+        let Some(end) = cycle_end.as_ref() else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
+        let start = after.map_or_else(
+            || {
+                Included((
+                    peer_pubkey.to_string(),
+                    i64::MIN,
+                    String::new(),
+                    String::new(),
+                ))
+            },
+            |cursor| {
+                Excluded((
+                    peer_pubkey.to_string(),
+                    cursor.created_at,
+                    cursor.message_id.clone(),
+                    cursor.dm_id.clone(),
+                ))
+            },
+        );
+        let selected = rows
+            .by_peer
+            .range((
+                start,
+                Included((
+                    peer_pubkey.to_string(),
+                    end.created_at,
+                    end.message_id.clone(),
+                    end.dm_id.clone(),
+                )),
+            ))
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = selected.len() > limit;
+        let items = selected
+            .into_iter()
+            .take(limit)
+            .filter_map(|(_, _, message_id, dm_id)| {
+                rows.rows.get(&(dm_id.clone(), message_id.clone())).cloned()
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = if has_more {
+            items.last().map(|last| DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end,
+        })
+    }
+
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>> {
+        anyhow::ensure!(
+            new_limit <= 3 && retry_limit <= 1 && new_limit + retry_limit > 0,
+            "invalid direct message outbox due limits"
+        );
+        let rows = self.direct_message_outbox_rows.read().await;
+        let mut selected = Vec::with_capacity(new_limit + retry_limit);
+        for (_, message_id, dm_id, _) in rows.never_attempted.iter().take(new_limit) {
+            if let Some(row) = rows.rows.get(&(dm_id.clone(), message_id.clone())) {
+                selected.push(row.clone());
+            }
+        }
+        for (attempted_at, _, message_id, dm_id, _) in rows.attempted.iter().take(retry_limit) {
+            if *attempted_at <= retry_due_at_or_before
+                && let Some(row) = rows.rows.get(&(dm_id.clone(), message_id.clone()))
+            {
+                selected.push(row.clone());
+            }
+        }
+        Ok(selected)
+    }
+
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,
         message_id: &str,
         attempted_at: i64,
     ) -> Result<()> {
-        if let Some(row) = self
-            .direct_message_outbox_rows
-            .write()
-            .await
-            .get_mut(&(dm_id.to_string(), message_id.to_string()))
-        {
+        let mut rows = self.direct_message_outbox_rows.write().await;
+        let key = (dm_id.to_string(), message_id.to_string());
+        if let Some(mut row) = rows.rows.get(&key).cloned() {
+            rows.unindex_attempt(&row);
             row.last_attempt_at = Some(attempted_at);
+            rows.index_attempt(&row);
+            rows.rows.insert(key, row);
         }
         Ok(())
     }
@@ -182,7 +479,7 @@ impl DirectMessageStore for MemoryStore {
         self.direct_message_outbox_rows
             .write()
             .await
-            .remove(&(dm_id.to_string(), message_id.to_string()));
+            .remove(dm_id, message_id);
         Ok(())
     }
 
@@ -235,7 +532,7 @@ impl DirectMessageStore for MemoryStore {
         self.direct_message_outbox_rows
             .write()
             .await
-            .remove(&(dm_id.to_string(), message_id.to_string()));
+            .remove(dm_id, message_id);
         Ok(())
     }
 
@@ -247,7 +544,7 @@ impl DirectMessageStore for MemoryStore {
         self.direct_message_outbox_rows
             .write()
             .await
-            .retain(|(row_dm_id, _), _| row_dm_id != dm_id);
+            .clear_dm(dm_id);
         self.direct_message_conversations
             .write()
             .await

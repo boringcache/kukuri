@@ -42,7 +42,7 @@ import {
   topicDiagnosticFor,
 } from './MetaverseRoomSessionSupport';
 import { useSpatialAudio } from './useSpatialAudio';
-import { useMetaverseBackendEvents } from './useMetaverseBackendEvents';
+import { mergePeerPresence, useMetaverseBackendEvents } from './useMetaverseBackendEvents';
 import {
   readLastVisitedDome,
   resolveDomeEntryOrder,
@@ -61,7 +61,7 @@ type UseMetaverseRoomSessionArgs = {
   locale: SupportedLocale;
   localDisplayName: string | null;
   localAvatarAssetRef: MetaverseAssetRef | null;
-  localAvatarAssetUrl: string | null;
+  localAvatarAssetUrl: string | null; avatarFetchActive?: boolean;
   mutedAuthorPubkeys?: ReadonlySet<string>;
   initialSelectedRoomId?: string | null;
   activeChannelId?: string | null;
@@ -98,7 +98,7 @@ export function useMetaverseRoomSession({
   locale,
   localDisplayName,
   localAvatarAssetRef,
-  localAvatarAssetUrl,
+  localAvatarAssetUrl, avatarFetchActive = true,
   mutedAuthorPubkeys = EMPTY_MUTED_AUTHOR_PUBKEYS,
   initialSelectedRoomId = null,
   activeChannelId = null,
@@ -223,7 +223,7 @@ export function useMetaverseRoomSession({
     actions,
     selectedRoom: admittedRoom,
     transitionNeighbors,
-    localPeerId,
+    localPeerId, avatarFetchActive, remoteTransforms,
     playSpatialAudioFrame,
     setRemoteTransforms,
   });
@@ -381,10 +381,7 @@ export function useMetaverseRoomSession({
       }
       setLastRoomActivityAt(Date.now());
       if (data.type === 'presence.join' && data.presence.peerId !== localPeerId) {
-        setPeerPresence((current) => ({
-          ...current,
-          [data.presence.peerId]: data.presence,
-        }));
+        setPeerPresence((current) => mergePeerPresence(current, data.presence));
       }
       if (data.type === 'presence.leave' && data.peerId !== localPeerId) {
         setPeerPresence((current) => {

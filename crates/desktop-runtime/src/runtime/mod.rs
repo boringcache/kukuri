@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -17,9 +17,9 @@ use kukuri_app_api::{
     DirectMessageStatusView, DirectMessageTimelineView, DirectMessageTopicStatusView,
     DomeHostingView, DomeLayoutCommitView, GameRoomView, ImportMetaverseRoomAssetInput,
     JoinedPrivateChannelView, LiveSessionView, MetaverseAssetRefView, MetaverseRoomEventView,
-    MoveDomeInput, NotificationStatusView, NotificationView, PrepareCommunityNodeDomeHostingInput,
-    PrepareDomeTransitionInput, PrivateChannelCapability, ProfileInput,
-    PublishMetaverseRoomEventInput, ReactionStateView, RecentReactionView,
+    MoveDomeInput, NotificationStatusView, NotificationView, PostView,
+    PrepareCommunityNodeDomeHostingInput, PrepareDomeTransitionInput, PrivateChannelCapability,
+    ProfileInput, PublishMetaverseRoomEventInput, ReactionStateView, RecentReactionView,
     ResyncDomeSnapshotsInput, RevokeDomeConnectionInput, ServiceHandles,
     StartOwnerDomeHostingInput, SubmitDomeSessionInput, SyncStatus, TimelineView,
     UpdateGameRoomInput, UpdateMetaverseRoomInput, WithdrawDomeConnectionProposalInput,
@@ -120,11 +120,14 @@ pub struct DesktopRuntime {
         Arc<Mutex<HashMap<String, kukuri_core::SignedDomeHostHeartbeatV1>>>,
     pub(crate) community_node_rendezvous_seed_peers:
         Arc<Mutex<HashMap<String, Vec<kukuri_transport::SeedPeer>>>>,
-    pub(crate) community_node_session_guard: Arc<Mutex<()>>,
+    pub(crate) community_node_session_guard: crate::community_node::SessionLocks,
+    pub(crate) community_node_connectivity_guard: Mutex<()>,
     pub(crate) community_node_reconnect_state: Arc<Mutex<CommunityNodeReconnectState>>,
     pub(crate) community_node_reconnect_guard: Arc<Mutex<()>>,
     pub(crate) community_node_scheduler_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) sync_status_observer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Notification forwarding belongs to this account runtime, including Drop without shutdown.
+    notification_event_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) active_connectivity_urls: Arc<Mutex<Vec<String>>>,
     pub(crate) last_runtime_connectivity_assist_state:
         Arc<Mutex<Option<crate::community_node::RuntimeConnectivityAssistState>>>,
@@ -378,6 +381,13 @@ impl DesktopRuntime {
         )
         .await?;
         let keys = load_or_create_keys(&db_path, identity_mode)?;
+        // docs へ何かを書く前に、書き込みの名義をアカウントの docs author にする(ADR 0053 §1)。
+        iroh_stack
+            .use_account_docs_author(keys.derive_docs_author_seed())
+            .await?;
+        iroh_stack
+            .use_account_receive_binding(Arc::new(keys.clone()))
+            .await?;
         let author_keys = Arc::new(keys.clone());
         let services = ServiceHandles::new(
             store.clone(),
@@ -423,10 +433,13 @@ impl DesktopRuntime {
             load_content_display_settings(&db_path).adult_content_enabled,
         );
         app_service.warm_social_graph().await?;
+        if let Err(error) = app_service.start_account_receive_offers().await {
+            tracing::warn!(%error, "account receive route could not start; legacy receivers remain active");
+        }
         app_service.resume_direct_message_state().await?;
 
         let (event_sender, _) = tokio::sync::broadcast::channel(64);
-        {
+        let notification_event_task = {
             let notify = app_service.notification_inserted_notify();
             let sender = event_sender.clone();
             tokio::spawn(async move {
@@ -434,8 +447,8 @@ impl DesktopRuntime {
                     notify.notified().await;
                     let _ = sender.send(RuntimeEvent::NotificationStatusChanged);
                 }
-            });
-        }
+            })
+        };
 
         Ok(Self {
             app_service,
@@ -449,13 +462,15 @@ impl DesktopRuntime {
             community_node_sessions: Arc::new(Mutex::new(HashMap::new())),
             community_node_dome_heartbeats: Arc::new(Mutex::new(HashMap::new())),
             community_node_rendezvous_seed_peers: Arc::new(Mutex::new(HashMap::new())),
-            community_node_session_guard: Arc::new(Mutex::new(())),
+            community_node_session_guard: Default::default(),
+            community_node_connectivity_guard: Mutex::new(()),
             community_node_reconnect_state: Arc::new(Mutex::new(
                 CommunityNodeReconnectState::default(),
             )),
             community_node_reconnect_guard: Arc::new(Mutex::new(())),
             community_node_scheduler_task: Mutex::new(None),
             sync_status_observer_task: Mutex::new(None),
+            notification_event_task: StdMutex::new(Some(notification_event_task)),
             active_connectivity_urls: Arc::new(Mutex::new(relay_config.iroh_relay_urls.clone())),
             last_runtime_connectivity_assist_state: Arc::new(Mutex::new(Some(
                 initial_runtime_connectivity_state,
@@ -510,6 +525,13 @@ impl DesktopRuntime {
         let _ = self.event_sender.send(event);
     }
 
+    pub(crate) fn take_notification_event_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.notification_event_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     pub(crate) async fn persist_gossip_subscription_state_from_app(&self) -> Result<()> {
         persist_gossip_subscription_state(
             &self.db_path,
@@ -519,5 +541,18 @@ impl DesktopRuntime {
                 disabled_channels: self.app_service.list_gossip_disabled_channels().await,
             },
         )
+    }
+}
+
+impl Drop for DesktopRuntime {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .notification_event_task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
     }
 }

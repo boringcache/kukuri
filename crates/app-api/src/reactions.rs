@@ -21,9 +21,14 @@ impl AppService {
             }
             Some(ChannelRef::Public) | None => TimelineScope::Public,
         };
-        self.hydrate_scope_projection(target_topic_id.as_str(), &scope)
-            .await?;
         let target_object_id = EnvelopeId::from(target_object_id);
+        self.ensure_object_projection(
+            target_topic_id.as_str(),
+            &scope,
+            &target_object_id,
+            DocFetchPolicy::LocalOnly,
+        )
+        .await?;
         let target = self
             .services
             .projection_store
@@ -52,6 +57,34 @@ impl AppService {
             &current_author,
             normalized_reaction_key.as_str(),
         );
+        // #1239: 自分の既存の reaction が projection に無ければ、その key だけを docs から反映する
+        // (reaction id は対象・著者・key から決まる)。replica は走査しない。
+        if self
+            .services
+            .projection_store
+            .get_reaction_cache(&target.source_replica_id, &target_object_id, &reaction_id)
+            .await?
+            .is_none()
+        {
+            hydrate_reaction_cache_from_key(
+                self.services.docs_sync.as_ref(),
+                self.services.projection_store.as_ref(),
+                target_topic_id.as_str(),
+                &target.source_replica_id,
+                stable_key(
+                    "reactions",
+                    &format!(
+                        "{}/{}/state",
+                        target_object_id.as_str(),
+                        reaction_id.as_str()
+                    ),
+                )
+                .as_str(),
+                // 利用者の操作は remote 取得で待たせない(ADR 0052 §4)。
+                DocFetchPolicy::LocalOnly,
+            )
+            .await?;
+        }
         let next_status = match self
             .services
             .projection_store
@@ -70,8 +103,10 @@ impl AppService {
             &reaction_id,
             next_status.clone(),
         )?;
-        let reaction = parse_reaction(&envelope)?
-            .ok_or_else(|| anyhow::anyhow!("failed to parse reaction envelope"))?;
+        // 自分の reaction も、docs から反映するときと同じ検証を通す(#1252)。docs は読まない。
+        let verified = VerifiedReaction::verify_local(&envelope, &target.source_replica_id)
+            .map_err(|reason| anyhow::anyhow!("reaction was rejected: {}", reason.as_str()))?;
+        let reaction = verified.doc().clone();
         persist_reaction_doc(
             self.services.docs_sync.as_ref(),
             &target.source_replica_id,
@@ -82,10 +117,7 @@ impl AppService {
         self.services.store.put_envelope(envelope.clone()).await?;
         self.services
             .projection_store
-            .upsert_reaction_cache(reaction_projection_row_from_doc(
-                &reaction,
-                &target.source_replica_id,
-            ))
+            .upsert_reaction_cache(reaction_projection_row(&verified))
             .await?;
         if let Err(error) = self
             .services
@@ -97,6 +129,7 @@ impl AppService {
                     objects: vec![HintObjectRef {
                         object_id: target_object_id.as_str().to_string(),
                         object_kind: "reaction".into(),
+                        docs_author: None,
                     }],
                 },
             )
@@ -123,7 +156,8 @@ impl AppService {
             .blob_service
             .put_blob(input.bytes, input.mime.as_str())
             .await?;
-        let envelope = build_custom_reaction_asset_envelope(
+        let docs_author = self.services.docs_sync.local_docs_author().await?;
+        let envelope = build_custom_reaction_asset_envelope_with_docs_author(
             self.services.keys.as_ref(),
             stored_blob.hash.clone(),
             input.search_key,
@@ -131,6 +165,7 @@ impl AppService {
             stored_blob.bytes,
             input.width,
             input.height,
+            docs_author.as_deref(),
         )?;
         let asset = parse_custom_reaction_asset(&envelope)?
             .ok_or_else(|| anyhow::anyhow!("failed to parse custom reaction asset envelope"))?;
@@ -147,9 +182,11 @@ impl AppService {
 
     pub async fn list_my_custom_reaction_assets(&self) -> Result<Vec<CustomReactionAssetView>> {
         let author_pubkey = self.current_author_pubkey();
+        let docs_author = self.services.docs_sync.local_docs_author().await?;
         let mut items = load_custom_reaction_assets_from_author_replica(
             self.services.docs_sync.as_ref(),
             &author_pubkey,
+            docs_author.as_deref(),
         )
         .await?;
         items.sort_by(|left, right| {

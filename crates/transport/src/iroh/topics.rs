@@ -54,27 +54,34 @@ impl TopicWarmupCoordinator {
         gossip: &Gossip,
         peers: &[EndpointAddr],
     ) {
-        let mut tasks = Vec::new();
-        for peer in peers.iter().cloned() {
-            let coordinator = self.clone();
-            let endpoint = endpoint.clone();
-            let gossip = gossip.clone();
-            tasks.push(tokio::spawn(async move {
-                coordinator.warmup_peer(endpoint, gossip, peer).await;
-            }));
+        let selected = self.warmup_window(peers);
+        futures_util::stream::iter(selected)
+            .for_each_concurrent(2, |peer| {
+                let endpoint = endpoint.clone();
+                let gossip = gossip.clone();
+                async move {
+                    self.warmup_peer(endpoint, gossip, peer).await;
+                }
+            })
+            .await;
+    }
+
+    fn warmup_window(&self, peers: &[EndpointAddr]) -> Vec<EndpointAddr> {
+        if peers.is_empty() {
+            return Vec::new();
         }
-        for task in tasks {
-            let _ = task.await;
-        }
+        let start = self.warmup_cursor.fetch_add(4, Ordering::Relaxed) as usize % peers.len();
+        (0..peers.len().min(4))
+            .map(|offset| peers[(start + offset) % peers.len()].clone())
+            .collect()
     }
 
     async fn warmup_peer(&self, endpoint: Endpoint, gossip: Gossip, peer: EndpointAddr) {
-        let peer_key = peer.id.to_string();
-        let Some(_in_flight_guard) = self.try_mark_peer_in_flight(peer_key) else {
+        let Ok(_permit) = self.permits.try_acquire() else {
             return;
         };
-
-        let Ok(_permit) = self.permits.acquire().await else {
+        let peer_key = peer.id.to_string();
+        let Some(_in_flight_guard) = self.try_mark_peer_in_flight(peer_key) else {
             return;
         };
         // Active endpoint paths can belong to docs/blob connections. They do not
@@ -122,6 +129,44 @@ struct TopicWarmupInFlightGuard {
     in_flight_peers: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
+struct AbortWarmupOnDrop(JoinHandle<()>);
+
+impl Drop for AbortWarmupOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn topic_closed(closed: &AtomicBool, notify: &Notify) {
+    loop {
+        let stopped = notify.notified();
+        tokio::pin!(stopped);
+        stopped.as_mut().enable();
+        if closed.load(Ordering::Acquire) {
+            return;
+        }
+        stopped.await;
+    }
+}
+
+#[cfg(test)]
+struct CountedWarmupTask(Arc<AtomicUsize>);
+
+#[cfg(test)]
+impl CountedWarmupTask {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CountedWarmupTask {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Drop for TopicWarmupInFlightGuard {
     fn drop(&mut self) {
         if let Ok(mut in_flight_peers) = self.in_flight_peers.write() {
@@ -132,11 +177,39 @@ impl Drop for TopicWarmupInFlightGuard {
 
 impl IrohGossipTransport {
     async fn remove_topic_state(&self, topic: &str) {
-        if let Some(state) = self.topic_states.lock().await.remove(topic) {
-            state._receiver_task.abort();
-            drop(state.sender);
+        let _ = self.remove_topic_state_if_generation(topic, None).await;
+    }
+
+    async fn remove_topic_state_if_generation(
+        &self,
+        topic: &str,
+        expected: Option<&Arc<AtomicBool>>,
+    ) -> bool {
+        let mut topics = self.topic_states.lock().await;
+        if let Some(expected) = expected
+            && !topics
+                .get(topic)
+                .is_some_and(|state| Arc::ptr_eq(&state.closed, expected))
+        {
+            return false;
         }
-        self.subscribed_topics.lock().await.remove(topic);
+        if let Some(mut state) = topics.remove(topic) {
+            state.closed.store(true, Ordering::Release);
+            state.closed_notify.notify_waiters();
+            state._receiver_task.abort();
+            let update = state.update_warmup_task.take();
+            if let Some(update) = &update {
+                update.abort();
+            }
+            self.subscribed_topics.lock().await.remove(topic);
+            let _ = state._receiver_task.await;
+            if let Some(update) = update {
+                let _ = update.await;
+            }
+        } else {
+            self.subscribed_topics.lock().await.remove(topic);
+        }
+        true
     }
 
     pub(crate) async fn extend_active_topic_peers(
@@ -144,12 +217,15 @@ impl IrohGossipTransport {
         endpoint_addrs: Vec<EndpointAddr>,
         reason: &str,
     ) {
-        if endpoint_addrs.is_empty() {
+        if endpoint_addrs.is_empty() || self.hint_closed.load(Ordering::Acquire) {
             return;
         }
         let mut updates = Vec::new();
         {
             let mut topic_states = self.topic_states.lock().await;
+            if self.hint_closed.load(Ordering::Acquire) {
+                return;
+            }
             for (topic, state) in topic_states.iter_mut() {
                 let mut join_peer_ids = Vec::new();
                 let mut added_peer_ids = Vec::new();
@@ -167,6 +243,8 @@ impl IrohGossipTransport {
                         topic.clone(),
                         state.sender.clone(),
                         Arc::clone(&state.neighbors),
+                        Arc::clone(&state.closed),
+                        Arc::clone(&state.closed_notify),
                         added_peer_ids,
                         join_peer_ids,
                         join_endpoint_addrs,
@@ -175,8 +253,16 @@ impl IrohGossipTransport {
             }
         }
 
-        for (topic, sender, neighbors, added_peer_ids, join_peer_ids, join_endpoint_addrs) in
-            updates
+        for (
+            topic,
+            sender,
+            neighbors,
+            closed,
+            closed_notify,
+            added_peer_ids,
+            join_peer_ids,
+            join_endpoint_addrs,
+        ) in updates
         {
             info!(
                 topic = %topic,
@@ -184,7 +270,13 @@ impl IrohGossipTransport {
                 added_peer_ids = ?added_peer_ids,
                 "updating active gossip topic peers"
             );
-            if let Err(error) = sender.lock().await.join_peers(join_peer_ids).await {
+            let join = async { sender.lock().await.join_peers(join_peer_ids).await };
+            let result = tokio::select! {
+                biased;
+                _ = topic_closed(&closed, &closed_notify) => continue,
+                result = join => result,
+            };
+            if let Err(error) = result {
                 warn!(
                     topic = %topic,
                     reason,
@@ -197,7 +289,18 @@ impl IrohGossipTransport {
             let endpoint = self.endpoint.clone();
             let gossip = self.gossip.clone();
             let warmups = Arc::clone(&self.topic_warmups);
-            tokio::spawn(async move {
+            let mut topics = self.topic_states.lock().await;
+            let Some(state) = topics.get_mut(&topic) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&state.closed, &closed) || closed.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some(previous) = state.update_warmup_task.take() {
+                previous.abort();
+                let _ = previous.await;
+            }
+            let task = tokio::spawn(async move {
                 let join_deadline = tokio::time::Instant::now() + initial_topic_join_timeout();
                 let relay_backed = peers_use_relay(&join_endpoint_addrs);
                 let mut attempt = 0usize;
@@ -222,10 +325,15 @@ impl IrohGossipTransport {
                     sleep(retry_delay).await;
                 }
             });
+            state.update_warmup_task = Some(task);
         }
     }
 
     async fn ensure_hint_topic(&self, topic: &TopicId) -> Result<broadcast::Sender<HintEnvelope>> {
+        anyhow::ensure!(
+            !self.hint_closed.load(Ordering::Acquire),
+            "hint transport is closed"
+        );
         let bootstrap_peers = self.bootstrap_peers().await;
         let bootstrap_peer_ids = bootstrap_peers
             .iter()
@@ -240,11 +348,23 @@ impl IrohGossipTransport {
                     state.bootstrap_peer_ids.clone(),
                     Arc::clone(&state.neighbors),
                     Arc::clone(&state.last_error),
+                    Arc::clone(&state.closed),
                 )
             })
         };
+        #[cfg(test)]
+        if existing.is_some() {
+            self.hint_existing_snapshot_observed.notify_one();
+        }
 
-        if let Some((broadcaster, existing_bootstrap_peer_ids, neighbors, last_error)) = existing {
+        if let Some((
+            _broadcaster,
+            existing_bootstrap_peer_ids,
+            neighbors,
+            last_error,
+            expected_generation,
+        )) = existing
+        {
             let has_neighbors = !neighbors.read().await.is_empty();
             let timed_out_join = last_error
                 .lock()
@@ -254,10 +374,20 @@ impl IrohGossipTransport {
             if existing_bootstrap_peer_ids == bootstrap_peer_ids
                 && (!timed_out_join || has_neighbors)
             {
-                self.subscribed_topics.lock().await.insert(topic.0.clone());
-                return Ok(broadcaster);
+                let topics = self.topic_states.lock().await;
+                let mut subscribed = self.subscribed_topics.lock().await;
+                anyhow::ensure!(
+                    !self.hint_closed.load(Ordering::Acquire),
+                    "hint transport is closed"
+                );
+                if let Some(current) = topics.get(topic.as_str()) {
+                    subscribed.insert(topic.0.clone());
+                    return Ok(current.broadcaster.clone());
+                }
             }
-            self.remove_topic_state(topic.as_str()).await;
+            let _ = self
+                .remove_topic_state_if_generation(topic.as_str(), Some(&expected_generation))
+                .await;
         }
 
         let bootstrap = bootstrap_peers
@@ -297,6 +427,8 @@ impl IrohGossipTransport {
         let last_error_task = Arc::clone(&last_error);
         let invalid_hint_count = Arc::new(AtomicU64::new(0));
         let invalid_hint_count_task = Arc::clone(&invalid_hint_count);
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_notify = Arc::new(Notify::new());
         let transport_last_error = Arc::clone(&self.last_error);
         let imported_count = bootstrap_peers.len();
         let warm_endpoint = self.endpoint.clone();
@@ -304,10 +436,28 @@ impl IrohGossipTransport {
         let warm_gossip = self.gossip.clone();
         let warmups = Arc::clone(&self.topic_warmups);
 
+        // The receiver must enter the registry in the same non-await section
+        // in which it is spawned. Shutdown and concurrent subscribe use these
+        // locks in the same order.
+        let mut topics = self.topic_states.lock().await;
+        let mut subscribed = self.subscribed_topics.lock().await;
+        anyhow::ensure!(
+            !self.hint_closed.load(Ordering::Acquire),
+            "hint transport is closed"
+        );
+        if let Some(current) = topics.get(topic.as_str()) {
+            subscribed.insert(topic.0.clone());
+            return Ok(current.broadcaster.clone());
+        }
+
         let task = tokio::spawn(async move {
             if imported_count > 0 {
                 let join_timeout = initial_topic_join_timeout();
-                let warmup_task = tokio::spawn(async move {
+                #[cfg(test)]
+                let task_guard = CountedWarmupTask::new(Arc::clone(&warmups.initial_warmup_tasks));
+                let warmup_task = AbortWarmupOnDrop(tokio::spawn(async move {
+                    #[cfg(test)]
+                    let _task_guard = task_guard;
                     let join_deadline = tokio::time::Instant::now() + join_timeout;
                     let relay_backed = peers_use_relay(&warm_bootstrap_peers);
                     let mut attempt = 0usize;
@@ -322,11 +472,11 @@ impl IrohGossipTransport {
                         attempt = attempt.saturating_add(1);
                         sleep(retry_delay).await;
                     }
-                });
+                }));
                 let joined = timeout(join_timeout, receiver.joined())
                     .await
                     .is_ok_and(|result| result.is_ok());
-                warmup_task.abort();
+                warmup_task.0.abort();
                 if joined {
                     joined_task_state.store(true, Ordering::SeqCst);
                     joined_task_notify.notify_waiters();
@@ -426,8 +576,8 @@ impl IrohGossipTransport {
             }
         });
 
-        self.subscribed_topics.lock().await.insert(topic.0.clone());
-        self.topic_states.lock().await.insert(
+        subscribed.insert(topic.0.clone());
+        topics.insert(
             topic.0.clone(),
             HintTopicState {
                 sender: Arc::new(Mutex::new(sender)),
@@ -437,6 +587,9 @@ impl IrohGossipTransport {
                 last_received_at,
                 last_error,
                 invalid_hint_count,
+                closed,
+                closed_notify,
+                update_warmup_task: None,
                 _receiver_task: task,
             },
         );
@@ -450,17 +603,33 @@ impl IrohGossipTransport {
         Box::pin(stream)
     }
 
-    pub async fn shutdown(&self) {
-        let topics = self
-            .subscribed_topics
-            .lock()
-            .await
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for topic in topics {
-            self.remove_topic_state(topic.as_str()).await;
+    async fn shutdown_hint_topics(&self) {
+        let mut topics = self.topic_states.lock().await;
+        let mut states = topics.drain().map(|(_, state)| state).collect::<Vec<_>>();
+        for state in &mut states {
+            state.closed.store(true, Ordering::Release);
+            state.closed_notify.notify_waiters();
+            state._receiver_task.abort();
+            if let Some(update) = &state.update_warmup_task {
+                update.abort();
+            }
         }
+        drop(topics);
+        self.subscribed_topics.lock().await.clear();
+        for mut state in states {
+            let _ = state._receiver_task.await;
+            if let Some(update) = state.update_warmup_task.take() {
+                let _ = update.await;
+            }
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        self.hint_closed.store(true, Ordering::Release);
+        self.offer_closed.store(true, Ordering::Release);
+        self.offer_shutdown_notify.notify_waiters();
+        self.shutdown_hint_topics().await;
+        self.shutdown_receive_offers().await;
     }
 
     pub(crate) async fn hint_subscribe_hints_impl(&self, topic: &TopicId) -> Result<HintStream> {
@@ -513,120 +682,5 @@ impl IrohGossipTransport {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn active_other_protocol_does_not_suppress_gossip_warmup() {
-        const OTHER_ALPN: &[u8] = b"kukuri-test-other-protocol";
-        let local = Endpoint::bind(presets::Minimal)
-            .await
-            .expect("local endpoint");
-        let remote = Endpoint::builder(presets::Minimal)
-            .alpns(vec![OTHER_ALPN.to_vec(), GOSSIP_ALPN.to_vec()])
-            .bind()
-            .await
-            .expect("remote endpoint");
-        let (outbound, inbound) = timeout(Duration::from_secs(5), async {
-            tokio::join!(local.connect(remote.addr(), OTHER_ALPN), async {
-                remote.accept().await.expect("other incoming").await
-            })
-        })
-        .await
-        .expect("other protocol connection deadline");
-        let outbound = outbound.expect("other outbound");
-        let inbound = inbound.expect("other inbound");
-        assert!(local.remote_info(remote.id()).await.is_some_and(|info| {
-            info.addrs()
-                .any(|addr| matches!(addr.usage(), TransportAddrUsage::Active))
-        }));
-        assert_eq!(outbound.alpn(), OTHER_ALPN);
-        assert_eq!(inbound.alpn(), OTHER_ALPN);
-
-        let gossip = Gossip::builder().spawn(local.clone());
-        let warmup = tokio::spawn({
-            let local = local.clone();
-            let gossip = gossip.clone();
-            let peer = remote.addr();
-            async move {
-                TopicWarmupCoordinator::default()
-                    .warmup_peer(local, gossip, peer)
-                    .await;
-            }
-        });
-        let incoming = timeout(Duration::from_secs(3), async {
-            remote.accept().await.expect("gossip incoming").await
-        })
-        .await;
-        warmup.abort();
-        let _ = warmup.await;
-        gossip.shutdown().await.expect("gossip shutdown");
-        local.close().await;
-        remote.close().await;
-        let connection = incoming
-            .expect("an active other protocol must not suppress gossip dialing")
-            .expect("gossip connection");
-        assert_eq!(connection.alpn(), GOSSIP_ALPN);
-    }
-
-    // gossip topic id 派生の golden(WP-S3 T4)。blake3(topic 文字列)が
-    // on-wire の gossip 識別子そのもの。変更はネットワーク分断になる。
-    #[test]
-    fn topic_to_gossip_id_matches_golden() {
-        let id = topic_to_gossip_id(&kukuri_core::TopicId::new("kukuri:topic:golden"));
-        let expected = blake3::Hash::from_hex(
-            "65994b46e778ead0264f20707efc571bfc4bdf510f97add9ebd81c8ad507dc80",
-        )
-        .expect("expected hex parses");
-        assert_eq!(id.as_bytes(), expected.as_bytes());
-    }
-
-    #[test]
-    fn topic_warmup_retry_delay_backs_off_and_caps() {
-        assert_eq!(
-            topic_warmup_retry_delay(0, false),
-            Duration::from_millis(250)
-        );
-        assert_eq!(
-            topic_warmup_retry_delay(1, false),
-            Duration::from_millis(500)
-        );
-        assert_eq!(topic_warmup_retry_delay(2, false), Duration::from_secs(1));
-        assert_eq!(topic_warmup_retry_delay(3, false), Duration::from_secs(2));
-        assert_eq!(topic_warmup_retry_delay(4, false), Duration::from_secs(5));
-        assert_eq!(topic_warmup_retry_delay(12, false), Duration::from_secs(5));
-    }
-
-    #[test]
-    fn relay_topic_warmup_retry_delay_backs_off_more_slowly() {
-        assert_eq!(topic_warmup_retry_delay(0, true), Duration::from_secs(1));
-        assert_eq!(topic_warmup_retry_delay(1, true), Duration::from_secs(2));
-        assert_eq!(topic_warmup_retry_delay(2, true), Duration::from_secs(4));
-        assert_eq!(topic_warmup_retry_delay(3, true), Duration::from_secs(8));
-        assert_eq!(topic_warmup_retry_delay(4, true), Duration::from_secs(10));
-        assert_eq!(topic_warmup_retry_delay(12, true), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn warmup_coordinator_coalesces_same_peer_dials() {
-        let coordinator = TopicWarmupCoordinator::default();
-
-        assert!(coordinator.try_mark_peer_in_flight_for_test("peer"));
-        assert!(!coordinator.try_mark_peer_in_flight_for_test("peer"));
-
-        coordinator.clear_in_flight_for_test("peer");
-        assert!(coordinator.try_mark_peer_in_flight_for_test("peer"));
-    }
-
-    #[test]
-    fn warmup_in_flight_guard_clears_on_drop() {
-        let coordinator = TopicWarmupCoordinator::default();
-        let guard = coordinator
-            .try_mark_peer_in_flight("peer".to_string())
-            .expect("first warmup marks peer");
-
-        assert!(!coordinator.try_mark_peer_in_flight_for_test("peer"));
-        drop(guard);
-        assert!(coordinator.try_mark_peer_in_flight_for_test("peer"));
-    }
-}
+#[path = "topics_tests.rs"]
+mod tests;

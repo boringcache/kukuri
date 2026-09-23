@@ -8,9 +8,11 @@ test('settings language localizes Explore and the file control across reloads', 
   await page.getByRole('dialog', { name: 'Settings', exact: true }).getByLabel('Language').selectOption('ja');
   await page.keyboard.press('Escape');
   await page.goto('/#/explore');
-  await expect(page.getByRole('heading', { name: 'コミュニティインデックス', exact: true })).toBeVisible();
+  // #1192: カラム見出しと重複するカード見出しを外したため、機能タブの accessible name で確認する。
+  await expect(page.getByRole('tablist', { name: 'コミュニティインデックスの機能' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '検索', exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'コミュニティインデックス', exact: true })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'コミュニティインデックスの機能' })).toBeVisible();
   await page.goto('/#/timeline');
   await page.locator('[data-column-id][aria-current="true"] .shell-column-primary-action').click();
   await expect(page.getByRole('button', { name: 'ファイルを選択', exact: true })).toBeVisible();
@@ -128,3 +130,48 @@ for (const locale of [
     await expect(composer.getByText(locale.selected, { exact: true })).toBeVisible();
   });
 }
+
+test('clipboard image paste creates a local draft before explicit publish', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('kukuri.desktop.locale', 'en');
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/#/timeline');
+  await page.locator('[data-column-id][aria-current="true"] .shell-column-primary-action').click();
+  const composer = page.locator('.composer');
+  const textarea = composer.locator('textarea');
+  await textarea.fill('clipboard image draft');
+
+  const prevented = await textarea.evaluate((element, bytes) => {
+    const clipboard = new DataTransfer();
+    clipboard.setData('text/plain', 'must not be inserted with the image');
+    clipboard.items.add(
+      new File([Uint8Array.from(bytes)], '', {
+        type: 'image/png',
+        lastModified: 42,
+      })
+    );
+    return !element.dispatchEvent(
+      new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      })
+    );
+  }, Array.from(image));
+
+  expect(prevented).toBe(true);
+  await expect(composer.getByText('Attached files: 1', { exact: true })).toBeVisible();
+  await expect(composer.getByText('clipboard-image.png', { exact: true })).toBeVisible();
+  await expect(textarea).toHaveValue('clipboard image draft');
+  await expect(
+    page.locator('.post-card').filter({ hasText: 'clipboard image draft' })
+  ).toHaveCount(0);
+
+  await composer.getByRole('button', { name: 'Post', exact: true }).click();
+  await expect(
+    page
+      .locator('[data-column-id][aria-current="true"] .post-card')
+      .filter({ hasText: 'clipboard image draft' })
+  ).toHaveCount(1);
+});

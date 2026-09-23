@@ -611,7 +611,7 @@ impl AppService {
             .filter(|value| !value.is_empty());
         if let Some(instance_id) = entry_dome_instance_id.as_deref() {
             let instance = self
-                .hosting_instance(&replica, instance_id)
+                .hosting_instance(&replica, &context, instance_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("entry Dome is not in this Spatial Context"))?;
             if instance.spatial_context != context
@@ -1025,7 +1025,7 @@ impl AppService {
         self.ensure_topic_subscription(topic_id).await?;
         self.ensure_joined_private_channel_subscriptions(topic_id)
             .await?;
-        self.maybe_restart_scope_replica_sync(topic_id, &TimelineScope::AllJoined)
+        self.maybe_restart_scope_replica_sync(topic_id, &ReplicaScope::AllJoined)
             .await;
         for state in self.joined_private_channel_states_for_topic(topic_id).await {
             self.maybe_redeem_epoch_handoff_grants_for_channel(topic_id, state.channel_id.as_str())

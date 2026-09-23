@@ -1,10 +1,24 @@
+use super::attachment_support::DirectMessageMaterializationGuard;
 use super::*;
+use kukuri_core::{ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer};
+use kukuri_transport::EndpointAddr;
+use std::time::Duration;
+
+const ACCOUNT_DM_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
+const LEGACY_DM_HINT_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+struct AccountReceiveDestination {
+    address: EndpointAddr,
+    provider_endpoint_id: String,
+}
 
 pub(crate) struct DirectMessageHintServices<'a> {
     pub(crate) services: &'a ServiceHandles,
     pub(crate) local_author_pubkey: &'a str,
     pub(crate) peer_pubkey: &'a str,
     pub(crate) topic: &'a TopicId,
+    pub(crate) ack_destination: Option<EndpointAddr>,
 }
 
 impl AppService {
@@ -17,6 +31,7 @@ impl AppService {
             local_author_pubkey,
             peer_pubkey,
             topic,
+            ack_destination,
         } = services;
         let projection_store = services.projection_store.as_ref();
         match hint {
@@ -34,6 +49,7 @@ impl AppService {
                     dm_id.as_str(),
                     message_id.as_str(),
                     frame_hash,
+                    ack_destination.as_ref(),
                 )
                 .await
             }
@@ -41,6 +57,11 @@ impl AppService {
                 ack.verify()?;
                 if ack.sender.as_str() != peer_pubkey
                     || ack.recipient.as_str() != local_author_pubkey
+                    || ack.dm_id
+                        != direct_message_id_for_participants(
+                            &Pubkey::from(local_author_pubkey),
+                            &Pubkey::from(peer_pubkey),
+                        )
                 {
                     return Ok(false);
                 }
@@ -65,6 +86,7 @@ impl AppService {
         docs_sync: &dyn DocsSync,
         blob_service: &dyn BlobService,
         local_author_pubkey: &str,
+        topic_id: &str,
         notification_baseline: &NotificationDocEventBaseline,
         event: &DocEvent,
     ) -> Result<bool> {
@@ -76,6 +98,7 @@ impl AppService {
             docs_sync,
             blob_service,
             local_author_pubkey,
+            topic_id,
             event,
         )
         .await?
@@ -158,10 +181,10 @@ impl AppService {
         dm_id: &str,
         message_id: &str,
         frame_hash: &kukuri_core::BlobHash,
+        ack_destination: Option<&EndpointAddr>,
     ) -> Result<bool> {
         let projection_store = services.projection_store.as_ref();
         let blob_service = services.blob_service.as_ref();
-        let hint_transport = services.hint_transport.as_ref();
         let keys = services.keys.as_ref();
         let expected_dm_id = direct_message_id_for_participants(
             &Pubkey::from(local_author_pubkey),
@@ -170,9 +193,25 @@ impl AppService {
         if dm_id != expected_dm_id {
             return Ok(false);
         }
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let Some(frame_bytes) = blob_service.fetch_blob(frame_hash).await? else {
             return Ok(false);
         };
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let frame: DirectMessageFrameV1 = serde_json::from_slice(frame_bytes.as_slice())
             .context("failed to decode direct message frame blob")?;
         if frame.message_id != message_id || frame.dm_id != dm_id {
@@ -193,15 +232,15 @@ impl AppService {
             .has_direct_message_tombstone(dm_id, message_id)
             .await?
         {
-            hint_transport
-                .publish_hint(
-                    topic,
-                    GossipHint::DirectMessageAck {
-                        topic_id: topic.clone(),
-                        ack,
-                    },
-                )
-                .await?;
+            Self::publish_direct_message_ack(
+                services,
+                local_author_pubkey,
+                peer_pubkey,
+                topic,
+                ack,
+                ack_destination,
+            )
+            .await?;
             return Ok(false);
         }
         if projection_store
@@ -209,25 +248,41 @@ impl AppService {
             .await?
             .is_some()
         {
-            hint_transport
-                .publish_hint(
-                    topic,
-                    GossipHint::DirectMessageAck {
-                        topic_id: topic.clone(),
-                        ack,
-                    },
-                )
-                .await?;
+            Self::publish_direct_message_ack(
+                services,
+                local_author_pubkey,
+                peer_pubkey,
+                topic,
+                ack,
+                ack_destination,
+            )
+            .await?;
             return Ok(false);
         }
         let local_manifest = materialize_direct_message_manifest(
             blob_service,
+            &DirectMessageMaterializationGuard {
+                projection_store,
+                local_author_pubkey,
+                peer_pubkey,
+            },
             keys,
             &frame.sender,
             frame.message_id.as_str(),
             payload.attachment_manifest.as_ref(),
         )
         .await?;
+        if payload.attachment_manifest.is_some() && local_manifest.is_none() {
+            return Ok(false);
+        }
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let message_row = DirectMessageMessageRow {
             dm_id: dm_id.to_string(),
             message_id: message_id.to_string(),
@@ -274,71 +329,326 @@ impl AppService {
             },
         )
         .await?;
-        hint_transport
-            .publish_hint(
-                topic,
-                GossipHint::DirectMessageAck {
-                    topic_id: topic.clone(),
-                    ack,
-                },
-            )
-            .await?;
+        Self::publish_direct_message_ack(
+            services,
+            local_author_pubkey,
+            peer_pubkey,
+            topic,
+            ack,
+            ack_destination,
+        )
+        .await?;
         Ok(true)
     }
 
-    pub(crate) async fn flush_direct_message_outbox_for_peer(
+    async fn publish_direct_message_ack(
         services: &ServiceHandles,
         local_author_pubkey: &str,
         peer_pubkey: &str,
-    ) -> Result<usize> {
-        let projection_store = services.projection_store.as_ref();
-        let hint_transport = services.hint_transport.as_ref();
-        let transport = services.transport.as_ref();
-        let keys = services.keys.as_ref();
-        let relationship = projection_store
+        topic: &TopicId,
+        ack: kukuri_core::DirectMessageAckV1,
+        ack_destination: Option<&EndpointAddr>,
+    ) -> Result<()> {
+        if !services
+            .projection_store
             .get_author_relationship(local_author_pubkey, peer_pubkey)
-            .await?;
-        if !relationship.as_ref().is_some_and(|value| value.mutual) {
-            return Ok(0);
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(());
         }
-        let topic = derive_direct_message_topic(keys, &Pubkey::from(peer_pubkey))?;
-        let peer_count = direct_message_topic_peer_count(transport, &topic).await?;
-        let topic_has_connected_peer = peer_count > 0;
-        let mut published = 0usize;
-        let attempted_at = Utc::now().timestamp_millis();
-        for row in projection_store.list_direct_message_outbox().await? {
-            if row.peer_pubkey != peer_pubkey {
-                continue;
-            }
-            if topic_has_connected_peer {
-                projection_store
-                    .touch_direct_message_outbox_attempt(
-                        row.dm_id.as_str(),
-                        row.message_id.as_str(),
-                        attempted_at,
-                    )
-                    .await?;
-            }
-            let publish_result = hint_transport
-                .publish_hint(
-                    &topic,
-                    GossipHint::DirectMessageFrame {
-                        topic_id: topic.clone(),
-                        dm_id: row.dm_id.clone(),
-                        message_id: row.message_id.clone(),
-                        frame_hash: row.frame_blob_hash.clone(),
-                    },
-                )
-                .await;
-            if let Err(error) = publish_result {
-                if topic_has_connected_peer {
-                    return Err(error);
+        let hint = GossipHint::DirectMessageAck {
+            topic_id: topic.clone(),
+            ack,
+        };
+        let account_sent = if let Some(destination) = ack_destination {
+            match Self::publish_account_receive_dm_ack(services, peer_pubkey, &hint, destination)
+                .await
+            {
+                Ok(sent) => sent,
+                Err(error) => {
+                    tracing::debug!(%error, "account receive DM ACK deferred");
+                    false
                 }
+            }
+        } else {
+            false
+        };
+        if !services
+            .projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(());
+        }
+        match services.hint_transport.publish_hint(topic, hint).await {
+            Ok(()) => Ok(()),
+            Err(_) if account_sent => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn publish_account_receive_dm_ack(
+        services: &ServiceHandles,
+        peer_pubkey: &str,
+        hint: &GossipHint,
+        destination: &EndpointAddr,
+    ) -> Result<bool> {
+        let Ok(_permit) = services.account_dm_offer_permits.try_acquire() else {
+            return Ok(false);
+        };
+        let GossipHint::DirectMessageAck { ack, .. } = hint else {
+            anyhow::bail!("account DM ACK helper received a non-ACK hint")
+        };
+        let local = services.keys.public_key_hex();
+        if !services
+            .projection_store
+            .get_author_relationship(&local, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
+        let now = Utc::now().timestamp_millis();
+        let offer = seal_receive_offer(
+            services.keys.as_ref(),
+            &Pubkey::from(peer_pubkey),
+            ReceiveOfferReferenceV1::inline(
+                String::new(),
+                ReceiveOfferScopeV1::DirectMessageAck {
+                    dm_id: ack.dm_id.clone(),
+                    message_id: ack.message_id.clone(),
+                    acked_at: ack.acked_at,
+                    signature: ack.signature.clone(),
+                },
+            )?,
+            now,
+            now + 60_000,
+        )?;
+        tokio::time::timeout(
+            ACCOUNT_DM_OFFER_TIMEOUT,
+            services.hint_transport.publish_receive_offer(
+                &Pubkey::from(peer_pubkey),
+                destination.clone(),
+                offer,
+            ),
+        )
+        .await
+        .context("account receive DM ACK offer timed out")??;
+        Ok(true)
+    }
+
+    /// One bounded account-wide retry tick. New rows and previously attempted
+    /// rows have separate index lanes, so continuous new sends cannot starve
+    /// an older protected row and old failures cannot block all new sends.
+    pub(crate) async fn flush_due_direct_message_outbox(
+        services: &ServiceHandles,
+        now_ms: i64,
+    ) -> Result<usize> {
+        let rows = services
+            .projection_store
+            .list_due_direct_message_outbox(
+                now_ms.saturating_sub(DIRECT_MESSAGE_RETRY_INTERVAL_MS as i64),
+                3,
+                1,
+            )
+            .await?;
+        let mut destinations = HashMap::<String, Option<AccountReceiveDestination>>::new();
+        for row in &rows {
+            services
+                .projection_store
+                .touch_direct_message_outbox_attempt(&row.dm_id, &row.message_id, now_ms)
+                .await?;
+            if !Self::account_dm_outbox_row_can_send(services, row).await? {
                 continue;
             }
-            published += 1;
+            let topic = derive_direct_message_topic(
+                services.keys.as_ref(),
+                &Pubkey::from(row.peer_pubkey.as_str()),
+            )?;
+            if !destinations.contains_key(&row.peer_pubkey) {
+                let destination =
+                    Self::resolve_account_receive_destination(services, &row.peer_pubkey).await;
+                destinations.insert(row.peer_pubkey.clone(), destination);
+            }
+            if !Self::account_dm_outbox_row_can_send(services, row).await? {
+                continue;
+            }
+            let destination = destinations.get(&row.peer_pubkey).and_then(Option::as_ref);
+            if let Err(error) = Self::publish_direct_message_outbox_row(
+                services,
+                &topic,
+                row,
+                false,
+                destination,
+                now_ms,
+            )
+            .await
+            {
+                tracing::debug!(%error, "due direct message outbox row deferred");
+            }
         }
-        Ok(published)
+        Ok(rows.len())
+    }
+
+    async fn publish_direct_message_outbox_row(
+        services: &ServiceHandles,
+        topic: &TopicId,
+        row: &DirectMessageOutboxRow,
+        topic_has_connected_peer: bool,
+        account_destination: Option<&AccountReceiveDestination>,
+        attempted_at: i64,
+    ) -> Result<bool> {
+        if topic_has_connected_peer || account_destination.is_some() {
+            services
+                .projection_store
+                .touch_direct_message_outbox_attempt(
+                    row.dm_id.as_str(),
+                    row.message_id.as_str(),
+                    attempted_at,
+                )
+                .await?;
+        }
+        let legacy_result = tokio::time::timeout(
+            LEGACY_DM_HINT_TIMEOUT,
+            services.hint_transport.publish_hint(
+                topic,
+                GossipHint::DirectMessageFrame {
+                    topic_id: topic.clone(),
+                    dm_id: row.dm_id.clone(),
+                    message_id: row.message_id.clone(),
+                    frame_hash: row.frame_blob_hash.clone(),
+                },
+            ),
+        )
+        .await
+        .context("legacy DM hint publication timed out")
+        .and_then(|result| result);
+        let account_result = if let Some(destination) = account_destination {
+            Self::publish_account_receive_dm_frame(services, row, destination).await
+        } else {
+            Ok(false)
+        };
+        if legacy_result.is_ok() || matches!(account_result, Ok(true)) {
+            return Ok(true);
+        }
+        if let Err(error) = account_result {
+            tracing::debug!(%error, "account receive DM offer deferred");
+        }
+        match legacy_result {
+            Err(error) if topic_has_connected_peer => Err(error),
+            _ => Ok(false),
+        }
+    }
+
+    async fn resolve_account_receive_destination(
+        services: &ServiceHandles,
+        peer_pubkey: &str,
+    ) -> Option<AccountReceiveDestination> {
+        let recipient = Pubkey::from(peer_pubkey);
+        let address = match services
+            .hint_transport
+            .resolve_receive_destination(&recipient)
+            .await
+        {
+            Ok(Some(address)) => address,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, "account receive DM destination lookup deferred");
+                return None;
+            }
+        };
+        let provider_endpoint_id = match services.transport.discovery().await {
+            Ok(discovery) => discovery.local_endpoint_id,
+            Err(error) => {
+                tracing::debug!(%error, "local account receive provider unavailable");
+                return None;
+            }
+        };
+        Some(AccountReceiveDestination {
+            address,
+            provider_endpoint_id,
+        })
+    }
+
+    async fn publish_account_receive_dm_frame(
+        services: &ServiceHandles,
+        row: &DirectMessageOutboxRow,
+        destination: &AccountReceiveDestination,
+    ) -> Result<bool> {
+        let Ok(_permit) = services.account_dm_offer_permits.try_acquire() else {
+            return Ok(false);
+        };
+        if !Self::account_dm_outbox_row_can_send(services, row).await? {
+            return Ok(false);
+        }
+        let now = Utc::now().timestamp_millis();
+        let offer = seal_receive_offer(
+            services.keys.as_ref(),
+            &Pubkey::from(row.peer_pubkey.as_str()),
+            ReceiveOfferReferenceV1::inline(
+                destination.provider_endpoint_id.clone(),
+                ReceiveOfferScopeV1::DirectMessageFrame {
+                    dm_id: row.dm_id.clone(),
+                    message_id: row.message_id.clone(),
+                    frame_hash: row.frame_blob_hash.clone(),
+                },
+            )?,
+            now,
+            now + 60_000,
+        )?;
+        let sent = tokio::time::timeout(
+            ACCOUNT_DM_OFFER_TIMEOUT,
+            services.hint_transport.publish_receive_offer(
+                &Pubkey::from(row.peer_pubkey.as_str()),
+                destination.address.clone(),
+                offer,
+            ),
+        )
+        .await
+        .context("account receive DM frame offer timed out")
+        .and_then(|result| result);
+        if let Err(error) = sent {
+            services
+                .hint_transport
+                .invalidate_receive_destination(
+                    &Pubkey::from(row.peer_pubkey.as_str()),
+                    &destination.address.id.to_string(),
+                )
+                .await?;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    async fn account_dm_outbox_row_can_send(
+        services: &ServiceHandles,
+        row: &DirectMessageOutboxRow,
+    ) -> Result<bool> {
+        let Some(current) = services
+            .projection_store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if current.peer_pubkey != row.peer_pubkey
+            || current.frame_blob_hash != row.frame_blob_hash
+            || current.created_at != row.created_at
+        {
+            return Ok(false);
+        }
+        let local = services.keys.public_key_hex();
+        Ok(services
+            .projection_store
+            .get_author_relationship(&local, &row.peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual))
     }
 
     pub(crate) async fn direct_message_topic_peer_count(&self, peer_pubkey: &str) -> Result<usize> {
@@ -417,25 +727,44 @@ impl AppService {
                 acked_at: None,
             })
             .await?;
+        let outbox_row = DirectMessageOutboxRow {
+            dm_id: dm_id.clone(),
+            message_id: message_id.clone(),
+            peer_pubkey: peer_pubkey.to_string(),
+            frame_blob_hash: frame_blob.hash,
+            created_at,
+            last_attempt_at: None,
+        };
         self.services
             .projection_store
-            .put_direct_message_outbox(DirectMessageOutboxRow {
-                dm_id: dm_id.clone(),
-                message_id: message_id.clone(),
-                peer_pubkey: peer_pubkey.to_string(),
-                frame_blob_hash: frame_blob.hash,
-                created_at,
-                last_attempt_at: None,
-            })
+            .put_direct_message_outbox(outbox_row.clone())
             .await?;
         self.refresh_direct_message_conversation(peer_pubkey)
             .await?;
-        let _ = Self::flush_direct_message_outbox_for_peer(
-            &self.services,
-            self.current_author_pubkey().as_str(),
-            peer_pubkey,
-        )
-        .await?;
+        if self
+            .services
+            .projection_store
+            .get_author_relationship(self.current_author_pubkey().as_str(), peer_pubkey)
+            .await?
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            let topic = derive_direct_message_topic(
+                self.services.keys.as_ref(),
+                &Pubkey::from(peer_pubkey),
+            )?;
+            let connected =
+                direct_message_topic_peer_count(self.services.transport.as_ref(), &topic).await?
+                    > 0;
+            let _ = Self::publish_direct_message_outbox_row(
+                &self.services,
+                &topic,
+                &outbox_row,
+                connected,
+                None,
+                Utc::now().timestamp_millis(),
+            )
+            .await?;
+        }
         Ok(message_id)
     }
 

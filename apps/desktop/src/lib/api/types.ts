@@ -3,6 +3,8 @@
 // DesktopApi interface と、生成型に front 専用フィールドを交差させる PostView を扱う。
 export * from './types.generated';
 import type {
+  SessionCandidateView,
+  SessionDisplayRequest,
   AuthorSocialView,
   BlobMediaPayload,
   ContentDisplaySettings,
@@ -229,15 +231,20 @@ export type CommunityNodeConfigInput = {
 // 分散通報ルーティング (#310) の送信リクエスト。通報先は client が provenance + manifest
 // から解決し、その report_endpoint を載せて渡す。snake_case は Rust 由来の JSON 形状。
 /// #978: Tauri backend の in-memory tracing ring buffer の 1 行。`seq` はプロセス内で単調増加する。
+/// #1206: 直前と同じ level・target・message の event は行を増やさず、同じ行が新しい `seq` で
+/// 再発行される。`first_seq` / `first_timestamp_ms` は最初の発生、`seq` / `timestamp_ms` は最新の発生。
 export type DesktopLogEntry = {
   seq: number;
   timestamp_ms: number;
   level: string;
   target: string;
   message: string;
+  repeat_count: number;
+  first_seq: number;
+  first_timestamp_ms: number;
 };
 
-/// `read_desktop_logs` の応答。`oldest_seq` は buffer に残る最古の行、`next_seq` は次に採番される値。
+/// `read_desktop_logs` の応答。`oldest_seq` は buffer に残る最古の行(の `first_seq`)、`next_seq` は次に採番される値。
 export type DesktopLogSnapshot = {
   entries: DesktopLogEntry[];
   oldest_seq: number | null;
@@ -312,6 +319,11 @@ export interface DesktopApi {
     cursor?: TimelineCursor | null,
     limit?: number
   ): Promise<TimelineView>;
+  retryPostElements(
+    objectId: string,
+    bodyObjectId?: string | null,
+    manual?: boolean
+  ): Promise<PostView | null>;
   getMyProfile(): Promise<Profile>;
   setMyProfile(input: ProfileInput): Promise<Profile>;
   followAuthor(pubkey: string): Promise<AuthorSocialView>;
@@ -342,6 +354,8 @@ export interface DesktopApi {
   deleteDirectMessageMessage(pubkey: string, messageId: string): Promise<void>;
   clearDirectMessage(pubkey: string): Promise<void>;
   getDirectMessageStatus(pubkey: string): Promise<DirectMessageStatusView>;
+  listSessionCandidates(topic: string, scope: TimelineScope): Promise<SessionCandidateView[]>;
+  setSessionDisplay(request: SessionDisplayRequest): Promise<void>;
   listLiveSessions(topic: string, scope?: TimelineScope): Promise<LiveSessionView[]>;
   createLiveSession(
     topic: string,

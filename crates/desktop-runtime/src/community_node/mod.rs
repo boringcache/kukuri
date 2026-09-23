@@ -13,10 +13,11 @@ use kukuri_cn_protocol::{
     TopicRendezvousHeartbeat, build_auth_envelope_json, normalize_http_url,
 };
 use kukuri_core::{
-    TopicId, public_topic_rendezvous_key,
+    Pubkey, TopicId, public_topic_rendezvous_key, receive_route_for_account,
     wire::{HINT_TOPIC_PREFIX, PRIVATE_CHANNEL_TOPIC_PREFIX},
 };
-use kukuri_transport::{SeedPeer, Transport, TransportRelayConfig, parse_seed_peer};
+use kukuri_store::DirectMessageOutboxCursor;
+use kukuri_transport::{HintTransport, SeedPeer, Transport, TransportRelayConfig, parse_seed_peer};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -26,6 +27,7 @@ use crate::identity::{IdentityStorageMode, load_optional_secret, persist_optiona
 use crate::paths::community_node_config_path;
 use crate::runtime::DesktopRuntime;
 
+mod account_rendezvous_support;
 mod config_support;
 mod consent_preflight_support;
 mod consent_storage_support;
@@ -36,11 +38,13 @@ mod index_query_support;
 mod indexing_request_support;
 mod indexing_status_support;
 mod invite_storage_support;
+mod maintenance_tasks;
 mod manifest_support;
 mod reconnect_support;
 mod report_routing_support;
 mod requests_support;
 mod scheduler_support;
+mod session_locks;
 mod session_runtime_support;
 mod session_state_support;
 mod tester_feedback_support;
@@ -88,6 +92,7 @@ pub use report_routing_support::{
     CommunityNodeReportError, SubmitCommunityNodeReportRequest, SubmitCommunityNodeReportResult,
     SubmitCommunityNodeReportStatus,
 };
+pub(crate) use session_locks::SessionLocks;
 pub use tester_feedback_support::{
     CommunityNodeTesterFeedbackError, CommunityNodeTesterFeedbackSubmission,
 };
@@ -369,6 +374,8 @@ pub(crate) struct CommunityNodeSessionState {
     pub(crate) heartbeat_deadline: i64,
     // default 0 = 即時 due。refresh 成功時のみ bump する(#572)。
     pub(crate) rendezvous_refresh_deadline: i64,
+    pub(crate) account_candidate_after: Option<DirectMessageOutboxCursor>,
+    pub(crate) account_candidate_cycle_end: Option<DirectMessageOutboxCursor>,
     pub(crate) metadata_refresh_deadline: i64,
     pub(crate) session_retry_deadline: i64,
     pub(crate) session_phase: CommunityNodeSessionPhase,

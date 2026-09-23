@@ -75,11 +75,52 @@ test('a failed profile read offers retry instead of an empty public feed', async
   expect(within(column).queryByText('profile unavailable')).not.toBeInTheDocument();
 });
 
-test('profile overview aggregates public posts across topics and excludes private channel posts', async () => {
+test('profile feed loads the next page from its cursor', async () => {
+  const user = userEvent.setup();
+  const api = createDesktopMockApi();
+  for (let index = 1; index <= 21; index += 1) {
+    await api.createPost('kukuri:topic:general', `profile page post ${index}`);
+  }
+  const profile = await api.getMyProfile();
+  const allPosts = (await api.listProfileTimeline(profile.pubkey)).items;
+  const headContent = allPosts[0].content;
+  const tailContent = allPosts.at(-1)?.content;
+  if (!tailContent) throw new Error('profile fixture is empty');
+  vi.spyOn(api, 'listProfileTimeline').mockImplementation(async (_pubkey, cursor, limit = 20) => {
+    const start = cursor
+      ? allPosts.findIndex((post) => post.object_id === cursor.object_id) + 1
+      : 0;
+    const items = allPosts.slice(start, start + limit);
+    const last = items.at(-1);
+    return {
+      items,
+      next_cursor: start + limit < allPosts.length && last
+        ? { created_at: last.created_at, object_id: last.object_id }
+        : null,
+    };
+  });
+
+  render(<App api={api} />);
+  const column = await screen.findByRole('region', { name: /^Profile Column,/ });
+  await within(column).findByText(headContent);
+  expect(within(column).queryByText(tailContent)).not.toBeInTheDocument();
+
+  await user.click(within(column).getByRole('button', { name: 'Load more' }));
+
+  await waitFor(() => {
+    expect(within(column).getByText(tailContent)).toBeInTheDocument();
+  });
+  expect(within(column).queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+});
+
+// #1165: 1 本の長い操作列だと、負荷時に full App の再描画が積み重なって timeout するため、
+// private channel 投稿の除外と複数 topic の集約を別 test に分けている。
+// 入力は paste で渡す(打鍵ごとに App 全体が再描画され、入力操作はこれらの test の検証対象ではない)。
+test('profile overview shows public posts and excludes private channel posts', async () => {
   const user = userEvent.setup();
   render(<App api={createDesktopMockApi()} />);
 
-  await publishPost(user, 'demo public post');
+  await publishPost(user, 'demo public post', { input: 'paste' });
   await waitFor(() => {
     expect(within(getActiveColumn('Timeline')).getByText('demo public post')).toBeInTheDocument();
   });
@@ -98,39 +139,48 @@ test('profile overview aggregates public posts across topics and excludes privat
       screen.queryByRole('dialog', { name: 'Create / Join Private Channel' })
     ).not.toBeInTheDocument();
   });
-  await publishPost(user, 'demo private post');
+  await publishPost(user, 'demo private post', { input: 'paste' });
   await waitFor(() => {
     expect(screen.getByText('demo private post')).toBeInTheDocument();
   });
 
   await selectWorkspace(user, 'Profile');
-  let profileColumn = getActiveColumn('Profile');
+  const profileColumn = getActiveColumn('Profile');
   expect(within(profileColumn).getByText('demo public post')).toBeInTheDocument();
   expect(within(profileColumn).queryByText('demo private post')).not.toBeInTheDocument();
   expect(screen.getAllByText('general').length).toBeGreaterThan(0);
+  expect(within(profileColumn).getAllByRole('button', { name: 'Open original topic' }).length).toBe(1);
+});
+
+test('profile overview aggregates public posts across topics', async () => {
+  const user = userEvent.setup();
+  render(<App api={createDesktopMockApi()} />);
+
+  await publishPost(user, 'demo public post', { input: 'paste' });
+  await waitFor(() => {
+    expect(within(getActiveColumn('Timeline')).getByText('demo public post')).toBeInTheDocument();
+  });
 
   const controlCenter = await openControlCenter(user);
-  await user.type(within(controlCenter).getByPlaceholderText('general'), 'kukuri:topic:second');
-  await user.click(within(controlCenter).getByRole('button', { name: 'Add' }));
+  await user.click(within(controlCenter).getByPlaceholderText('general'));
+  await user.paste('kukuri:topic:second');
+  await user.click(within(controlCenter).getByRole('button', { name: 'Add Topic' }));
   await waitFor(() => {
     expectActiveTopic('kukuri:topic:second');
   });
 
-  await selectWorkspace(user, 'Timeline');
-  await publishPost(user, 'second public post');
+  await publishPost(user, 'second public post', { input: 'paste' });
   await waitFor(() => {
     expect(within(getActiveColumn('Timeline')).getByText('second public post')).toBeInTheDocument();
   });
 
   await selectWorkspace(user, 'Profile');
-  profileColumn = getActiveColumn('Profile');
+  const profileColumn = getActiveColumn('Profile');
   expect(within(profileColumn).getByText('demo public post')).toBeInTheDocument();
   expect(within(profileColumn).getByText('second public post')).toBeInTheDocument();
-  expect(within(profileColumn).queryByText('demo private post')).not.toBeInTheDocument();
-  const profileSection = profileColumn;
-  expect(within(profileSection).queryByRole('button', { name: 'Reply' })).not.toBeInTheDocument();
-  expect(within(profileSection).getAllByRole('button', { name: 'Open original topic' }).length).toBe(2);
-}, 10_000);
+  expect(within(profileColumn).queryByRole('button', { name: 'Reply' })).not.toBeInTheDocument();
+  expect(within(profileColumn).getAllByRole('button', { name: 'Open original topic' }).length).toBe(2);
+});
 
 test('profile overview connection count buttons open the requested connections tab', async () => {
   const followedPubkey = 'b'.repeat(64);
@@ -356,11 +406,17 @@ test('local profile editor saves profile draft from primary navigation and setti
   await user.type(displayNameInput, 'Local Author');
   await user.click(within(profileSection).getByRole('button', { name: 'Save Profile' }));
 
-  await waitFor(() => {
-    expect(screen.getByText('Local Author')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Edit Profile' })).toBeInTheDocument();
-    expect(window.location.hash).toBe('#/profile?topic=kukuri%3Atopic%3Ageneral');
-  });
+  // 保存後は loadTopics / refreshProfile の完了を待って hash の profileMode=edit が消え、
+  // それまで route 同期が edit に戻すので、overview は再取得の連鎖が終わってから現れる。
+  // 負荷下ではこの連鎖が既定の 1 秒を超えるため、待ちの上限を明示する（#1167）。
+  await waitFor(
+    () => {
+      expect(screen.getByText('Local Author')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Edit Profile' })).toBeInTheDocument();
+      expect(window.location.hash).toBe('#/profile?topic=kukuri%3Atopic%3Ageneral');
+    },
+    { timeout: 10_000 }
+  );
 
   const drawer = await openSettingsDrawer(user);
   expect(within(drawer).queryByTestId('settings-section-profile')).not.toBeInTheDocument();

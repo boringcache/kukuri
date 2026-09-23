@@ -10,6 +10,7 @@
   "navigation": {
     "activeCount": "{{count}} 件アクティブ",
     "addTopic": "トピックを追加",
+    "topicNameLabel": "トピック名",
     "channel": "チャンネル",
     "channelCreateJoin": "チャンネル作成/参加",
     "channelsGroup": "チャンネル",
@@ -93,6 +94,11 @@
     },
     "createJoinChannel": "チャンネル作成・参加",
     "shareChannel": "選択中のチャンネルを共有",
+    "communityNodes": {
+      "listLabel": "設定済みコミュニティノード",
+      "openConsents": "{{node}} の規約と同意状況を開く",
+      "empty": "設定済みのコミュニティノードはありません。"
+    },
     "release": "リリースと更新",
     "settings": "設定",
     "languageSettingsHint": "言語とテーマ",
@@ -203,6 +209,10 @@
     "appearance": {
       "description": "ローカルのライト / ダーク / 言語設定です。",
       "label": "表示と言語"
+    },
+    "system": {
+      "description": "ウィンドウを閉じたときの動作とデスクトップ連携です。",
+      "label": "システム"
     },
     "keyboard": {
       "description": "割り当て済みのキーと、有効になる画面・フォーカス条件です。",
@@ -377,7 +387,6 @@
     "selectedNodeUnavailable": "明示選択したコミュニティノードは利用できません。問い合わせを停止しています。",
     "title": "コミュニティインデックス",
     "topicSummary": "利用可能なコミュニティノードを使い、現在のトピックまたはプライベートチャンネルを検索します。",
-    "exploreSummary": "インデックスされたトピックを横断して、検索・発見・おすすめを利用します。",
     "nodeLabel": "検索元",
     "surfaces": "コミュニティインデックスの機能",
     "operations": {
@@ -447,7 +456,6 @@
     },
     "results": "コミュニティインデックスの結果",
     "noEligibleNode": "認証・同意済みで、利用可能なコミュニティインデックスを公開しているコミュニティノードがありません。",
-    "allJoinedDisabled": "公開トピックまたはプライベートチャンネルを1つずつ検索してください。参加中の全範囲はコミュニティノードへ送信しません。",
     "errors": {
       "authRequired": "選択したコミュニティノードへの認証が必要です。",
       "consentRequired": "選択したコミュニティノードの必須同意が必要です。",
@@ -520,6 +528,9 @@
       "other": "その他"
     },
     "rightsRequest": {
+      "policyLoading": "コミュニティノードの権利侵害申出ポリシーを取得しています…",
+      "policyUnavailable": "このコミュニティノードの権利侵害申出ポリシーを取得できませんでした。申出画面で対応範囲を確認してください。",
+      "policyEffectiveDate": "施行日 {{date}}",
       "boundary": "権利侵害申出には氏名・連絡先・権利根拠などが必要です。一般通報には送信せず、コミュニティノードが対応できる範囲と対応できない範囲を先に示す専用画面で確認してください。",
       "openDedicated": "次の画面でノード内措置の範囲を確認し、同意した場合だけ申出を送信できます。",
       "unavailable": "選択したコミュニティノードは専用の権利侵害申出受付を公開していません。一般通報へ権利主張や個人情報を送信しないでください。",

@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bookmark, Flag, Link2, Reply, Repeat2, Trash2 } from 'lucide-react';
+import { Bookmark, Flag, Link2, RefreshCw, Reply, Repeat2, Trash2 } from 'lucide-react';
 
 import { formatPostDateTime } from '@/i18n/format';
 import type {
   BookmarkedCustomReactionView,
   CommunityNodeManifestFetch,
+  CommunityNodePoliciesResponse,
   ContentProvenance,
   CustomReactionAssetView,
+  LinkPreviewFetcher,
   ReactionKeyInput,
   ReactionKeyView,
   RecentReactionView,
@@ -39,7 +41,12 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { AuthorAvatar } from './AuthorAvatar';
 import { AuthorIdentityButton } from './AuthorIdentityButton';
 import { MediaViewerDialog } from './MediaViewerDialog';
+import { LinkPreviewCard } from './LinkPreviewCard';
 import { PostMedia } from './PostMedia';
+import { MediaFetchFailure } from './MediaFetchFailure';
+import { usePostReload } from './usePostReload';
+import { PostReactionChip } from './PostReactionChip';
+import { PostReplyContext } from './PostReplyContext';
 import { ReactionPickerPopover } from './ReactionPickerPopover';
 import {
   ReportRoutingDialog,
@@ -100,7 +107,10 @@ type PostCardProps = {
   onCopyReportContact?: (value: string) => void;
   // 通報画面を開いた時に観測元ノードの最新 manifest を取得する。未指定なら候補は作らない(#696)。
   onFetchReportManifest?: (baseUrl: string) => Promise<CommunityNodeManifestFetch>;
+  onFetchNodePolicies?: (baseUrl: string, language?: string) => Promise<CommunityNodePoliciesResponse>;
   onMuteReportAuthor?: (authorPubkey: string) => Promise<void> | void;
+  enableLinkPreview?: boolean;
+  linkPreviewFetcher?: LinkPreviewFetcher;
 };
 
 function reactionKeyInputFromView(reaction: ReactionKeyView): ReactionKeyInput | null {
@@ -143,10 +153,26 @@ export function PostCard({
   onSubmitReport,
   onCopyReportContact,
   onFetchReportManifest,
+  onFetchNodePolicies,
   onMuteReportAuthor,
+  enableLinkPreview = false,
+  linkPreviewFetcher,
 }: PostCardProps) {
   const { t } = useTranslation(['common', 'profile']);
-  const { post, context } = view;
+  const {
+    cardRef,
+    post,
+    reloadAvailable,
+    reloadFailed,
+    reloadPending,
+    runReload,
+  } = usePostReload({
+    sourcePost: view.post,
+    adultContentGated: view.adultContentGated ?? false,
+    mediaState: view.media.state,
+    recoverMissingReply: !view.suppressReplyPreview,
+  });
+  const { context } = view;
   const actionPost = view.actionPost ?? post;
   // #1061: 信頼値による折りたたみ（「表示する」はこの投稿だけに効く）。
   const trustGateCollapse = usePostTrustGateCollapse(view.trustGate, onOpenAuthor);
@@ -171,7 +197,7 @@ export function PostCard({
   );
   const [reactionMenuAsset, setReactionMenuAsset] = useState<CustomReactionAssetView | null>(null);
   const [postMenuPosition, setPostMenuPosition] = useState<ContextActionMenuPosition | null>(null);
-  const isUnavailableText = post.content_status === 'Missing' && post.content === '[blob pending]';
+  const isUnavailableText = post.content_status === 'Missing';
   const localState = post.local_state ?? null;
   const isWithdrawn = post.withdrawal != null;
   const interactionDisabled = localState !== null || isWithdrawn;
@@ -207,6 +233,14 @@ export function PostCard({
           : null;
   const primaryContent = showRepostAsPrimary && repostSource ? repostSource.content : post.content;
   const hasPrimaryContent = !isUnavailableText && primaryContent.trim().length > 0;
+  const linkPreviewEligible =
+    enableLinkPreview &&
+    post.channel_id == null &&
+    !view.adultContentGated &&
+    !isWithdrawn &&
+    !isUnavailableText &&
+    localState === null &&
+    hasPrimaryContent;
   const reactionSummary = post.reaction_summary ?? [];
   const myReactionKeys = useMemo(
     () => new Set((post.my_reactions ?? []).map((reaction) => reaction.normalized_reaction_key)),
@@ -412,6 +446,7 @@ export function PostCard({
               onActivateReference={onActivateReference}
               mentionAuthors={view.mentionAuthors}
               onOpenMention={onOpenAuthor}
+              externalLinks
             />
           ) : null}
         </div>
@@ -419,66 +454,21 @@ export function PostCard({
     );
   };
 
-  const replyContext = (
-    <>
-      {!view.adultContentGated && showReplyContext && view.replyParentAuthor && replyPreview ? (
-        <div className='post-reply-context'>
-          <button
-            type='button'
-            className='post-reply-context-avatar'
-            aria-label={view.replyParentAuthor.label}
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenAuthor(view.replyParentAuthor!.pubkey);
-            }}
-          >
-            <AuthorAvatar
-              label={view.replyParentAuthor.label}
-              picture={view.replyParentAuthor.picture ?? null}
-              size='sm'
-            />
-          </button>
-          <div className='post-reply-context-main'>
-            <button
-              type='button'
-              className='post-reply-context-author author-link'
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenAuthor(view.replyParentAuthor!.pubkey);
-              }}
-            >
-              {t('feed.replyingTo', { author: view.replyParentAuthor.label })}
-            </button>
-            {replyPreview.content.trim().length > 0 ? (
-              <div
-                className='post-reply-context-body post-copy-wrap'
-                role={!readOnly && canOpenThread ? 'button' : undefined}
-                tabIndex={!readOnly && canOpenThread ? 0 : undefined}
-                onClick={!readOnly && canOpenThread ? openPrimaryTarget : undefined}
-                onKeyDown={(event) => {
-                  if (readOnly || !canOpenThread || event.target !== event.currentTarget) return;
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    openPrimaryTarget();
-                  }
-                }}
-              >
-                <SmartReferenceText
-                  text={replyPreview.content}
-                  className='post-copy-wrap'
-                  onActivateReference={onActivateReference}
-                  mentionAuthors={view.mentionAuthors}
-                  onOpenMention={onOpenAuthor}
-                />
-              </div>
-            ) : replyPreview.attachments.length > 0 ? (
-              <span className='post-reply-context-body'>{t('feed.moreMedia', { count: replyPreview.attachments.length })}</span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
+  const replyContext =
+    !view.adultContentGated && showReplyContext && view.replyParentAuthor && replyPreview ? (
+      <PostReplyContext
+        canOpenThread={canOpenThread}
+        mentionAuthors={view.mentionAuthors}
+        onActivateReference={onActivateReference}
+        onOpenAuthor={onOpenAuthor}
+        onOpenThread={openPrimaryTarget}
+        onRetryBody={reloadAvailable ? () => void runReload(replyPreview.object_id) : undefined}
+        parentAuthor={view.replyParentAuthor}
+        readOnly={readOnly}
+        reloadPending={reloadPending}
+        replyPreview={replyPreview}
+      />
+    ) : null;
 
   const contentBlock = (
     <>
@@ -500,11 +490,12 @@ export function PostCard({
             onOpenDetails={gatedAdvisory && !hasGatedMediaFrame ? advisoryDetails.openDetails : undefined}
           />
         ) : isUnavailableText ? (
-          view.showUnavailableDiagnostics ? (
-            <p className='topic-diagnostic topic-diagnostic-secondary' role='status'>
-              {t('feed.contentUnavailable')}
-            </p>
-          ) : null
+          <MediaFetchFailure
+            hashes={[]}
+            retrying={reloadPending}
+            onRetry={reloadAvailable ? () => void runReload(post.object_id) : undefined}
+            testId={`post-body-fetch-failure-${post.object_id}`}
+          />
         ) : hasPrimaryContent ? (
           <strong className='post-title post-copy-wrap'>
             <SmartReferenceText
@@ -513,6 +504,7 @@ export function PostCard({
               onActivateReference={onActivateReference}
               mentionAuthors={view.mentionAuthors}
               onOpenMention={onOpenAuthor}
+              externalLinks
             />
           </strong>
         ) : null}
@@ -544,6 +536,11 @@ export function PostCard({
             view.repostSourceAuthor
           )
         ) : null}
+        <LinkPreviewCard
+          content={primaryContent}
+          enabled={linkPreviewEligible}
+          fetcher={linkPreviewFetcher}
+        />
       </div>
       {readOnly && publishedTopicId ? (
         <div className='topic-diagnostic topic-diagnostic-secondary'>
@@ -560,6 +557,7 @@ export function PostCard({
 
   const card = (
     <article
+      ref={cardRef}
       className={
         context === 'thread'
           ? `post-card post-card-thread post-layout-safe${isFocused ? ' post-card-targeted' : ''}`
@@ -603,7 +601,6 @@ export function PostCard({
       {!isWithdrawn && view.media.kind ? (
         <PostMedia
           media={view.media}
-          showUnavailableDiagnostic={view.showUnavailableDiagnostics}
           onOpenGatedDetails={gatedAdvisory ? advisoryDetails.openDetails : undefined}
           onOpenImage={(index) => {
             setMediaViewerIndex(index);
@@ -731,58 +728,31 @@ export function PostCard({
               <div className='post-reaction-summary'>
                 {reactionSummary.map((reaction) => {
                   const reactionKey = reactionKeyInputFromView(reaction);
+                  const customAsset = reaction.custom_asset ?? null;
                   const previewUrl =
-                    reaction.custom_asset &&
-                    typeof mediaObjectUrls[reaction.custom_asset.blob_hash] === 'string'
-                      ? mediaObjectUrls[reaction.custom_asset.blob_hash]
+                    customAsset && typeof mediaObjectUrls[customAsset.blob_hash] === 'string'
+                      ? mediaObjectUrls[customAsset.blob_hash]
                       : null;
                   return (
-                    <span key={reaction.normalized_reaction_key} className='post-reaction-chip-wrap'>
-                      <button
-                        className={`post-reaction-chip${
-                          myReactionKeys.has(reaction.normalized_reaction_key)
-                            ? ' post-reaction-chip-active'
-                            : ''
-                        }`}
-                        type='button'
-                        onClick={() => {
-                          if (reactionKey && onToggleReaction) {
-                            onToggleReaction(actionPost, reactionKey);
-                          }
-                        }}
-                        onContextMenu={(event) => {
-                          if (!reaction.custom_asset) {
-                            return;
-                          }
-                          setReactionMenuAsset(reaction.custom_asset);
-                          setReactionMenuPosition(contextActionMenuPositionFromPointer(event));
-                        }}
-                        onKeyDown={(event) => {
-                          if (!reaction.custom_asset) return;
-                          const position = contextActionMenuPositionFromKeyboard(event);
-                          if (position) {
-                            setReactionMenuAsset(reaction.custom_asset);
-                            setReactionMenuPosition(position);
-                          }
-                        }}
-                      >
-                        {previewUrl ? (
-                          <img
-                            className='post-reaction-chip-image'
-                            src={previewUrl}
-                            alt={
-                              reaction.custom_asset?.search_key ??
-                              reaction.emoji ??
-                              reaction.normalized_reaction_key
+                    <PostReactionChip
+                      key={reaction.normalized_reaction_key}
+                      reaction={reaction}
+                      active={myReactionKeys.has(reaction.normalized_reaction_key)}
+                      previewUrl={previewUrl}
+                      onToggle={
+                        reactionKey && onToggleReaction
+                          ? () => onToggleReaction(actionPost, reactionKey)
+                          : undefined
+                      }
+                      onOpenContextMenu={
+                        customAsset
+                          ? (position) => {
+                              setReactionMenuAsset(customAsset);
+                              setReactionMenuPosition(position);
                             }
-                          />
-                        ) : null}
-                        <span>
-                          {reaction.emoji ?? reaction.custom_asset?.search_key ?? '?'}
-                        </span>
-                        <span>{reaction.count}</span>
-                      </button>
-                    </span>
+                          : undefined
+                      }
+                    />
                   );
                 })}
               </div>
@@ -913,6 +883,30 @@ export function PostCard({
             ) : null}
           </>
         )}
+        {reloadAvailable ? (
+          <IconButton
+            variant='secondary'
+            className='post-action-button'
+            type='button'
+            aria-disabled={reloadPending}
+            aria-busy={reloadPending}
+            label={t('actions.reloadPost')}
+            onClick={() => {
+              if (!reloadPending) void runReload();
+            }}
+            data-testid={`post-reload-${post.object_id}`}
+          >
+            <RefreshCw
+              className={reloadPending ? 'size-4 media-fetch-retry-spin' : 'size-4'}
+              aria-hidden='true'
+            />
+          </IconButton>
+        ) : null}
+        {reloadFailed ? (
+          <span className='sr-only' role='status'>
+            {t('media.fetchFailed')}
+          </span>
+        ) : null}
       </div>
 
       <MediaViewerDialog
@@ -971,6 +965,7 @@ export function PostCard({
           plan={reportPlan}
           onSubmit={handleSubmitReport}
           onCopyContact={onCopyReportContact}
+          onFetchNodePolicies={onFetchNodePolicies}
           resolving={reportResolving}
           resolveError={reportResolveError}
           localActions={

@@ -11,6 +11,31 @@ impl SeedPeer {
         self.to_endpoint_addr_with_relays(&[])
     }
 
+    pub fn to_endpoint_addr_with_relay_url_strings(
+        &self,
+        relay_urls: &[String],
+    ) -> Result<EndpointAddr> {
+        // Rendezvous candidates come from another peer. Do not resolve a
+        // peer-supplied hostname on the maintenance path.
+        let relays = relay_urls
+            .iter()
+            .map(|url| url.parse::<RelayUrl>())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let endpoint_id = EndpointId::from_str(self.endpoint_id.trim())
+            .context("invalid rendezvous endpoint id")?;
+        let mut address = EndpointAddr::new(endpoint_id);
+        if let Some(hint) = self.addr_hint.as_deref() {
+            address = address.with_ip_addr(
+                hint.parse::<SocketAddr>()
+                    .context("rendezvous addr_hint must be a numeric IP address and port")?,
+            );
+        }
+        for relay in relays {
+            address = address.with_relay_url(relay);
+        }
+        Ok(address)
+    }
+
     pub fn to_endpoint_addr_with_relays(&self, relay_urls: &[RelayUrl]) -> Result<EndpointAddr> {
         let endpoint_id = EndpointId::from_str(self.endpoint_id.trim())
             .with_context(|| format!("invalid seed endpoint id `{}`", self.endpoint_id))?;

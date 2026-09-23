@@ -37,21 +37,24 @@ impl AppService {
         } else {
             0
         };
-        let pending_outbox_count = self
+        let pending_outbox_page = self
             .services
             .projection_store
-            .list_direct_message_outbox()
-            .await?
-            .into_iter()
-            .filter(|row| row.peer_pubkey == peer_pubkey)
-            .count();
+            .list_direct_message_outbox_for_peer_page(
+                peer_pubkey,
+                None,
+                None,
+                kukuri_store::DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+            )
+            .await?;
         Ok(DirectMessageStatusView {
             peer_pubkey: peer_pubkey.to_string(),
             dm_id,
             mutual: send_enabled,
             send_enabled,
             peer_count,
-            pending_outbox_count,
+            pending_outbox_count: pending_outbox_page.items.len(),
+            pending_outbox_has_more: pending_outbox_page.next_cursor.is_some(),
         })
     }
 
@@ -428,24 +431,8 @@ impl AppService {
         let local_author_pubkey = local_author_pubkey.to_string();
         let cleanup_hint_transport = Arc::clone(&services.hint_transport);
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-                DIRECT_MESSAGE_RETRY_INTERVAL_MS,
-            ));
-            let _ = AppService::flush_direct_message_outbox_for_peer(
-                &services,
-                local_author_pubkey.as_str(),
-                peer_for_task.as_str(),
-            )
-            .await;
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
-                        let _ = AppService::flush_direct_message_outbox_for_peer(
-                            &services,
-                            local_author_pubkey.as_str(),
-                            peer_for_task.as_str(),
-                        ).await;
-                    }
                     Some(event) = hint_stream.next() => {
                         if !matches!(
                             &event.hint,
@@ -468,6 +455,7 @@ impl AppService {
                                 local_author_pubkey: local_author_pubkey.as_str(),
                                 peer_pubkey: peer_for_task.as_str(),
                                 topic: &topic_for_task,
+                                ack_destination: None,
                             },
                             &event.hint,
                         ).await {

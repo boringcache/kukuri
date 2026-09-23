@@ -586,6 +586,7 @@ async fn invalid_hint_payload_increments_counter_and_keeps_stream_healthy() {
         objects: vec![HintObjectRef {
             object_id: "invalid-hint-recovery".into(),
             object_kind: "post".into(),
+            docs_author: None,
         }],
     };
     timeout(join_timeout, async {
@@ -658,4 +659,8 @@ async fn wait_for_topic_active_path(
 }
 
 mod connection_path;
+mod connection_release;
+mod controlled_gossip;
+mod receive_offer;
 mod relay_connectivity;
+mod relay_overload;

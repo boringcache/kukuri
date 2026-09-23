@@ -1,6 +1,21 @@
 use super::*;
 
 impl DesktopRuntime {
+    pub async fn list_session_candidates(
+        &self,
+        request: ListLiveSessionsRequest,
+    ) -> Result<Vec<kukuri_app_api::SessionCandidateView>> {
+        self.app_service
+            .list_session_candidates(&request.topic, request.scope)
+            .await
+    }
+
+    pub async fn set_session_display(
+        &self,
+        request: kukuri_app_api::SessionDisplayRequest,
+    ) -> Result<()> {
+        self.app_service.set_session_display(request).await
+    }
     /// 読み取り専用。CN セッションの establish/refresh・self-heal はスケジューラ
     /// (`run_community_node_session_maintenance_once`)が担い、getter は副作用を持たない。
     pub async fn get_sync_status(&self) -> Result<SyncStatus> {
@@ -20,10 +35,33 @@ impl DesktopRuntime {
             .docs_sync
             .clone();
         drop(current);
+        // #1239: 索引を全件読まない。投稿の header から sort key を作り、索引の key を 1 つだけ確認する。
+        let Some(state) = docs_sync
+            .query_replica(
+                &replica,
+                DocQuery::Exact(kukuri_docs_sync::stable_key(
+                    "objects",
+                    &format!("{object_id}/state"),
+                )),
+            )
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        let header: kukuri_core::CanonicalPostHeader = serde_json::from_slice(&state.value)?;
+        let sort_key = kukuri_core::timeline_sort_key(header.created_at, &header.object_id);
         let rows = docs_sync
-            .query_replica(&replica, DocQuery::Prefix("indexes/timeline/".into()))
+            .query_replica(
+                &replica,
+                DocQuery::Exact(kukuri_docs_sync::stable_key(
+                    "indexes/timeline",
+                    &format!("{sort_key}/{object_id}"),
+                )),
+            )
             .await?;
-        Ok(rows.iter().any(|row| row.key.ends_with(object_id)))
+        Ok(!rows.is_empty())
     }
 
     pub async fn get_discovery_config(&self) -> Result<DiscoveryConfig> {

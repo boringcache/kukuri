@@ -96,13 +96,14 @@ async fn topic_doc_events_do_not_rehydrate_whole_replica() {
     .await
     .expect("doc event projection timeout");
 
+    // #1248: 行は署名つき envelope から作るので、key 指定で読むのは `envelope` の key。
     let queries = docs_sync.queries().await;
     assert!(
         queries.iter().any(|(_, query)| {
             *query
                 == DocQuery::Exact(stable_key(
                     "objects",
-                    &format!("{}/state", envelope.id.as_str()),
+                    &format!("{}/envelope", envelope.id.as_str()),
                 ))
         }),
         "expected exact object query after doc event, got {queries:?}"
@@ -168,6 +169,7 @@ async fn topic_object_hints_do_not_rehydrate_whole_replica() {
                 objects: vec![HintObjectRef {
                     object_id: envelope.id.as_str().to_string(),
                     object_kind: "post".into(),
+                    docs_author: None,
                 }],
             },
         )
@@ -186,13 +188,14 @@ async fn topic_object_hints_do_not_rehydrate_whole_replica() {
     .await
     .expect("hint handling timeout");
 
+    // #1248: 行は署名つき envelope から作るので、key 指定で読むのは `envelope` の key。
     let queries = docs_sync.queries().await;
     assert!(
         queries.iter().any(|(_, query)| {
             *query
                 == DocQuery::Exact(stable_key(
                     "objects",
-                    &format!("{}/state", envelope.id.as_str()),
+                    &format!("{}/envelope", envelope.id.as_str()),
                 ))
         }),
         "expected exact object query after hint, got {queries:?}"
@@ -287,6 +290,7 @@ async fn topic_reaction_hints_rehydrate_only_target_reactions() {
                 objects: vec![HintObjectRef {
                     object_id: envelope.id.as_str().to_string(),
                     object_kind: "reaction".into(),
+                    docs_author: None,
                 }],
             },
         )
@@ -305,33 +309,28 @@ async fn topic_reaction_hints_rehydrate_only_target_reactions() {
     .expect("reaction hint handling timeout");
 
     let queries = docs_sync.queries().await;
+    // #1239: 対象の reaction を、上限つきの key の一覧と、reaction ごとの envelope の key 指定で読む。
+    // 対象の reaction の総数ぶんの prefix 読みも、replica の走査もしない。
     assert!(
         queries.iter().any(|(_, query)| {
             *query
-                == DocQuery::Prefix(stable_key(
+                == DocQuery::Exact(stable_key(
                     "reactions",
-                    &format!("{}/", envelope.id.as_str()),
+                    &format!("{}/{}/envelope", envelope.id.as_str(), reaction_id.as_str()),
                 ))
         }),
-        "expected targeted reaction prefix query after hint, got {queries:?}"
+        "expected the target's reaction envelope to be read by key after the hint, got {queries:?}"
     );
     assert!(
-        queries.iter().all(|(_, query)| {
-            !matches!(
-                query,
-                DocQuery::Prefix(prefix)
-                    if prefix == "objects/"
-                        || prefix == "reactions/"
-                        || prefix == "sessions/live/"
-                        || prefix == "sessions/game/"
-            )
-        }),
-        "reaction hint should not trigger whole-replica rehydrate, got {queries:?}"
+        queries
+            .iter()
+            .all(|(_, query)| matches!(query, DocQuery::Exact(_))),
+        "a reaction hint must not read a prefix, got {queries:?}"
     );
 }
 
 #[tokio::test]
-async fn public_topic_recovery_keeps_docs_probe_when_live_peer_has_not_delivered_content() {
+async fn public_topic_recovery_keeps_prompting_a_resync_without_scanning_the_replica() {
     let store = Arc::new(MemoryStore::default());
     let topic = TopicId::new("kukuri:topic:live-peer-docs-probe");
     let transport = Arc::new(StaticTransport::new(PeerSnapshot {
@@ -386,49 +385,46 @@ async fn public_topic_recovery_keeps_docs_probe_when_live_peer_has_not_delivered
                 objects: vec![HintObjectRef {
                     object_id: "missing-post".into(),
                     object_kind: "post".into(),
+                    docs_author: None,
                 }],
             },
         )
         .await
         .expect("publish hint miss");
 
+    // #1239: 個別反映が 0 件でも replica を走査しない。docs の支援 peer がいるあいだは、再 sync を
+    // backoff つきで促し続ける(届いた entry は docs の event と窓の追いつきが反映する)。
+    let restarts_before = docs_sync.restarts().await;
     timeout(Duration::from_secs(5), async {
-        loop {
-            let queries = docs_sync.queries().await;
-            if queries
-                .iter()
-                .any(|(_, query)| *query == DocQuery::Prefix("objects/".into()))
-            {
-                break;
-            }
+        while docs_sync.restarts().await == restarts_before {
             sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("initial recovery probe timeout");
-    docs_sync.clear_queries().await;
-
+    .expect("the hint miss must prompt a replica re-sync");
+    let restarts_after_hint = docs_sync.restarts().await;
     timeout(
-        Duration::from_millis(PUBLIC_TOPIC_RECOVERY_GRACE_MS as u64 + 2_000),
+        Duration::from_millis(
+            (PUBLIC_TOPIC_RECOVERY_GRACE_MS + PUBLIC_TOPIC_RECOVERY_BACKOFF_MS[0]) as u64 + 3_000,
+        ),
         async {
-            loop {
-                let queries = docs_sync.queries().await;
-                if queries
-                    .iter()
-                    .any(|(_, query)| *query == DocQuery::Prefix("objects/".into()))
-                {
-                    break;
-                }
+            while docs_sync.restarts().await == restarts_after_hint {
                 sleep(Duration::from_millis(50)).await;
             }
         },
     )
     .await
-    .expect("periodic docs-assisted recovery probe timeout");
+    .expect("the periodic recovery must keep prompting the re-sync");
+    assert_eq!(
+        docs_sync.object_scans().await,
+        0,
+        "neither the hint miss nor the recovery tick scans the replica"
+    );
+    app.shutdown().await;
 }
 
 #[tokio::test]
-async fn topic_session_hints_retry_until_manifest_blob_is_available() {
+async fn topic_session_hints_wait_for_display_and_explicit_manifest_requests() {
     let docs_sync = Arc::new(kukuri_docs_sync::MemoryDocsSync::default());
     let blob_service = Arc::new(DelayedBlobService::default());
     let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
@@ -465,10 +461,19 @@ async fn topic_session_hints_retry_until_manifest_blob_is_available() {
         )
         .await
         .expect("create live session");
-    let state = fetch_live_session_state_from_replica(docs_sync.as_ref(), &replica, &session_id)
-        .await
-        .expect("fetch live state")
-        .expect("live state");
+    let state: LiveSessionStateDocV1 = serde_json::from_slice(
+        &docs_sync
+            .query_replica(
+                &replica,
+                DocQuery::Exact(stable_key("sessions/live", &format!("{session_id}/state"))),
+            )
+            .await
+            .expect("fetch live state")
+            .first()
+            .expect("live state")
+            .value,
+    )
+    .expect("parse live state");
     blob_service
         .delay_hash(&state.current_manifest.hash, 2)
         .await;
@@ -486,13 +491,35 @@ async fn topic_session_hints_retry_until_manifest_blob_is_available() {
     .await
     .expect("hydrate live hint");
 
-    assert_eq!(hydrated, 1);
-    assert!(
-        LiveGameProjectionStore::list_topic_live_sessions(remote_store.as_ref(), topic.as_str())
+    assert_eq!(hydrated, 0, "hints do not fetch missing manifests");
+    let remote_app = AppService::from_handles(remote_services);
+    for retry in [false, true, true] {
+        remote_app
+            .set_session_display(crate::SessionDisplayRequest {
+                topic: topic.as_str().into(),
+                scope: TimelineScope::Public,
+                replica_id: replica.as_str().into(),
+                session_id: session_id.clone(),
+                kind: "live".into(),
+                observer: "test-live-card".into(),
+                visible: true,
+                retry,
+            })
             .await
-            .expect("list remote live sessions")
-            .iter()
-            .any(|session| session.session_id == session_id),
-        "expected live session projection after retry"
+            .expect("displayed session request");
+        remote_app.services.session_projections.wait_idle().await;
+    }
+    assert!(
+        LiveGameProjectionStore::list_channel_live_sessions(
+            remote_store.as_ref(),
+            topic.as_str(),
+            "public",
+            100,
+        )
+        .await
+        .expect("list remote live sessions")
+        .iter()
+        .any(|session| session.session_id == session_id),
+        "expected live session projection after explicit displayed acquisition"
     );
 }

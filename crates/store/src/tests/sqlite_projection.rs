@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::BTreeSet;
 
 fn projection_row(
     topic: &str,
@@ -30,6 +29,7 @@ fn projection_row(
         source_key: format!("objects/{object_id}/header"),
         source_envelope_id: EnvelopeId::from(object_id),
         source_blob_hash: Some(hash),
+        source_docs_author: None,
         derived_at: created_at,
         projection_version: 2,
     }
@@ -314,6 +314,7 @@ async fn projection_rebuild_from_docs_blobs_only() {
             source_key: "objects/object-root/header".into(),
             source_envelope_id: root_id.clone(),
             source_blob_hash: Some(BlobHash::new("1".repeat(64))),
+            source_docs_author: None,
             derived_at: 10,
             projection_version: 2,
         },
@@ -339,6 +340,7 @@ async fn projection_rebuild_from_docs_blobs_only() {
             source_key: "objects/object-reply/header".into(),
             source_envelope_id: reply_id.clone(),
             source_blob_hash: Some(BlobHash::new("2".repeat(64))),
+            source_docs_author: None,
             derived_at: 11,
             projection_version: 2,
         },
@@ -375,11 +377,10 @@ async fn filtered_timeline_query_preserves_cursor_across_channel_pages() {
         .await
         .expect("put projections");
 
-    let allowed_channels = BTreeSet::from(["private:friends".to_string()]);
-    let first_page = ObjectProjectionStore::list_topic_timeline_filtered(
+    let first_page = ObjectProjectionStore::list_topic_timeline_in_channel(
         &store,
         topic,
-        &allowed_channels,
+        "private:friends",
         None,
         2,
     )
@@ -395,10 +396,10 @@ async fn filtered_timeline_query_preserves_cursor_across_channel_pages() {
     );
     assert!(first_page.next_cursor.is_some());
 
-    let second_page = ObjectProjectionStore::list_topic_timeline_filtered(
+    let second_page = ObjectProjectionStore::list_topic_timeline_in_channel(
         &store,
         topic,
-        &allowed_channels,
+        "private:friends",
         first_page.next_cursor.clone(),
         2,
     )

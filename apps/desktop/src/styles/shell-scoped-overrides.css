@@ -638,8 +638,10 @@
   gap: var(--space-sm);
 }
 
+/* #1189 の更新導線も同じ寸法で並べる。primary 塗りは `border: 0` なので border-color は効かない。 */
 .shell-phase1 .shell-control-center-trigger,
-.shell-phase1 .shell-tester-feedback-trigger {
+.shell-phase1 .shell-tester-feedback-trigger,
+.shell-phase1 .shell-update-available-trigger {
   min-width: 2.75rem;
   min-height: 2.75rem;
   border-color: var(--border-accent);
@@ -787,6 +789,49 @@
   justify-content: flex-start;
   white-space: normal;
   text-align: left;
+}
+
+/* #1192: コントロールセンターから各コミュニティノードの規約同意モーダルを開く。 */
+.shell-phase1 .shell-control-center-community-node-list {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+  /* コミュニティノードの行が、その上の設定ボタンに属することを字下げで示す。 */
+  margin: 0 0 var(--space-2xs) var(--space-sm);
+  padding: 0 0 0 var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  list-style: none;
+}
+
+.shell-phase1 .shell-control-center-community-node-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-xs);
+  align-items: center;
+  min-width: 0;
+  padding: var(--space-2xs) 0;
+}
+
+.shell-phase1 .shell-control-center-community-node-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.shell-phase1 .shell-control-center-community-node-row .button {
+  width: auto;
+  min-height: 2.75rem;
+}
+
+.shell-phase1 .shell-control-center-community-node-empty {
+  margin: 0 0 var(--space-2xs) var(--space-sm);
+  padding: var(--space-2xs) 0 var(--space-2xs) var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
 }
 
 .shell-phase1 .shell-control-center-column-list {
@@ -951,7 +996,8 @@
 @media (max-width: 759px) {
   /* 幅狭の control cluster 位置とアバターボタン寸法は mobile-column-workspace.css が持つ。 */
   .shell-phase1 .shell-control-center-trigger > span:not(.shell-control-center-status-dot),
-  .shell-phase1 .shell-tester-feedback-trigger > span {
+  .shell-phase1 .shell-tester-feedback-trigger > span,
+  .shell-phase1 .shell-update-available-trigger > span {
     display: none;
   }
 

@@ -3,6 +3,7 @@ import { Settings } from 'lucide-react';
 
 import { AuthorAvatar } from '@/components/core/AuthorAvatar';
 import { AuthorDetailCard } from '@/components/core/AuthorDetailCard';
+import { MediaFetchFailure } from '@/components/core/MediaFetchFailure';
 import { AuthorTrustDisplayExceptionField } from '@/components/core/AuthorTrustDisplayExceptionField';
 import { CommunityNodeAdvisoryPanel } from '@/components/core/CommunityNodeAdvisoryPanel';
 import { AuthorIdentityButton } from '@/components/core/AuthorIdentityButton';
@@ -26,6 +27,7 @@ import type {
 } from '@/lib/api';
 import { formatLocalizedTime } from '@/i18n/format';
 import type { SupportedLocale } from '@/i18n';
+import { clipboardImageFiles } from '@/lib/attachments';
 import { type InternalSmartReference } from '@/lib/internalLinks';
 import { eligibleTrustRelationNodes } from '@/lib/api/communityIndex';
 import { copyTextToClipboard } from '@/lib/utils';
@@ -85,6 +87,7 @@ export type DesktopShellMessagesSurfaceProps = {
   openAuthorDetail: OpenAuthorDetail;
   handleDeleteDirectMessageMessage: (peerPubkey: string, messageId: string) => Promise<void>;
   handleDirectMessageAttachmentSelection: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
+  handleDirectMessageAttachmentPaste?: (files: File[]) => Promise<void>;
   handleRemoveDirectMessageDraftAttachment: (itemId: string) => void;
   handleSendDirectMessage: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   surfaceKind?: 'messages' | 'conversation';
@@ -101,6 +104,7 @@ export function DesktopShellMessagesSurface({
   openAuthorDetail,
   handleDeleteDirectMessageMessage,
   handleDirectMessageAttachmentSelection,
+  handleDirectMessageAttachmentPaste,
   handleRemoveDirectMessageDraftAttachment,
   handleSendDirectMessage,
   surfaceKind,
@@ -121,6 +125,7 @@ export function DesktopShellMessagesSurface({
     selectedDirectMessagePeerPubkey,
     syncStatus,
     unsupportedVideoManifests,
+    mediaRetryingHashes,
   } = useDesktopShellStore(
     useShallow((s) => ({
       directMessageAttachmentInputKey: s.directMessageAttachmentInputKey,
@@ -136,6 +141,7 @@ export function DesktopShellMessagesSurface({
       selectedDirectMessagePeerPubkey: s.selectedDirectMessagePeerPubkey,
       syncStatus: s.syncStatus,
       unsupportedVideoManifests: s.unsupportedVideoManifests,
+      mediaRetryingHashes: s.mediaRetryingHashes,
     }))
   );
   const setDirectMessageComposer = useDesktopShellFieldSetter('directMessageComposer');
@@ -170,7 +176,7 @@ export function DesktopShellMessagesSurface({
   return (
     <>
       {surfaceKind !== 'conversation' ? (
-        <Card className='shell-workspace-card'>
+        <section className='shell-column-content'>
         <div className='panel-header'>
           <div>
             <h3>{t('shell:messages.title')}</h3>
@@ -242,7 +248,7 @@ export function DesktopShellMessagesSurface({
             })}
           </ul>
         )}
-        </Card>
+        </section>
       ) : null}
 
       {conversationPeerPubkey && surfaceKind !== 'messages' ? (
@@ -250,7 +256,7 @@ export function DesktopShellMessagesSurface({
           {activeConversation && directMessageError ? (
             <Notice tone='destructive'>{directMessageError}</Notice>
           ) : null}
-          <Card className='shell-workspace-card'>
+          <div className='shell-column-content'>
             {conversationTimeline.length === 0 ? (
               <p className='empty'>{t('shell:messages.noMessages')}</p>
             ) : (
@@ -311,6 +317,12 @@ export function DesktopShellMessagesSurface({
                                 alt={t('common:media.imageAlt')}
                               />
                             </div>
+                          ) : mediaObjectUrls[image.hash] === null ? (
+                            <MediaFetchFailure
+                              hashes={[image.hash]}
+                              retrying={mediaRetryingHashes[image.hash] === true}
+                              testId={`dm-media-fetch-failure-${message.message_id}`}
+                            />
                           ) : (
                             <small>{t('common:media.syncingImage')}</small>
                           )
@@ -332,6 +344,21 @@ export function DesktopShellMessagesSurface({
                                 alt={t('common:media.videoPosterAlt')}
                               />
                             </div>
+                          ) : [video, poster].every(
+                              (attachment) =>
+                                attachment === null || mediaObjectUrls[attachment.hash] === null
+                            ) ? (
+                            <MediaFetchFailure
+                              hashes={[video, poster]
+                                .filter((attachment) => attachment !== null)
+                                .map((attachment) => attachment.hash)}
+                              retrying={[video, poster].some(
+                                (attachment) =>
+                                  attachment !== null &&
+                                  mediaRetryingHashes[attachment.hash] === true
+                              )}
+                              testId={`dm-video-fetch-failure-${message.message_id}`}
+                            />
                           ) : (
                             <small>{t('common:media.syncingPoster')}</small>
                           )
@@ -356,7 +383,7 @@ export function DesktopShellMessagesSurface({
                 })}
               </ul>
             )}
-          </Card>
+          </div>
 
           {activeConversation && showComposer ? <Card className='shell-workspace-card'>
             {conversationStatus && !conversationStatus.send_enabled ? (
@@ -368,6 +395,21 @@ export function DesktopShellMessagesSurface({
               <Textarea
                 value={directMessageComposer}
                 onChange={(event) => setDirectMessageComposer(event.target.value)}
+                onPaste={(event) => {
+                  if (
+                    directMessageSending ||
+                    conversationStatus?.send_enabled === false ||
+                    !handleDirectMessageAttachmentPaste
+                  ) {
+                    return;
+                  }
+                  const images = clipboardImageFiles(event.clipboardData);
+                  if (images.length === 0) {
+                    return;
+                  }
+                  event.preventDefault();
+                  void handleDirectMessageAttachmentPaste(images);
+                }}
                 placeholder={t('common:composer.writeMessage')}
                 disabled={
                   directMessageSending || conversationStatus?.send_enabled === false
@@ -395,7 +437,7 @@ export function DesktopShellMessagesSurface({
               <div className='topic-diagnostic topic-diagnostic-secondary'>
                 <span>
                   {t('shell:messages.pendingOutbox', {
-                    count: formatCount(conversationStatus?.pending_outbox_count ?? 0),
+                    count: `${formatCount(conversationStatus?.pending_outbox_count ?? 0)}${conversationStatus?.pending_outbox_has_more ? '+' : ''}`,
                   })}
                 </span>
               </div>
@@ -545,7 +587,7 @@ export function DesktopShellNotificationsSurface({
         </Button>
       </div>
 
-      <Card className='shell-workspace-card'>
+      <div className='shell-column-content'>
         {notificationPanelState.status === 'ready' && notificationItems.length === 0 ? (
           <p className='empty-state'>{t('shell:notifications.empty')}</p>
         ) : null}
@@ -591,7 +633,7 @@ export function DesktopShellNotificationsSurface({
             ))}
           </ul>
         ) : null}
-      </Card>
+      </div>
     </>
   );
 }
@@ -612,6 +654,7 @@ export type DesktopShellDetailSurfaceStackProps = {
     | 'threadPostViews'
   >;
   loadMoreThread: (topic: string, threadId: string) => Promise<void>;
+  loadMoreAuthorTimeline: (pubkey: string) => Promise<void>;
   loadReactionCatalogData: () => Promise<void>;
   openAuthorDetail: OpenAuthorDetail;
   openDirectMessagePane: OpenDirectMessagePane;
@@ -643,6 +686,7 @@ export function DesktopShellDetailSurfaceStack({
   t,
   viewModels,
   loadMoreThread,
+  loadMoreAuthorTimeline,
   loadReactionCatalogData,
   openAuthorDetail,
   openDirectMessagePane,
@@ -675,6 +719,9 @@ export function DesktopShellDetailSurfaceStack({
     focusedObjectId,
     authorErrorsByPubkey,
     authorTimelinesByPubkey,
+    authorTimelineNextCursorByPubkey,
+    authorTimelineLoadingMoreByPubkey,
+    authorTimelineLoadMoreErrorsByPubkey,
     knownAuthorsByPubkey,
     mediaObjectUrls,
     ownedReactionAssets,
@@ -685,6 +732,7 @@ export function DesktopShellDetailSurfaceStack({
     syncStatus,
     threadLoadingMoreById,
     threadNextCursorById,
+    threadUnavailableById,
     threadsById,
   } = useDesktopShellStore(
     useShallow((s) => ({
@@ -696,6 +744,9 @@ export function DesktopShellDetailSurfaceStack({
       focusedObjectId: s.focusedObjectId,
       authorErrorsByPubkey: s.authorErrorsByPubkey,
       authorTimelinesByPubkey: s.authorTimelinesByPubkey,
+      authorTimelineNextCursorByPubkey: s.authorTimelineNextCursorByPubkey,
+      authorTimelineLoadingMoreByPubkey: s.authorTimelineLoadingMoreByPubkey,
+      authorTimelineLoadMoreErrorsByPubkey: s.authorTimelineLoadMoreErrorsByPubkey,
       knownAuthorsByPubkey: s.knownAuthorsByPubkey,
       mediaObjectUrls: s.mediaObjectUrls,
       ownedReactionAssets: s.ownedReactionAssets,
@@ -706,6 +757,7 @@ export function DesktopShellDetailSurfaceStack({
       syncStatus: s.syncStatus,
       threadLoadingMoreById: s.threadLoadingMoreById,
       threadNextCursorById: s.threadNextCursorById,
+      threadUnavailableById: s.threadUnavailableById,
       threadsById: s.threadsById,
     }))
   );
@@ -800,6 +852,9 @@ export function DesktopShellDetailSurfaceStack({
   );
   const fetchReportManifest = (baseUrl: string) =>
     api.fetchCommunityNodeManifest(baseUrl);
+  // #1192: 権利侵害申請モーダルで提示する権利侵害申出ポリシーの取得(認証不要の公開カタログ)。
+  const fetchNodePolicies = (baseUrl: string, language?: string) =>
+    api.fetchCommunityNodePolicies(baseUrl, language);
   const submitReport = (request: import('@/lib/api').SubmitCommunityNodeReportRequest) =>
     api.submitCommunityNodeReport(request);
   const threadContent = effectiveThreadId ? (
@@ -807,6 +862,7 @@ export function DesktopShellDetailSurfaceStack({
       state={{ ...viewModels.threadPanelState, selectedThreadId: effectiveThreadId }}
       posts={effectiveThreadPostViews}
       hasMore={selectedThreadHasMore}
+      unavailableCount={effectiveThreadId ? (threadUnavailableById[effectiveThreadId] ?? 0) : 0}
       loadingMore={selectedThreadLoadingMore}
       onLoadMore={() => void loadMoreThread(effectiveTopicId, effectiveThreadId)}
       onOpenAuthor={(authorPubkey) =>
@@ -837,6 +893,7 @@ export function DesktopShellDetailSurfaceStack({
       onSubmitReport={submitReport}
       onCopyReportContact={(value) => void copyTextToClipboard(value)}
       onFetchReportManifest={fetchReportManifest}
+      onFetchNodePolicies={fetchNodePolicies}
       onMuteReportAuthor={(authorPubkey) => handleMuteAction(authorPubkey, false)}
     />
   ) : null;
@@ -854,6 +911,7 @@ export function DesktopShellDetailSurfaceStack({
         onSubmitReport={submitReport}
         onCopyReportContact={(value) => void copyTextToClipboard(value)}
         onFetchReportManifest={fetchReportManifest}
+        onFetchNodePolicies={fetchNodePolicies}
         trustDisplayException={
           effectiveAuthorPubkey ? (
             <AuthorTrustDisplayExceptionField
@@ -879,10 +937,26 @@ export function DesktopShellDetailSurfaceStack({
           />
         }
       />
-      <Card className='shell-workspace-card'>
+      <div className='shell-column-content'>
         <TimelineFeed
           posts={effectiveAuthorTimelinePostViews}
           emptyCopy={t('profile:feed.noAuthorPosts')}
+          hasMore={Boolean(
+            effectiveAuthorPubkey && authorTimelineNextCursorByPubkey[effectiveAuthorPubkey]
+          )}
+          loadingMore={Boolean(
+            effectiveAuthorPubkey && authorTimelineLoadingMoreByPubkey[effectiveAuthorPubkey]
+          )}
+          loadMoreError={
+            effectiveAuthorPubkey
+              ? (authorTimelineLoadMoreErrorsByPubkey[effectiveAuthorPubkey] ?? null)
+              : null
+          }
+          onLoadMore={
+            effectiveAuthorPubkey
+              ? () => void loadMoreAuthorTimeline(effectiveAuthorPubkey)
+              : undefined
+          }
           onOpenAuthor={(authorPubkey) => void openAuthorDetail(authorPubkey)}
           onOpenThread={(threadId) => void openThread(threadId)}
           onOpenThreadInTopic={(threadId, topicId) => void openThread(threadId, { topic: topicId })}
@@ -894,9 +968,10 @@ export function DesktopShellDetailSurfaceStack({
           onSubmitReport={submitReport}
           onCopyReportContact={(value) => void copyTextToClipboard(value)}
           onFetchReportManifest={fetchReportManifest}
+          onFetchNodePolicies={fetchNodePolicies}
           onMuteReportAuthor={(authorPubkey) => handleMuteAction(authorPubkey, false)}
         />
-      </Card>
+      </div>
     </div>
   ) : null;
 

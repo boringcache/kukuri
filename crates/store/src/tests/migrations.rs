@@ -187,6 +187,168 @@ async fn notification_content_labels_migration_backfills_known_objects_and_leave
     assert_eq!(unknown, None);
 }
 
+// #1248: 署名つき envelope と replica を確かめる前に保存された投稿の行(`projection_version` が検証済みの版より小さい行)は、
+// migration で消える。bookmark・通知・reaction の表と、検証済みの版の行は残る。
+#[tokio::test]
+async fn unverified_object_projections_are_dropped_and_other_tables_are_kept() {
+    let tempdir = tempdir().expect("tempdir");
+    let db_path = tempdir.path().join("pre-verified-projection.db");
+    materialize_sqlite_fixture(&db_path, 20260920000000)
+        .await
+        .expect("materialize the schema before the verified projection version");
+
+    let database_url = format!("sqlite://{}", db_path.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("open the database before the migration");
+    let verified = crate::VERIFIED_OBJECT_PROJECTION_VERSION;
+    for (object_id, version) in [
+        ("legacy-v1", 1),
+        ("unverified-v2", verified - 1),
+        ("verified", verified),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO object_index_cache (
+              object_id, topic_id, author_pubkey, created_at, payload_ref_json,
+              source_replica_id, source_key, source_envelope_id, derived_at,
+              projection_version
+            ) VALUES (
+              ?1, 'kukuri:topic:migration', 'author', 1, '{}',
+              'topic::kukuri:topic:migration', 'objects/x/state', ?1, 1, ?2
+            )
+            "#,
+        )
+        .bind(object_id)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("insert a projection row");
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO notifications (
+          notification_id, recipient_pubkey, kind, actor_pubkey, object_id,
+          preview_text, created_at, received_at
+        ) VALUES ('kept-notification', 'recipient', 'mention', 'actor', 'unverified-v2', 'preview', 1, 1)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert a notification");
+    pool.close().await;
+
+    let migrated = SqliteStore::connect_file(&db_path)
+        .await
+        .expect("apply the migration");
+    let remaining = sqlx::query_scalar::<_, String>(
+        "SELECT object_id FROM object_index_cache ORDER BY object_id",
+    )
+    .fetch_all(migrated.pool())
+    .await
+    .expect("list projection rows");
+    assert_eq!(remaining, vec!["verified".to_string()]);
+    let notifications = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notifications")
+        .fetch_one(migrated.pool())
+        .await
+        .expect("count notifications");
+    assert_eq!(notifications, 1, "other tables must be kept");
+}
+
+// #1252: 署名と replica を確かめる前に保存された reaction・live session・game room の行は、migration で消える。
+// 検証済みの版の行は残る。
+#[tokio::test]
+async fn unverified_reaction_and_session_projections_are_dropped() {
+    let tempdir = tempdir().expect("tempdir");
+    let db_path = tempdir.path().join("pre-verified-session-projection.db");
+    materialize_sqlite_fixture(&db_path, 20260921000000)
+        .await
+        .expect("materialize the schema before the verified session projection version");
+
+    let database_url = format!("sqlite://{}", db_path.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("open the database before the migration");
+    let reaction = crate::VERIFIED_REACTION_PROJECTION_VERSION;
+    let session = crate::VERIFIED_SESSION_PROJECTION_VERSION;
+    for (id, version) in [("unverified", reaction - 1), ("verified", reaction)] {
+        sqlx::query(
+            r#"
+            INSERT INTO reaction_cache (
+              source_replica_id, target_object_id, reaction_id, author_pubkey, created_at,
+              updated_at, reaction_key_kind, normalized_reaction_key, status, source_key,
+              source_envelope_id, derived_at, projection_version
+            ) VALUES (
+              'topic::kukuri:topic:migration', 'target', ?1, 'author', 1,
+              1, 'emoji', 'emoji:x', 'active', 'reactions/target/x/state', ?1, 1, ?2
+            )
+            "#,
+        )
+        .bind(id)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("insert a reaction row");
+    }
+    for (id, version) in [("unverified", session - 1), ("verified", session)] {
+        sqlx::query(
+            r#"
+            INSERT INTO live_session_cache (
+              session_id, topic_id, host_pubkey, title, description, status, started_at,
+              updated_at, source_replica_id, source_key, manifest_blob_hash, derived_at,
+              projection_version
+            ) VALUES (
+              ?1, 'kukuri:topic:migration', 'host', 'title', '', 'live', 1,
+              1, 'topic::kukuri:topic:migration', 'sessions/live/x/state', 'hash', 1, ?2
+            )
+            "#,
+        )
+        .bind(id)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("insert a live session row");
+        sqlx::query(
+            r#"
+            INSERT INTO game_room_cache (
+              room_id, topic_id, host_pubkey, title, description, status, scores_json,
+              updated_at, source_replica_id, source_key, manifest_blob_hash, derived_at,
+              projection_version
+            ) VALUES (
+              ?1, 'kukuri:topic:migration', 'host', 'title', '', 'waiting', '[]',
+              1, 'topic::kukuri:topic:migration', 'sessions/game/x/state', 'hash', 1, ?2
+            )
+            "#,
+        )
+        .bind(id)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("insert a game room row");
+    }
+    pool.close().await;
+
+    let migrated = SqliteStore::connect_file(&db_path)
+        .await
+        .expect("apply the migration");
+    for (table, column) in [
+        ("reaction_cache", "reaction_id"),
+        ("live_session_cache", "session_id"),
+        ("game_room_cache", "room_id"),
+    ] {
+        let remaining =
+            sqlx::query_scalar::<_, String>(&format!("SELECT {column} FROM {table} ORDER BY 1"))
+                .fetch_all(migrated.pool())
+                .await
+                .expect("list projection rows");
+        assert_eq!(remaining, vec!["verified".to_string()], "{table}");
+    }
+}
+
 #[tokio::test]
 async fn connect_file_open_failure_is_typed_as_open_error() {
     // 存在しない親ディレクトリ配下のパスは create_if_missing でも作成できず接続失敗する。
@@ -338,7 +500,7 @@ async fn connect_file_migrates_pre_metaverse_game_room_fixture() {
 // 後続 WP-H1(ProjectionStore 分割)の安全網として、
 // (1) 全世代に up/down が embed で揃うこと、
 // (2) 全適用 → undo(0) → 再適用でスキーマと migration 記録が完全復元されること
-// を固定する。期待値は観測した現挙動の生リテラル(世代数 20 など)。
+// を固定する。期待値は観測した現挙動の生リテラル(世代数 34 など)。
 // ---------------------------------------------------------------------------
 
 /// 全世代に ReversibleUp / ReversibleDown が揃っていることを固定する(DB 不要)。
@@ -367,8 +529,8 @@ async fn all_generations_have_paired_down() {
 
     assert_eq!(
         generations.len(),
-        23,
-        "store migrations must cover exactly 23 generations, found versions: {:?}",
+        34,
+        "store migrations must cover exactly 34 generations, found versions: {:?}",
         generations.keys().collect::<Vec<_>>()
     );
 
@@ -460,8 +622,8 @@ async fn full_migration_round_trip() {
     expected_versions.dedup();
     assert_eq!(
         applied_versions.len(),
-        23,
-        "round trip must restore all 23 migration generations"
+        34,
+        "round trip must restore all 34 migration generations"
     );
     assert_eq!(applied_versions, expected_versions);
 }

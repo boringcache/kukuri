@@ -19,6 +19,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+#[cfg(any(all(windows, not(feature = "microsoft-store")), target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
 
 use crate::{
@@ -215,6 +216,9 @@ pub fn run() {
             file_dialog::install(app.handle())?;
             app.manage(app_update::AppUpdateState::default());
             app.manage(desktop_lifecycle::DesktopLifecycle::default());
+            app.manage(desktop_lifecycle::WindowCloseState::new(
+                resolve_app_data_dir(app.handle()).ok(),
+            ));
             // runtimeが無い同意待ちでもrestore activation/account switchと同じlockを使う。
             app.manage(DesktopOperationState::default());
             #[cfg(unix)]
@@ -311,6 +315,7 @@ pub fn run() {
             app.manage(OsNotificationBackground::new(app.handle()));
             // #978: 開発者向けログ閲覧。buffer は init_tracing が組んだ process 全体の1つ。
             app.manage(DeveloperLogState::new(desktop_log_buffer()));
+            app.manage(commands::link_preview::LinkPreviewState::default());
             if let Err(error) = build_tray(app.handle()) {
                 error!(%error, "failed to build system tray");
             } else {
@@ -319,7 +324,8 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             desktop_lifecycle::watch_hidden_tray(app.handle().clone());
             commands::background_notifications::spawn(app.handle().clone());
-            #[cfg(any(windows, target_os = "linux"))]
+            // MSIX owns protocol registration through its package manifest.
+            #[cfg(any(all(windows, not(feature = "microsoft-store")), target_os = "linux"))]
             app.deep_link().register_all()?;
             if initialize_runtime {
                 let app_handle = app.handle().clone();
@@ -337,6 +343,10 @@ pub fn run() {
             tauri::generate_handler![
             commands::startup::get_desktop_startup_status,
             commands::system_locale::get_system_locales,
+            desktop_lifecycle::get_window_close_preference,
+            desktop_lifecycle::set_window_close_preference,
+            desktop_lifecycle::get_pending_window_close_request,
+            desktop_lifecycle::respond_window_close_request,
             commands::developer_logs::set_developer_mode_enabled,
             commands::developer_logs::read_desktop_logs,
             desktop_lifecycle::restart_after_update,
@@ -344,6 +354,7 @@ pub fn run() {
             app_update::download_app_update,
             app_update::install_app_update,
             commands::external_url::open_external_url,
+            commands::link_preview::fetch_link_preview,
             commands::app_consent::get_app_consent_status,
             commands::app_consent::accept_app_consents,
             commands::identity::export_account_key,
@@ -418,6 +429,8 @@ pub fn run() {
             commands::community_node::get_sync_status,
             commands::community_node::get_discovery_config,
             commands::live_game::list_live_sessions,
+            commands::live_game::list_session_candidates,
+            commands::live_game::set_session_display,
             commands::live_game::create_live_session,
             commands::live_game::end_live_session,
             commands::live_game::join_live_session,
@@ -456,6 +469,7 @@ pub fn run() {
             commands::community_node::set_channel_gossip_enabled,
             commands::community_node::get_local_peer_ticket,
             commands::posts::get_blob_media_payload,
+            commands::posts::retry_post_elements,
             commands::posts::get_blob_preview_url,
             commands::posts::get_content_display_settings,
             commands::posts::set_adult_content_display_enabled,

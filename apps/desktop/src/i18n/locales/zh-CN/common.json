@@ -1,11 +1,11 @@
 {
+  "sessionManifestUnavailable": "此会话的信息尚未获取。",
   "externalLink": {
     "opening": "正在浏览器中打开…",
     "failed": "无法确认链接已打开。请检查默认浏览器，然后再次点击链接。"
   },
   "actions": {
     "accept": "接受",
-    "add": "添加",
     "authenticate": "认证",
     "bookmark": "收藏",
     "block": "屏蔽",
@@ -29,6 +29,9 @@
     "quoteRepost": "添加评论",
     "react": "回应",
     "refresh": "刷新",
+    "reloadPost": "重新加载帖子",
+    "previousPage": "上一页",
+    "nextPage": "下一页",
     "manageReactions": "管理回应",
     "remove": "移除",
     "removeBookmark": "取消收藏",
@@ -75,7 +78,6 @@
     "keyboardHelp": "键盘操作"
   },
   "audience": {
-    "allJoined": "全部已加入",
     "posting": "正在发布到 {{audience}}",
     "privateChannel": "私密频道",
     "public": "公开",
@@ -89,6 +91,7 @@
     "failedToClearDirectMessages": "清空私信失败",
     "failedToDeleteDirectMessage": "删除私信失败",
     "failedToFetchConsentStatus": "获取同意状态失败",
+    "failedToPrepareImageAttachment": "准备图片附件失败",
     "failedToGenerateVideoPoster": "生成视频预览失败",
     "failedToImportPeer": "添加连接对象失败",
     "failedToLoadAuthor": "加载用户信息失败",
@@ -125,6 +128,8 @@
     "localSyncing": "同步中…",
     "pendingPosts_one": "显示 {{count}} 条新帖子",
     "pendingPosts_other": "显示 {{count}} 条新帖子",
+    "unavailablePosts_one": "此范围内有 {{count}} 条帖子尚未获取。获取后，重新加载即可显示。",
+    "unavailablePosts_other": "此范围内有 {{count}} 条帖子尚未获取。获取后，重新加载即可显示。",
     "moreMedia": "{{count}} 个媒体",
     "quoteRepost": "带评论转发",
     "replyingTo": "回复 {{author}}",
@@ -173,6 +178,8 @@
     "noEvents": "暂无事件",
     "loadMore": "加载更多",
     "loadingMore": "正在加载更多…",
+    "bookmarkPages": "收藏页",
+    "pageCount": "第 {{current}} / {{total}} 页",
     "none": "无",
     "selectAuthor": "选择一位用户以查看资料和关系。",
     "unknownAuthor": "未知用户",
@@ -199,7 +206,9 @@
     "viewers": "观看者"
   },
   "media": {
-    "unavailable": "无法获取媒体。",
+    "fetchFailed": "获取失败",
+    "retryFetch": "重新获取",
+    "retryingFetch": "正在重新获取",
     "closeDialog": "关闭图片查看器",
     "imageAlt": "图片附件",
     "reportVideo": "举报视频附件",

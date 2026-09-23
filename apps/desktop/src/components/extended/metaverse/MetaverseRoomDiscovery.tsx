@@ -1,3 +1,4 @@
+import { SessionVisibility, PendingSessionCards, type SessionDisplayContext } from '../SessionVisibility';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ChevronDown, Cuboid, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,8 @@ export type CreateMetaverseRoomInput = {
 };
 
 type MetaverseRoomDiscoveryProps = {
+  requestedSessionId?: string | null;
+  sessionDisplay?: SessionDisplayContext;
   rooms: GameRoomView[];
   catalogReady?: boolean;
   onRetry?: () => Promise<void>;
@@ -53,6 +56,8 @@ type MetaverseRoomDiscoveryProps = {
 };
 
 export function MetaverseRoomDiscovery({
+  requestedSessionId,
+  sessionDisplay,
   rooms,
   catalogReady = true,
   onRetry,
@@ -75,6 +80,7 @@ export function MetaverseRoomDiscovery({
   onSetEntryDome,
   onMoveRoom,
 }: MetaverseRoomDiscoveryProps) {
+  const [pendingManifestCount, setPendingManifestCount] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -258,10 +264,10 @@ export function MetaverseRoomDiscovery({
         ) : null}
       </section>
       ) : rooms.some((room) => room.host_pubkey === localAuthorPubkey) ? <Notice>{t('management.ownerLimit')}</Notice> : null}
-      {rooms.length === 0 && catalogReady ? <p className='empty-state'>{t('rooms.empty')}</p> : null}
+      {rooms.length === 0 && pendingManifestCount === 0 && catalogReady ? <p className='empty-state'>{t('rooms.empty')}</p> : null}
       <ul className='metaverse-room-grid'>
         {rooms.map((room) => (
-          <li key={room.room_id}>
+          <SessionVisibility key={room.room_id} sessionId={room.room_id} kind="game" context={sessionDisplay}>
             <article
               className={`metaverse-room-card${selectedRoomId === room.room_id ? ' metaverse-room-card-active' : ''}`}
               tabIndex={0}
@@ -347,9 +353,11 @@ export function MetaverseRoomDiscovery({
                 </>
               ) : null}
             </article>
-          </li>
+          </SessionVisibility>
         ))}
       </ul>
+      {sessionDisplay ? <PendingSessionCards context={sessionDisplay} kind="game" dome targetId={requestedSessionId ?? selectedRoomId} onCountChange={setPendingManifestCount}
+        refreshToken={rooms} knownIds={rooms.map((room) => room.room_id)} /> : null}
       <ContextActionMenu
         open={identifierMenuPosition !== null && identifierMenuItems.length > 0}
         position={identifierMenuPosition}

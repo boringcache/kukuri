@@ -28,6 +28,19 @@ pub enum BlobCacheStatus {
     Pinned,
 }
 
+/// 検証済みの投稿の行の `projection_version`(#1248)。
+///
+/// この版から、投稿の行は署名つき envelope と、読んだ replica の topic / channel を確かめた投稿だけから作る。
+/// これより小さい版の行は docs の `state` の申告値を写した行で、migration
+/// `20260921000000_drop_unverified_object_projections` が削除する(SQL の値と一致させること)。
+pub const VERIFIED_OBJECT_PROJECTION_VERSION: i64 = 3;
+
+/// reaction の行(`reaction_cache`)は、この version から、署名つき envelope と読んだ replica を確かめた reaction だけで作る(#1252)。
+pub const VERIFIED_REACTION_PROJECTION_VERSION: i64 = 2;
+
+/// live session・game room の行は、この version から、署名された manifest と読んだ replica を確かめた session だけで作る(#1252)。
+pub const VERIFIED_SESSION_PROJECTION_VERSION: i64 = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectProjectionRow {
     pub object_id: EnvelopeId,
@@ -49,6 +62,9 @@ pub struct ObjectProjectionRow {
     pub source_key: String,
     pub source_envelope_id: EnvelopeId,
     pub source_blob_hash: Option<BlobHash>,
+    /// 著者が投稿の envelope の tag で申告した docs author の id(#1258、ADR 0053)。tag の無い投稿と旧い行は `None`。
+    #[serde(default)]
+    pub source_docs_author: Option<String>,
     pub derived_at: i64,
     pub projection_version: i64,
 }
@@ -130,6 +146,7 @@ pub struct BookmarkedPostRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSessionProjectionRow {
     pub session_id: String,
+    pub revision: i64,
     pub topic_id: String,
     pub channel_id: String,
     pub host_pubkey: String,
@@ -150,6 +167,7 @@ pub struct LiveSessionProjectionRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameRoomProjectionRow {
     pub room_id: String,
+    pub score_revision: Option<i64>,
     pub topic_id: String,
     pub channel_id: String,
     pub host_pubkey: String,
@@ -242,6 +260,22 @@ pub struct DirectMessageOutboxRow {
     pub frame_blob_hash: BlobHash,
     pub created_at: i64,
     pub last_attempt_at: Option<i64>,
+}
+
+pub const DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectMessageOutboxCursor {
+    pub created_at: i64,
+    pub message_id: String,
+    pub dm_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectMessageOutboxPage {
+    pub items: Vec<DirectMessageOutboxRow>,
+    pub next_cursor: Option<DirectMessageOutboxCursor>,
+    pub cycle_end: Option<DirectMessageOutboxCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

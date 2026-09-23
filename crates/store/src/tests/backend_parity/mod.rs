@@ -101,6 +101,7 @@ fn parity_projection_row(
         source_key: format!("objects/{object_id}/header"),
         source_envelope_id: EnvelopeId::from(object_id),
         source_blob_hash: Some(hash),
+        source_docs_author: None,
         derived_at: created_at,
         projection_version: 2,
     }
@@ -155,6 +156,7 @@ fn parity_live_session(
 ) -> LiveSessionProjectionRow {
     LiveSessionProjectionRow {
         session_id: session_id.into(),
+        revision: 1,
         topic_id: topic_id.into(),
         channel_id: channel_id.into(),
         host_pubkey: "c".repeat(64),
@@ -181,6 +183,7 @@ fn parity_game_room(
 ) -> GameRoomProjectionRow {
     GameRoomProjectionRow {
         room_id: room_id.into(),
+        score_revision: Some(1),
         topic_id: topic_id.into(),
         channel_id: "ch-game".into(),
         host_pubkey: "d".repeat(64),

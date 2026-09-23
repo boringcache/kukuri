@@ -46,6 +46,86 @@
   min-width: 0;
 }
 
+.link-preview-slot:empty {
+  display: none;
+}
+
+.link-preview-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(4.5rem, 7rem);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  background: var(--surface-panel-muted);
+  border: 1px solid var(--border-subtle-strong);
+  border-radius: var(--radius-input);
+  text-decoration: none;
+}
+
+.link-preview-card:not(:has(.link-preview-image)) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.link-preview-card:hover {
+  background: var(--surface-panel-accent);
+  border-color: var(--border-accent);
+}
+
+.link-preview-card:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.link-preview-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-xs);
+}
+
+.link-preview-source,
+.link-preview-description {
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.link-preview-title {
+  color: var(--foreground-strong);
+  font-size: var(--text-body);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.link-preview-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.link-preview-image {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 5.5rem;
+  object-fit: cover;
+  background: var(--surface-accent-soft);
+}
+
+@media (max-width: 32rem) {
+  .link-preview-card {
+    grid-template-columns: minmax(0, 1fr) 4.5rem;
+  }
+
+  .link-preview-image {
+    min-height: 4.5rem;
+  }
+}
+
 .repost-source-body {
   display: grid;
   gap: var(--space-2xs);
@@ -99,6 +179,41 @@
 
 .media-frame-ready {
   background: var(--surface-media-ready);
+}
+
+/* #1207: 自動取得が上限に達したメディアの代替表示。失敗した部分だけを置き換え、
+   文言と再取得の icon button を 1 行に並べる。 */
+.media-fetch-failure {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.media-fetch-failure > p {
+  margin: 0;
+  min-width: 0;
+}
+
+.media-fetch-retry[aria-disabled='true'] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.media-fetch-retry-spin {
+  animation: media-fetch-retry-spin 1s linear infinite;
+}
+
+@keyframes media-fetch-retry-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-fetch-retry-spin {
+    animation: none;
+  }
 }
 
 /* #1056: 代替表示(確定後)。照会中・読み込み中のスケルトン(脈動)と区別するため静止させる。 */
@@ -428,7 +543,11 @@
 }
 
 .ui-tooltip-content {
-  z-index: 50;
+  /* #1210: tooltip は portal で body 直下へ出るため、overlay surface（Control Center 71、
+     settings drawer 74、dialog 81、popover 82、toast 90）より手前へ積む。ここが下だと
+     DOM には出ているのに panel の背後へ隠れ、hover しても何も見えない。
+     skip link (100) だけは常に最前面へ残す。 */
+  z-index: 95;
   max-width: min(34rem, calc(100vw - 2rem));
   overflow-wrap: anywhere;
   border: 1px solid color-mix(in srgb, var(--border-subtle) 88%, transparent);

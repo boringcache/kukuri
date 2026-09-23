@@ -2,6 +2,7 @@ use super::*;
 
 use chrono::Utc;
 use kukuri_cn_protocol::{CommunityNodePoliciesResponse, IndexingStatusResponse};
+use kukuri_transport::HintTransport;
 
 use crate::community_node::{
     CommunityNodeContentAdvisoryLookupError, CommunityNodeContentAdvisoryLookupRequest,
@@ -212,6 +213,10 @@ impl DesktopRuntime {
         }
         save_community_node_config(&self.db_path, &next_config)?;
         *self.community_node_config.lock().await = next_config.clone();
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(None)
+            .await?;
         self.content_advisory_issuer_cache.lock().await.clear();
         self.community_node_sessions.lock().await.clear();
         self.invalidate_author_trust_gate_cache().await;
@@ -240,13 +245,19 @@ impl DesktopRuntime {
                 self.identity_mode,
                 node.base_url.as_str(),
             )?;
-            self.clear_community_node_token(CommunityNodeTargetRequest {
-                base_url: node.base_url,
-            })
-            .await?;
+            delete_optional_secret(
+                &self.db_path,
+                self.identity_mode,
+                COMMUNITY_NODE_TOKEN_PURPOSE,
+                node.base_url.as_str(),
+            )?;
         }
         save_community_node_config(&self.db_path, &CommunityNodeConfig::default())?;
         *self.community_node_config.lock().await = CommunityNodeConfig::default();
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(None)
+            .await?;
         self.content_advisory_issuer_cache.lock().await.clear();
         self.invalidate_author_trust_gate_cache().await;
         self.community_node_rendezvous_seed_peers
@@ -414,6 +425,10 @@ impl DesktopRuntime {
                 ..Default::default()
             },
         );
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(Some(base_url.as_str()))
+            .await?;
         *self.community_node_reconnect_state.lock().await = Default::default();
         let node = self
             .community_node_config
@@ -575,6 +590,10 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown_checked(&self) -> Result<()> {
+        if let Some(handle) = self.take_notification_event_task() {
+            handle.abort();
+            let _ = handle.await;
+        }
         if let Some(handle) = self.sync_status_observer_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;
@@ -582,6 +601,7 @@ impl DesktopRuntime {
         if let Some(handle) = self.community_node_scheduler_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;
+            tracing::info!(target: "kukuri_connectivity", "community-node maintenance scheduler stopped");
         }
         self.app_service.shutdown().await;
         self.iroh_stack.shutdown_checked().await?;

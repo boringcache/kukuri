@@ -10,6 +10,7 @@
   "navigation": {
     "activeCount": "{{count}} 个活跃",
     "addTopic": "添加主题",
+    "topicNameLabel": "主题名称",
     "channel": "频道",
     "channelCreateJoin": "创建 / 加入频道",
     "channelsGroup": "频道",
@@ -93,6 +94,11 @@
     },
     "createJoinChannel": "创建或加入私密频道",
     "shareChannel": "分享当前频道",
+    "communityNodes": {
+      "listLabel": "已配置的社区节点",
+      "openConsents": "打开 {{node}} 的条款与同意状态",
+      "empty": "尚未配置社区节点。"
+    },
     "release": "版本与更新",
     "settings": "设置",
     "languageSettingsHint": "语言和主题",
@@ -203,6 +209,10 @@
     "appearance": {
       "description": "本地亮色、暗色与语言选择。",
       "label": "外观与语言"
+    },
+    "system": {
+      "description": "窗口关闭行为与桌面集成。",
+      "label": "系统"
     },
     "keyboard": {
       "description": "已分配的按键，以及每个按键生效的界面与焦点条件。",
@@ -377,7 +387,6 @@
     "selectedNodeUnavailable": "明确选择的社区节点不可用，查询已暂停。",
     "title": "社区索引",
     "topicSummary": "通过可用的社区节点搜索当前话题或私密频道。",
-    "exploreSummary": "跨索引主题进行搜索、发现并查看推荐。",
     "nodeLabel": "搜索来源",
     "surfaces": "社区索引功能",
     "operations": {
@@ -447,7 +456,6 @@
     },
     "results": "社区索引结果",
     "noEligibleNode": "当前没有已认证、已同意且提供可用社区索引的社区节点。",
-    "allJoinedDisabled": "请一次搜索一个公开主题或私密频道。不会把全部已加入范围发送给节点。",
     "errors": {
       "authRequired": "需要对所选社区节点进行身份验证。",
       "consentRequired": "需要同意所选社区节点的必选条款。",
@@ -520,6 +528,9 @@
       "other": "其他"
     },
     "rightsRequest": {
+      "policyLoading": "正在获取该社区节点的权利侵害申诉政策…",
+      "policyUnavailable": "无法获取该社区节点的权利侵害申诉政策。请在专用申诉页面确认处理范围。",
+      "policyEffectiveDate": "生效日 {{date}}",
       "boundary": "权利侵害申诉需要身份、联系方式和权利依据。请勿通过普通举报端点发送这些信息；请先在专用页面确认该社区节点能够和不能采取的措施。",
       "openDedicated": "下一页会说明仅限本节点的处理范围，并且只有在你明确确认后才会提交。",
       "unavailable": "所选社区节点未提供专用权利侵害申诉入口。请勿在普通举报中发送权利主张或个人信息。",

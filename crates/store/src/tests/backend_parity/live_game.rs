@@ -25,7 +25,7 @@ async fn live_session_scenario<S: Store + ProjectionStore>(store: &S) -> LiveSes
     let mut ended = parity_live_session(
         "sess-ended",
         TOPIC_A,
-        "ch-alt",
+        "ch-main",
         LiveSessionStatus::Ended,
         90,
     );
@@ -77,7 +77,7 @@ async fn live_session_scenario<S: Store + ProjectionStore>(store: &S) -> LiveSes
         (TOPIC_A, "ch-main", "sess-live", carol.as_str(), 500, 22),
         (TOPIC_B, "ch-main", "sess-live", alice.as_str(), 1_000, 23), // 複数 topic × 同一 (channel, session, author)
         (TOPIC_A, "ch-main", "sess-sched", alice.as_str(), 1_000, 24),
-        (TOPIC_A, "ch-alt", "sess-ended", alice.as_str(), 1_000, 25),
+        (TOPIC_A, "ch-main", "sess-ended", alice.as_str(), 1_000, 25),
     ];
     for (topic_id, channel_id, session_id, author, expires_at, updated_at) in presence {
         LiveGameProjectionStore::upsert_live_presence(
@@ -87,20 +87,23 @@ async fn live_session_scenario<S: Store + ProjectionStore>(store: &S) -> LiveSes
         .expect("LiveGameProjectionStore::upsert_live_presence");
     }
 
-    let topic_a_initial = LiveGameProjectionStore::list_topic_live_sessions(store, TOPIC_A)
-        .await
-        .expect("list topic-a sessions initial");
-    let topic_b_initial = LiveGameProjectionStore::list_topic_live_sessions(store, TOPIC_B)
-        .await
-        .expect("list topic-b sessions initial");
+    let topic_a_initial =
+        LiveGameProjectionStore::list_channel_live_sessions(store, TOPIC_A, "ch-main", 100)
+            .await
+            .expect("list topic-a sessions initial");
+    let topic_b_initial =
+        LiveGameProjectionStore::list_channel_live_sessions(store, TOPIC_B, "ch-main", 100)
+            .await
+            .expect("list topic-b sessions initial");
 
     // expires_at <= 500 を掃除(境界値 500 ちょうどの carol が消える)
     LiveGameProjectionStore::clear_expired_live_presence(store, 500)
         .await
         .expect("clear expired presence");
-    let topic_a_after_expire = LiveGameProjectionStore::list_topic_live_sessions(store, TOPIC_A)
-        .await
-        .expect("list topic-a sessions after expire");
+    let topic_a_after_expire =
+        LiveGameProjectionStore::list_channel_live_sessions(store, TOPIC_A, "ch-main", 100)
+            .await
+            .expect("list topic-a sessions after expire");
 
     // topic-b の presence だけ消える(topic-a の viewer_count は不変)
     LiveGameProjectionStore::clear_topic_live_presence(store, TOPIC_B)
@@ -111,13 +114,13 @@ async fn live_session_scenario<S: Store + ProjectionStore>(store: &S) -> LiveSes
         topic_a_initial,
         topic_b_initial,
         topic_a_after_expire,
-        topic_a_after_clear_topic_b: LiveGameProjectionStore::list_topic_live_sessions(
-            store, TOPIC_A,
+        topic_a_after_clear_topic_b: LiveGameProjectionStore::list_channel_live_sessions(
+            store, TOPIC_A, "ch-main", 100,
         )
         .await
         .expect("list topic-a sessions after clear"),
-        topic_b_after_clear_topic_b: LiveGameProjectionStore::list_topic_live_sessions(
-            store, TOPIC_B,
+        topic_b_after_clear_topic_b: LiveGameProjectionStore::list_channel_live_sessions(
+            store, TOPIC_B, "ch-main", 100,
         )
         .await
         .expect("list topic-b sessions after clear"),
@@ -191,6 +194,7 @@ async fn game_room_scenario<S: Store + ProjectionStore>(store: &S) -> GameRoomSc
     beta.scores = parity_game_scores();
     let mut meta = parity_game_room("room-meta", topic, GameRoomStatus::Ended, 90);
     meta.room_kind = GameRoomKind::MetaverseRoom;
+    meta.score_revision = None;
     meta.metaverse = Some(parity_metaverse_state());
     for row in [
         parity_game_room("room-alpha", topic, GameRoomStatus::Waiting, 100),
@@ -203,20 +207,24 @@ async fn game_room_scenario<S: Store + ProjectionStore>(store: &S) -> GameRoomSc
             .expect("LiveGameProjectionStore::upsert_game_room_cache");
     }
     // 同一 room_id の再 upsert(status 更新経路)
-    LiveGameProjectionStore::upsert_game_room_cache(
-        store,
-        parity_game_room("room-alpha", topic, GameRoomStatus::Paused, 100),
-    )
-    .await
-    .expect("upsert game room update");
+    let mut updated_alpha = parity_game_room("room-alpha", topic, GameRoomStatus::Paused, 100);
+    updated_alpha.score_revision = Some(2);
+    LiveGameProjectionStore::upsert_game_room_cache(store, updated_alpha)
+        .await
+        .expect("upsert game room update");
 
     GameRoomScenarioResult {
-        topic_rooms: LiveGameProjectionStore::list_topic_game_rooms(store, topic)
+        topic_rooms: LiveGameProjectionStore::list_channel_game_rooms(store, topic, "ch-game", 100)
             .await
             .expect("list topic game rooms"),
-        other_topic_rooms: LiveGameProjectionStore::list_topic_game_rooms(store, other_topic)
-            .await
-            .expect("list other topic game rooms"),
+        other_topic_rooms: LiveGameProjectionStore::list_channel_game_rooms(
+            store,
+            other_topic,
+            "ch-game",
+            100,
+        )
+        .await
+        .expect("list other topic game rooms"),
     }
 }
 
@@ -300,6 +308,204 @@ async fn game_rooms_match_between_backends() {
             .collect::<Vec<_>>(),
         vec!["room-other".to_string()],
     );
+}
+
+#[derive(Debug, PartialEq)]
+struct BoundedListResult {
+    live_ids: Vec<String>,
+    game_ids: Vec<String>,
+    moved_live_ids: Vec<String>,
+    moved_game_ids: Vec<String>,
+}
+
+async fn bounded_list_scenario<S: Store + ProjectionStore>(store: &S) -> BoundedListResult {
+    let topic = "kukuri:topic:bounded-live-game";
+    for index in 0..120_i64 {
+        let mut live = parity_live_session(
+            format!("live-{index:03}").as_str(),
+            topic,
+            "public",
+            LiveSessionStatus::Live,
+            index,
+        );
+        live.updated_at = index;
+        LiveGameProjectionStore::upsert_live_session_cache(store, live)
+            .await
+            .expect("public live row");
+
+        let mut other_live = parity_live_session(
+            format!("other-live-{index:03}").as_str(),
+            topic,
+            "private:other",
+            LiveSessionStatus::Live,
+            10_000 + index,
+        );
+        other_live.updated_at = 10_000 + index;
+        LiveGameProjectionStore::upsert_live_session_cache(store, other_live)
+            .await
+            .expect("other live row");
+
+        let mut game = parity_game_room(
+            format!("game-{index:03}").as_str(),
+            topic,
+            GameRoomStatus::Waiting,
+            index,
+        );
+        game.channel_id = "public".into();
+        LiveGameProjectionStore::upsert_game_room_cache(store, game)
+            .await
+            .expect("public game row");
+
+        let mut other_game = parity_game_room(
+            format!("other-game-{index:03}").as_str(),
+            topic,
+            GameRoomStatus::Waiting,
+            10_000 + index,
+        );
+        other_game.channel_id = "private:other".into();
+        LiveGameProjectionStore::upsert_game_room_cache(store, other_game)
+            .await
+            .expect("other game row");
+    }
+
+    let live_ids = LiveGameProjectionStore::list_channel_live_sessions(store, topic, "public", 7)
+        .await
+        .expect("bounded live rows")
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect();
+    let game_ids = LiveGameProjectionStore::list_channel_game_rooms(store, topic, "public", 7)
+        .await
+        .expect("bounded game rows")
+        .into_iter()
+        .map(|row| row.room_id)
+        .collect();
+    assert_eq!(
+        LiveGameProjectionStore::get_live_session(store, "kukuri:topic:other", "live-119")
+            .await
+            .expect("topic-scoped live lookup"),
+        None
+    );
+    assert_eq!(
+        LiveGameProjectionStore::get_live_session(store, topic, "live-119")
+            .await
+            .expect("live lookup")
+            .expect("live row")
+            .session_id,
+        "live-119"
+    );
+    assert_eq!(
+        LiveGameProjectionStore::get_game_room(store, "kukuri:topic:other", "game-119")
+            .await
+            .expect("topic-scoped game lookup"),
+        None
+    );
+    assert_eq!(
+        LiveGameProjectionStore::get_game_room(store, topic, "game-119")
+            .await
+            .expect("game lookup")
+            .expect("game row")
+            .room_id,
+        "game-119"
+    );
+
+    let mut moved_live = parity_live_session(
+        "live-119",
+        topic,
+        "private:moved",
+        LiveSessionStatus::Live,
+        20_000,
+    );
+    moved_live.updated_at = 20_000;
+    moved_live.revision = 2;
+    LiveGameProjectionStore::upsert_live_session_cache(store, moved_live)
+        .await
+        .expect("move live row");
+    let mut moved_game = parity_game_room("game-119", topic, GameRoomStatus::Running, 20_000);
+    moved_game.channel_id = "private:moved".into();
+    moved_game.score_revision = Some(2);
+    LiveGameProjectionStore::upsert_game_room_cache(store, moved_game)
+        .await
+        .expect("move game row");
+
+    assert!(
+        LiveGameProjectionStore::list_channel_live_sessions(store, topic, "public", 120)
+            .await
+            .expect("public live after move")
+            .iter()
+            .all(|row| row.session_id != "live-119")
+    );
+    assert!(
+        LiveGameProjectionStore::list_channel_game_rooms(store, topic, "public", 120)
+            .await
+            .expect("public games after move")
+            .iter()
+            .all(|row| row.room_id != "game-119")
+    );
+    assert!(
+        LiveGameProjectionStore::list_channel_live_sessions(store, topic, "public", 0)
+            .await
+            .expect("zero live limit")
+            .is_empty()
+    );
+    assert!(
+        LiveGameProjectionStore::list_channel_game_rooms(store, topic, "public", 0)
+            .await
+            .expect("zero game limit")
+            .is_empty()
+    );
+
+    BoundedListResult {
+        live_ids,
+        game_ids,
+        moved_live_ids: LiveGameProjectionStore::list_channel_live_sessions(
+            store,
+            topic,
+            "private:moved",
+            7,
+        )
+        .await
+        .expect("moved live rows")
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect(),
+        moved_game_ids: LiveGameProjectionStore::list_channel_game_rooms(
+            store,
+            topic,
+            "private:moved",
+            7,
+        )
+        .await
+        .expect("moved game rows")
+        .into_iter()
+        .map(|row| row.room_id)
+        .collect(),
+    }
+}
+
+#[tokio::test]
+async fn live_and_game_lists_are_bounded_and_channel_indexed_in_both_backends() {
+    let sqlite = SqliteStore::connect_memory().await.expect("sqlite store");
+    let memory = MemoryStore::default();
+    let from_sqlite = bounded_list_scenario(&sqlite).await;
+    let from_memory = bounded_list_scenario(&memory).await;
+    assert_eq!(from_sqlite, from_memory);
+    assert_eq!(
+        from_sqlite.live_ids,
+        (113..120)
+            .rev()
+            .map(|index| format!("live-{index:03}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        from_sqlite.game_ids,
+        (113..120)
+            .rev()
+            .map(|index| format!("game-{index:03}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(from_sqlite.moved_live_ids, vec!["live-119"]);
+    assert_eq!(from_sqlite.moved_game_ids, vec!["game-119"]);
 }
 
 async fn dome_connection_projection_scenario<S: Store + ProjectionStore>(
@@ -395,4 +601,92 @@ async fn dome_hosting_projection_matches_between_backends() {
     assert_eq!(projection.lease_epoch, Some(2));
     assert_eq!(projection.session_id.as_deref(), Some("cn-session-2"));
     assert_eq!(projection.derived_at, 20);
+}
+
+async fn session_revision_guard_scenario<S: Store + ProjectionStore>(
+    store: &S,
+) -> (
+    LiveSessionProjectionRow,
+    GameRoomProjectionRow,
+    GameRoomProjectionRow,
+) {
+    let topic = "kukuri:topic:revision-guard";
+
+    let mut latest_live = parity_live_session(
+        "live-revision",
+        topic,
+        "public",
+        LiveSessionStatus::Ended,
+        100,
+    );
+    latest_live.revision = 2;
+    latest_live.title = "latest live".into();
+    LiveGameProjectionStore::upsert_live_session_cache(store, latest_live)
+        .await
+        .expect("upsert latest live");
+    let mut stale_live = parity_live_session(
+        "live-revision",
+        topic,
+        "public",
+        LiveSessionStatus::Live,
+        100,
+    );
+    stale_live.title = "stale live".into();
+    LiveGameProjectionStore::upsert_live_session_cache(store, stale_live)
+        .await
+        .expect("ignore stale live");
+
+    let mut latest_game = parity_game_room("game-revision", topic, GameRoomStatus::Running, 100);
+    latest_game.score_revision = Some(2);
+    latest_game.scores = parity_game_scores();
+    LiveGameProjectionStore::upsert_game_room_cache(store, latest_game)
+        .await
+        .expect("upsert latest game");
+    let stale_game = parity_game_room("game-revision", topic, GameRoomStatus::Waiting, 100);
+    LiveGameProjectionStore::upsert_game_room_cache(store, stale_game)
+        .await
+        .expect("ignore stale game");
+
+    let mut dome = parity_game_room("dome-revision", topic, GameRoomStatus::Waiting, 100);
+    dome.score_revision = None;
+    dome.room_kind = GameRoomKind::MetaverseRoom;
+    dome.metaverse = Some(parity_metaverse_state());
+    LiveGameProjectionStore::upsert_game_room_cache(store, dome.clone())
+        .await
+        .expect("upsert Dome");
+    dome.status = GameRoomStatus::Ended;
+    LiveGameProjectionStore::upsert_game_room_cache(store, dome)
+        .await
+        .expect("update Dome without ScoreGame revision");
+
+    (
+        LiveGameProjectionStore::get_live_session(store, topic, "live-revision")
+            .await
+            .expect("get live")
+            .expect("live row"),
+        LiveGameProjectionStore::get_game_room(store, topic, "game-revision")
+            .await
+            .expect("get game")
+            .expect("game row"),
+        LiveGameProjectionStore::get_game_room(store, topic, "dome-revision")
+            .await
+            .expect("get Dome")
+            .expect("Dome row"),
+    )
+}
+
+#[tokio::test]
+async fn session_revision_guards_match_between_backends() {
+    let sqlite = SqliteStore::connect_memory().await.expect("sqlite store");
+    let memory = MemoryStore::default();
+    let from_sqlite = session_revision_guard_scenario(&sqlite).await;
+    let from_memory = session_revision_guard_scenario(&memory).await;
+    assert_eq!(from_sqlite, from_memory);
+    assert_eq!(from_sqlite.0.revision, 2);
+    assert_eq!(from_sqlite.0.status, LiveSessionStatus::Ended);
+    assert_eq!(from_sqlite.0.title, "latest live");
+    assert_eq!(from_sqlite.1.score_revision, Some(2));
+    assert_eq!(from_sqlite.1.status, GameRoomStatus::Running);
+    assert_eq!(from_sqlite.2.score_revision, None);
+    assert_eq!(from_sqlite.2.status, GameRoomStatus::Ended);
 }

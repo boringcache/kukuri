@@ -1,264 +1,126 @@
 # Issue lifecycle runbook
 
-## 目的
+[AGENTS.md](../../AGENTS.md)の作業原則と設計原則を、起票・計画・実装・検証・監査・終了へ適用する。目的は、合意した受入条件を満たす最小の最終実装を完成させること。Issue、PR、監査の数を成果にしない。
 
-Issue の起票、計画、実装、監査、PR、Close、Reopen を一つの有限な流れとして扱い、次を防ぐ。
+仕様と現在の挙動の確認先は[docs/README.md](../README.md)、計画の記録は[PLANS.md](../../PLANS.md)、検証の選定と構造整理は[REFACTORING.md](../../REFACTORING.md)を参照する。既存ADRや過去の作業記録は、現在の原則に反する処理を維持する根拠にしない。
 
-- 入口の件数だけを数え、共通 helper の早期 return や副作用を見落とす。
-- happy path の成功と全体 test の成功を、完了条件の網羅と取り違える。
-- retry、restart、保存済み状態、background 処理、複数対象の混在で境界を迂回する。
-- 監査のたびに将来要件を追加して、Close 条件を動かし続ける。
-- Issue 本文の過去記録と現在判定が混在する。
+## 1. 着手前に完了範囲を閉じる
 
-この runbook は作業手順の正本である。製品仕様は ADR、現在状態は progress、実際の振る舞いは tests / contracts / scenarios を正本とし、GitHub Issue / PR の checkbox や説明だけを完了根拠にしない。
+実装前に、既存のIssue・計画または依頼への回答へ次を記録する。同じ内容を別文書へ複製しない。
 
-## 適用区分
+- 目的: 合意した利用場面で、何ができれば終了するか。
+- 対象と対象外: 利用場面・入力・状態・失敗条件。未依頼のエッジケースは含めない。
+- 受入条件: 対象・期待結果・判定方法を持つ有限個の `AC-*`。維持する合意済みの挙動は `INVAR-*` として明示する。
+- 作業: 条件に対応する実装結果、削除・統合する既存処理、検証、依存先。
+- 基準commit、Scope revision、現在判定、未決事項とその調査の終了条件。
 
-起票時に次のいずれかを選ぶ。迷う場合は、ファイル数ではなく、失敗時の利用者影響と境界の数で上位を選ぶ。
+有界に判定できない条件は、実装前に子項目へ分解する。末端まで判定できるようになってから開始し、実装中の子項目追加で親の終了を先送りしない。子項目は同じIssueの表で管理でき、子Issueの作成は必須ではない。複数Issueを使う場合も、同じ条件・実装の所有者は一つにする。
 
-| 区分 | 対象 | 必須ゲート |
+固定するのは達成すべき結果と利用条件である。変更pathは調査に基づく予定として記録し、最終コード量を減らすための置換・統合・削除を、小さい差分を守るために妨げない。目的や対象の利用条件が変わる場合は、該当する実装を止めて完了範囲を先に再定義する。
+
+### 確認の深さ
+
+区分は合意した変更の確認方法を選ぶために使い、受入条件やエッジケースを増やす理由にしない。
+
+| 区分 | 対象 | 確認 |
 | --- | --- | --- |
-| A: 軽微 | 挙動を変えない文書、局所的な文言、機械的な保守 | 受入条件、対象 path、targeted validation |
-| B: 挙動変更 | 一つの責務境界内に閉じる feature / fix / UI 挙動 | 固定 surface inventory、適用可能な状態遷移、AC / INVAR と test の対応 |
-| C: 境界重要 | 認証、同意、privacy、外部送信、秘密値、identity、暗号、永続化、migration、backup、network、複数対象への global apply、shared guard | B の全項目、sensitive sink の逆引き、独立監査、監査後の Close |
+| A: 軽微 | 挙動を変えない文書、文言、機械的保守 | 対象記述・参照・構文と受入条件の照合 |
+| B: 挙動変更 | 合意した機能・不具合修正 | 対象の入口から結果までと、受入条件に含めた状態遷移の検証 |
+| C: 境界重要 | 認証、同意、privacy、秘密値、永続化、migration、network等の挙動を変更 | Bに加え、対象副作用への経路確認と固定headの独立監査 |
 
-法務文書や運用文書でも、実装上の同意・外部送信・削除手順を規定する変更は A ではなく C とする。
+文書の所在や用語だけでは区分を引き上げない。文書変更でも、公開範囲・秘密の送信・データ削除等の運用上の挙動を変更する場合は、その実際の影響に応じて区分を選ぶ。
 
-本書は人間とAIのIssue作業に適用する。区分Aでは対象path、受入条件、確認方法・結果を短く記録すればよく、B/C用のinventory、transition、sensitive sink、独立監査の欄は省略できる。雛形の欄数によってリスク区分を引き上げない。必要な検証の未実行・失敗は省略しない。
+### 対象経路と状態
 
-## 承認と作業範囲
-
-- 計画のみの依頼では計画を提示して終了し、ファイル変更は開始しない。実行までの依頼、または計画の承認があれば、必要な調査・再現・修正・検証・記録をその範囲で進める。別の承認文言を形式的に要求しない。
-- PR作成の依頼は必要なブランチ・コミット・pushを含む。マージはユーザーの依頼・承認がある場合に、必須CIと適用される独立監査を満たしてから行う。依頼されていない公開・マージを計画承認だけから推定しない。
-- 承認済み要件を満たす実装方法、参照の同期、適用対象の選定は担当者が判断する。範囲外の製品変更、要件の削除、必要な品質条件の免除など、新たな判断権限が必要な点だけをユーザーへまとめて確認する。返答に依存しない作業は継続できる。
-- 再開時は承認範囲と現在の差分・証跡を確認し、同じ承認を取り直さない。条件が変わった部分だけを再評価する。規則の正本と変更要求の区別は[docs/README.md](../README.md)に従う。
-
-## 修正前の再現
-
-不具合は修正前に、操作のsequenceと期待結果を固定する。自動化可能な挙動は失敗するtest / contract / scenarioで再現し、修正後に同じ条件で成功することを確認する。
-実機・視覚でしか再現できないUI不具合は、対象OS / WebView / 入力 / 表示条件、再現手順、変更前の観測、期待結果を先に記録し、変更後に同条件で確認する。自動化できない理由を短く示し、自動化できる周辺の挙動はtestで保護する。
-この扱いは認証・同意・外部送信等の境界testの代替ではない。区分Cの禁止I/O・永続mutation等は下記のtestで確認する。実機環境がない場合は未確認であり、browserの成功で置き換えない。
-文書だけの不一致は、矛盾する該当箇所と同じ依頼への適用結果を修正前の証拠にできる。
-
-## Lifecycle state gate
-
-| 状態 | 入る条件 | 出る条件 |
-| --- | --- | --- |
-| Planned | Goal、Non-goals、固定 AC / INVAR、リスク区分がある。B / C は inventory と transition もある | 作業が AC / INVAR と evidence に対応し、Scope revision が固定された。Aは短い作業記述でよい |
-| In progress | 実行範囲が承認され、不具合なら修正前の再現方法が決まった | 実装、targeted validation、適用される inventory / transition 更新が完了した |
-| Audit pending | 独立監査が必要な区分で、PR head commit と AC / INVAR evidence が固定された | 必要な独立監査が `PASS`。対象変更後は delta も `PASS`。監査不要ならこの工程を省略する |
-| Merge ready | 必須 CI と必要な独立監査がともに成功した | 承認された運用で merge された |
-| Complete | merge commit と検証対象（監査が必要なら監査対象）の一致を確認し、Issue 本文の現在判定を更新した | concrete blocker が発見されない限り維持する |
-| Reopened | Blocker の四条件を満たす evidence がある | 最小の残タスクを同じ AC / INVAR / transition に結び直し、再び `In progress` へ進む |
-| Blocked | 承認が必要な scope 変更、外部依存、再現不能など、現在の工程を進められない具体的理由がある | blocker と解除条件を記録し、解除後に中断前の状態へ戻る |
-
-`FAIL` または `INCONCLUSIVE` を `PASS` と同様に扱って先へ進めてはならない。一方、停止条件を満たした `PASS` に対して、対象 surface の変更や concrete blocker なしに全監査を繰り返してはならない。
-
-既存の Open / Reopened Issue は、次の実装計画を作る前にこの形式へ移行する。過去の監査記録を消したり書き直したりせず、本文先頭に現在判定、固定 AC、対象 invariant を置き、詳細な旧記録は `Superseded` を付けた progress 文書または comment として参照する。Closed Issue は、後述する Blocker の四条件を満たす新しい evidence がない限り、移行だけを目的に Reopen しない。
-
-## 1. Issue 起票と Definition of Ready
-
-Issue 本文の先頭に `Current status` とリスク区分を置き、現在判定だけを更新する。
+B/Cでは、受入条件に対応する `入口 → helper → 結果・副作用` を列挙する。変更する共通処理の呼出元を逆引きし、合意済みの利用場面への影響を確認する。同じ意味の経路はまとめ、件数だけの棚卸しにはしない。
 
 ```md
-## Current status
-- 判定: Planned / In progress / Audit pending / Merge ready / Complete / Reopened / Blocked
-- Scope revision: <日付または識別子>
-- 基準 commit: <SHA。未着手なら None>
-- Blocker: <0件、または AC / INVAR ID と要約>
-
-## リスク区分
-A / B / C
+| ID | 対応するAC / INVAR | 入口・事前状態・操作 | 期待結果 / 禁止する副作用 | 実装path・検証 |
+| --- | --- | --- | --- | --- |
+| T1 | AC-1 | ... | ... | ... |
 ```
 
-実装Issueには次を記録する。区分Aは適用区分の短縮形でよい。Preview feedbackは利用者向けの報告入口であり、実装へ移す担当者が必要な区分・条件を補う。
+正常・失敗・取消・再起動等は、合意した条件に該当するものだけを選ぶ。状態の直積や一般的な脅威一覧を自動追加しない。認証や保存の条件を検証する場合は、表示されたエラーだけでなく、対象の外部送信・保存等が期待どおりであることを確認する。
 
-1. 利用者に観測できる Goal を一文で書く。
-2. 不具合なら、現在の挙動と再現 sequence を書く。
-3. canonical な ADR、runbook、tests、scenarios をリンクする。
-4. In scope / Non-goals と、親子 Issue の責務所有を明示する。
-5. 受入条件へ安定 ID `AC-1`, `AC-2`, ... を付け、Yes / No で判定可能にする。今回の変更でも維持する既存契約は `INVAR-1`, `INVAR-2`, ... として同時に固定する。
-6. 区分 B / C は surface inventory と状態遷移表を作る。
-7. 区分 C は device 外送信、DB mutation、token、鍵、relay / seed、権限・audience 拡張などの sensitive sink を列挙する。
+## 2. 承認と追加発見
 
-### 固定 surface inventory
+計画のみの依頼は計画の提示で終了する。実装まで依頼・承認されていれば、承認済みの範囲で必要な調査・変更・検証を行う。PR作成はそのためのcommitとpushを含む。merge、公開、配備の権限はユーザーの依頼範囲に従い、既にある承認を形式的に取り直さない。
 
-件数だけの棚卸しは禁止する。入口から sink への順方向と、sink から全 caller への逆方向を両方確認する。
+追加発見は、修正に着手する前に次の分類と根拠を記録する。分類は作業を増やすためのものではない。
 
-```md
-| ID | 入口・trigger | shared helper | 読み書き・外部副作用 | 必要な guard / invariant | 対象 transition | test / scenario |
-| --- | --- | --- | --- | --- | --- | --- |
-| INV-1 | ... | ... | ... | ... | TR-1 | ... |
-```
-
-入口には、該当するものをすべて含める。
-
-- public API / route / IPC / command
-- UI action と別画面・別導線
-- startup / restart / restore
-- scheduler / observer / retry / self-heal
-- config setter / cache refresh / reconnect
-- shared helper の全 caller
-- 複数対象をまとめて反映する global / aggregate 処理
-
-同じ guard と同じ sink を共有する入口は一つの group にまとめてよい。ただし、group の全 member 名または機械的な列挙方法を記録する。`未分類 = 0` は必要条件だが、各行の副作用と guard が正しいことを別に確認する。
-
-### 状態遷移表
-
-全状態の直積は作らない。機能に適用可能な制御フローの同値クラスを有限に選ぶ。
-
-```md
-| ID | 事前状態 | event / sequence | 期待状態 | 許可する I/O | 禁止する副作用 | test / scenario |
-| --- | --- | --- | --- | --- | --- | --- |
-| TR-1 | ... | ... | ... | ... | ... | ... |
-```
-
-区分 B / C では、該当する場合に次を必ず含める。
-
-- fresh / missing state と正常状態
-- stale version / revoked / corrupt state
-- 外部 I/O 失敗から retry deadline 中まで
-- restart 後の保存済み state / cache
-- user action と background action の両方
-- 401、再認証、fallback、error swallowing、早期 return
-- 複数 user / account / node の mixed state と global apply
-- mutation の cancel、部分失敗、rollback
-
-区分 C では、guard がすべての sensitive sink を制御フロー上で支配していることを確認する。エラー値だけでなく、禁止 HTTP hit、DB row、token 更新、transport / relay / seed 適用が `0` または不変であることを test する。
-
-### Scope freeze
-
-計画承認時に `Scope revision`、AC、INVAR、inventory、transition を固定する。その後の発見は次の四つに分類する。
-
-| 分類 | 条件 | 扱い |
+| 分類 | 判定 | 扱い |
 | --- | --- | --- |
-| Existing-gap | 固定済み `AC-*` / `INVAR-*` に違反し、現行 surface から到達する | 同じ Issue の Required。Close 済みなら Reopen |
-| Regression | 対象差分が、固定外であっても canonical な既存挙動を新たに壊したことを before / after で示せる | merge 前は同じ PR の blocker。merge 後は原因 PR に紐づく bug Issueとし、必要な親だけ Reopen |
-| New-requirement | 固定 `AC-*` / `INVAR-*` に含まれず、対象差分が新たに起こした Regression でもない製品要件 | 別 Issue。元 Issue の Close blocker にしない |
-| Optional-hardening | 実用途の完了に不要な防御・一般化・性能改善 | Non-goal。原則として追加起票しない |
+| Existing-gap | 固定AC / INVARを満たさない具体的な経路がある | 対応する既存項目を修正する |
+| Regression | 対象差分が、合意済みの利用場面で成立していた挙動を壊したことを変更前後で示せる | merge前に修正する。既存の全挙動を新たな保証として追加しない |
+| New-requirement | 合意した目的・利用条件の追加や変更が必要 | 該当作業を止め、ユーザーの明示的な指示を得て完了範囲を再定義する。自動起票・自動着手しない |
+| Optional-hardening | 未依頼のエッジケース、防御、一般化、改善 | 対象外として終了する。原則として追加起票しない |
 
-## 2. 実装計画
+既存文書の強い表現や監査での指摘だけでは、未依頼の状況をExisting-gapへ昇格させない。構造上同種の不足が繰り返された場合は、個別処理を足す前に共通の責務へ統合した最終形を比較する。
 
-計画は `PLANS.md` と本書を同時に満たす。
+## 3. 最終形から実装する
 
-- `AC / INVAR -> Task -> test / evidence` の対応を記録し、B/Cでは適用される `INV / TR` も結ぶ。孤立した条件と、条件に紐づかない実装 Task を 0 にする。
-- 不具合は「修正前の再現」に従い、問題が発生する event sequence を先に固定する。
-- shared helper を変更する場合は全 caller を、sensitive sink を変更する場合は全 caller の逆引きを Task に含める。
-- inventory の追加・削除・分類変更を予定する場合は、期待する差分を明記する。
-- 区分 C では、独立監査を実装 Task に混ぜず、PR head に対する別工程として置く。
+受入条件を満たす候補の中で、実装・テスト・補助コードを含む保守対象の総量が最小になる構成を選ぶ。既存構造の温存、最小の変更差分、投入済み工数を選定理由にしない。
 
-承認後に Existing-gap が見つかった場合は既存 Task へ統合できる。対象差分による Regression も merge 前に直す。固定されていなかった既存規約は、それだけを理由に Existing-gap や blocker へ昇格させず、Scope revision の明示再承認または別 Issue とする。New-requirement や Optional-hardening を黙って完了条件へ追加してはならない。
+- 新しいowner・cache・task・wrapper等を作る前に、同じ責務を持つ既存処理と置換・削除先を確認する。
+- 必要性を受入条件へ結び付けられない未使用基盤、二重の正本、新旧経路を完成形に残さない。段階移行で一時併存する場合は、接続先と撤去する段階を先に固定する。
+- PRは一つの成果を検証・review・差し戻しできる単位にする。テスト追加・共通化・呼出元切替・旧経路削除を、機械的に別PRへ分断しない。
+- 通常の同期・復旧・表示・操作は、総履歴の取得完了を前提にしない。差分・索引・有限窓・上限と削除を使い、欠損時の結果も固定条件で判定する。頻度低下や容量増加だけを件数依存の解消としない。
 
-## 3. 実装
+### 修正前の再現
 
-1. fix は「修正前の再現」に従い、失敗testまたは適用可能な再現証拠を先に確認する。
-2. guard は、その層が所有する sensitive sink より前に置く。server の拒否は client の外部送信禁止を満たす代替にならない。
-3. `Ok(())` や boolean が「利用可能」「延期」「同意待ち」「再試行中」を兼ねる場合は、呼出元が誤って続行できない型付き outcome を使う。
-4. global / aggregate 処理では、各対象の検証済み状態を失わず、ある対象の成功で未検証の別対象を有効化しない。
-5. 入口、sink、shared helper、状態遷移が増減したら inventory / transition と tests を同じ変更で更新する。
-6. 既存 test を削除・弱体化して green にしない。
+不具合は修正前に再現条件と期待結果を固定する。自動化できる挙動は失敗test等で確認し、修正後に同じ条件で成功を確認する。実機・視覚でしか判断できない場合は、同条件の観測を記録する。文書の不一致は該当記述を変更前の証拠にできる。
 
-## 4. PR と検証
+テストは受入条件と合意済みの挙動を検証する。共通化・廃止に伴う重複・不要testは統合・削除できるが、必要な検証を弱めて成功にしてはならない。変更前後の検証範囲を説明する。
 
-PR 本文には次のうち適用される項目を記録する。区分Aは対象、AC / INVARへの対応、差分、確認結果を短くまとめ、非該当欄は省略してよい。詳細な記録がrepositoryにある場合はリンクし、独立に複製しない。
+## 4. 検証とPR
 
-- 対象 Issue、Scope revision、リスク区分
-- AC / INVAR ごとの実装箇所と test 名
-- inventory の基準、変更前後、追加・削除・分類変更、未分類件数
-- shared helper と sensitive sink の全 caller 確認方法
-- 状態遷移の positive / negative test
-- 「修正前の再現」に対応する変更前後の証跡
-- `REFACTORING.md` の path 別必須 validation と、未実行項目の理由
+ローカルは変更に関連する検証を実行し、全体確認はPR CIで行う。CIに含まれない必要な実機・OS固有検証は、その対象と実行先を先に定める。実行方法は[dev.md](dev.md)、選定は[REFACTORING.md](../../REFACTORING.md#path別検証マトリクス)を参照する。
 
-全体 test 件数や CI green は必要条件だが、AC / INVAR の網羅性を単独では証明しない。
+PRには目的と結果、対応するAC / INVAR、最終形で残る処理と削除した処理、必要な検証の結果を記す。非該当欄は省略し、同じ証拠を複製しない。未実行・失敗は成功と区別する。文書変更に製品suiteを一律要求しない。
 
-区分 C の PR は自動 Close 文言を使わず `Refs #...` とする。ユーザーが CI 後の自動 merge を承認済みでも、merge 条件は `必須 CI 成功 + PR head の独立監査 PASS` とする。監査後に対象コードが変わった場合は、変更 delta を再監査する。
+CのPRは `Refs #...` を使い、必要な監査・merge後の確認を終える前にIssueを自動Closeしない。
+
+成功済みの検証は、変更影響や新たな失敗がなければ再利用する。総test件数やCI成功だけを受入条件の達成証拠にしない。性能の条件は、固定した操作と件数の増え方に対する処理回数・待ち・使用量で示す。
 
 ## 5. 独立監査
 
-区分 C は必須、区分 B は親 Issue、再Open、shared guard を含む場合に実施する。独立とは、実装時の結論や progress 記録を前提にせず、別の担当または別コンテキストが固定 AC / INVAR と対象 commit から再構築することをいう。
+Cでは固定headの独立監査を行う。Bでは実装前にその必要性を定め、親Issueであることや再開したことだけで監査を増やさない。独立とは、別の担当または別コンテキストが固定条件と対象commitから判断することをいう。
 
-監査は次の順で行う。
+監査対象は固定したAC / INVARと、それに対応する入口・結果・副作用・検証である。変更共通処理の呼出元も、その合意済み利用場面への影響を確認するために調べる。列挙から無関係な機能や未依頼の失敗条件へ調査を広げない。
 
-1. 対象 commit と Scope revision を固定する。
-2. 登録点から全入口を再生成し、`入口 -> helper -> sink` を確認する。
-3. 各 sensitive sink から caller を逆引きし、inventory との差を確認する。
-4. すべての早期 return、fallback、retry、cache、background、global apply を状態遷移表と照合する。
-5. AC / INVAR ごとの実装・test・実行結果を確認する。
-6. inventory の `未分類` と `不適合` を別々に数える。
-7. findings を Existing-gap / Regression / New-requirement / Optional-hardening に分類する。
+Blockerは次をすべて満たすものに限る。
 
-監査結果は `PASS / FAIL / INCONCLUSIVE` のいずれかとし、少なくとも次を記録する。
+1. 固定AC / INVARの未達、または対象差分による合意済み利用場面のRegressionである。
+2. その利用場面から到達する経路を示せる。
+3. 期待結果または禁止副作用への具体的な影響がある。
+4. symbol・call path・失敗test・観測等の根拠がある。
 
-```md
-- 対象 commit:
-- Scope revision:
-- リスク区分:
-- inventory: 合計 / 適合 / 不適合 / 未分類
-- AC / INVAR evidence:
-- 実行した validation:
-- blocker:
-- non-blocker とした事項:
-- 判定:
-```
+それ以外は前述の分類に戻し、監査者が受入条件を増やさない。結果は対象commit、条件との対応、検証結果、blocker、`PASS / FAIL / INCONCLUSIVE`で記録する。
 
-### Blocker の条件
+固定条件をすべて判定し、blockerが0なら監査を終了する。「未知のbugが存在しないこと」を証明しない。修正後は差分と影響先だけを再確認し、変更のない対象のPASSを繰り返さない。
 
-次の四つをすべて満たすものだけを Close blocker とする。
+## 6. 終了と進捗
 
-1. 固定済み `AC-*` / `INVAR-*` に紐づくか、対象差分が新たに発生させた Regression である。
-2. 固定 inventory の入口、または対象差分の caller / sink 逆引きで見つかった影響入口から到達できる。
-3. 利用者影響、禁止された外部送信、データ損失、権限拡張、誤った永続 mutation のいずれかがある。
-4. symbol / call path / failing test などの具体的証拠がある。
+| 状態 | 判定 |
+| --- | --- |
+| Planned | 末端まで有界な受入条件、作業と検証、対象外が固定されている |
+| In progress | 承認済みの範囲を実装している |
+| Audit pending | 必要な実装・局所検証を終え、固定headの監査を待っている |
+| Merge ready | 受入条件、必要な監査、実際に発生した必須CIを満たした |
+| Complete | 承認済みのmerge後に対象内容の一致と成果を確認した |
+| Blocked | 完了範囲の再定義、ユーザー判断、外部依存等の具体的な阻害要因がある |
+| Reopened | 完了済みの条件に対する具体的なblockerが見つかった |
 
-将来 route、未登録機能、一般的な悪意 client、理想的な法的完全性、無関係な hardening は、固定 AC / INVAR に含まれない限り blocker にしない。
+必要な受入条件を満たした時点で終了する。改善候補が残っていることだけで続行しない。merge後は検証対象headとの変更内容の一致を確認し、差があればその影響だけを確認する。
 
-### 監査の停止条件
+複数Issue・PRでも、親の達成は子のClosed数ではなく親の条件で判定する。Reopenも違反した条件と影響先へ限定し、兄弟項目を一括で再監査しない。修正方法は差分の小ささではなく、条件を満たす最小の最終コード量から選ぶ。
 
-次を満たした時点で監査を終了する。
+進捗は固定した受入条件ごとに成果・証拠・残件を更新する。本番の利用場面へ届く改善と、未接続の基盤・文書・調査を区別し、PR数を達成率へ換算しない。割合を示す場合は対象と算定根拠を明示し、未確認の効果を加算しない。
 
-- 固定 AC / INVAR がすべて evidence に対応している。
-- named inventory がすべて適合または明示した Non-goal に分類され、未分類が 0 である。
-- 適用可能な transition がすべて test または根拠に対応している。
-- blocker が 0 である。
-
-「未知の bug が存在しないこと」は完了条件にしない。監査後に対象 surface へ変更がなければ、同じ全監査を繰り返さず前回 PASS を利用する。変更があれば delta と影響先だけを再監査する。
-
-## 6. Merge、Close、Reopen
-
-区分 C は次の順序を守る。
-
-1. PR head の独立監査が PASS。
-2. 必須 CI が成功。
-3. 承認された運用に従って merge。
-4. merge commit の対象 tree / surface を PR head と比較する。差分があれば、その delta と影響先を merge commit 上で再監査して `PASS` にする。
-5. Issue の `Current status` と evidence を更新して Close。
-
-親 Issue は、子 Issue が Closed であるだけでは Close しない。親の各 AC / INVAR に対し、所有する子 Issue、merge commit、監査結果を対応付け、親固有の条件も確認する。
-
-blocker を発見した場合は、影響する最小の子 Issue と必要な祖先だけを Reopen する。完了済みの兄弟 Issueを一括 Reopen しない。残タスクは blocker を再現する transition と、必要最小の修正・回帰 test に限定する。
-
-## Issue 本文の履歴管理
-
-- `Current status` は常に一つだけ置き、現在判定をそこへ集約する。
-- 完了条件 checkbox は canonical な AC / INVAR にだけ使う。
-- 過去監査は日付・commit・`Superseded` または `当時の判定` を付けた progress 文書か Issue comment に残す。
-- 「当時残っていた項目」を完了 checkbox に変えて現在条件と混在させない。
-- 大きな監査結果を本文へ追記し続けず、repo 内 progress record を evidence としてリンクする。
-
-## 今回の再発から固定する禁止事項
-
-- command / route の総数だけで「全経路確認済み」としない。
-- constructor 直後の test だけで startup 後の setter、retry、scheduler、global reapply を代表させない。
-- shared helper の通常経路だけを読み、guard より前の早期 return を未確認のままにしない。
-- 一つの対象の成功で global apply される別対象を、単一対象 test だけで安全と判定しない。
-- server の 403 を、client が秘密値や本文を送信してよい根拠にしない。
-- test 総数、Issue checkbox、自己監査だけを Close 根拠にしない。
+`Current status`は一か所に集約する。過去の判定は当時のcommitとともに参照できる形で残し、本文へ巨大な監査履歴を積み続けない。十分な記録が既にあれば、雛形に合わせるだけの作り直しは不要。
 
 ## 利用する雛形
 
-- 実装 Issue: `.github/ISSUE_TEMPLATE/engineering-change.yml`
+- 実装Issue: `.github/ISSUE_TEMPLATE/engineering-change.yml`
 - PR: `.github/PULL_REQUEST_TEMPLATE.md`
 - 実装計画: `PLANS.md`
-- path 別 validation: `REFACTORING.md`
-- command の実行方法: `docs/runbooks/dev.md`

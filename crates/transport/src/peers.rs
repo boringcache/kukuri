@@ -8,55 +8,311 @@
 //!   これを見て全レプリカへ同期先を配り直す(reapply)。blob-service は無視する。
 //! - 状態復元(peer_state / restore)後の reapply も docs-sync 呼び出し側の責務。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use iroh::address_lookup::MemoryLookup;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, watch};
 // 元実装(docs-sync / blob-service)と同じ tokio の Instant を使う(テストでの時間制御と互換)。
 use tokio::time::Instant;
+
+mod health;
+pub use health::{BlobPeerAttempt, BlobPeerHealth, MAX_BLOB_PEER_RECORDS};
 
 use crate::config::SeedPeer;
 use crate::tickets::relay_assisted_endpoint_addr;
 
 pub const REMOTE_FETCH_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
+pub const REMOTE_FETCH_MAX_COOLDOWNS: usize = 1_024;
+const REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES: usize = 256;
+static REMOTE_FETCH_STATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+/// 1 つの retry state が同時に実行する remote 走査の上限(#1207)。超過分は順番を待つ。
+pub const REMOTE_FETCH_MAX_CONCURRENT_WALKS: usize = 8;
+const PEER_FETCH_BACKOFF_BASE: Duration = Duration::from_secs(2);
+const PEER_FETCH_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const PEER_CONNECTION_STATE_TTL: Duration = Duration::from_secs(300);
+const PEER_FETCH_SUCCESS_TTL: Duration = Duration::from_secs(600);
+const PEER_FETCH_REQUEST_LIMIT: u64 = 16;
+const PEER_FETCH_REQUEST_WINDOW: Duration = Duration::from_secs(1);
+const RECENT_PEER_FETCH_WINDOW: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PeerConnectionStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+    #[default]
+    Unknown,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RemoteFetchStart {
-    Ready,
+pub enum PeerFetchFailure {
+    ConnectFailed,
+    ConnectTimeout,
+    TransferFailed,
+    TransferTimeout,
+    NotFound,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerStateSnapshot {
+    pub connection_generation: u64,
+    pub connection_status: PeerConnectionStatus,
+    pub fetch_successes: u64,
+    pub fetch_failures: u64,
+    pub fetch_misses: u64,
+    pub fetch_rejections: u64,
+    pub consecutive_fetch_failures: u32,
+    pub smoothed_fetch_latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct PeerRuntimeRecord {
+    connection_generation: u64,
+    connection_status: PeerConnectionStatus,
+    connection_observed_at: Option<Instant>,
+    fetch_successes: u64,
+    fetch_failures: u64,
+    fetch_misses: u64,
+    fetch_rejections: u64,
+    consecutive_fetch_failures: u32,
+    smoothed_fetch_latency_ms: Option<u64>,
+    last_success_at: Option<Instant>,
+    retry_after: Option<Instant>,
+}
+
+impl PeerRuntimeRecord {
+    fn connection_status_at(&self, now: Instant) -> PeerConnectionStatus {
+        if self
+            .connection_observed_at
+            .is_some_and(|observed| now.duration_since(observed) <= PEER_CONNECTION_STATE_TTL)
+        {
+            self.connection_status
+        } else {
+            PeerConnectionStatus::Unknown
+        }
+    }
+
+    fn snapshot(&self, now: Instant) -> PeerStateSnapshot {
+        PeerStateSnapshot {
+            connection_generation: self.connection_generation,
+            connection_status: self.connection_status_at(now),
+            fetch_successes: self.fetch_successes,
+            fetch_failures: self.fetch_failures,
+            fetch_misses: self.fetch_misses,
+            fetch_rejections: self.fetch_rejections,
+            consecutive_fetch_failures: self.consecutive_fetch_failures,
+            smoothed_fetch_latency_ms: self.smoothed_fetch_latency_ms,
+        }
+    }
+}
+
+/// Rate-limit subjects stay typed so an HTTP address is never treated as a verified P2P identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequestRateSubject {
+    HttpIp(String),
+    PeerEndpoint(String),
+    RelayClient(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequestRateClass {
+    HttpRequest,
+    P2pRequest,
+    RelayIngressBytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestRatePolicy {
+    pub limit: u64,
+    pub window: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestRateDecision {
+    Allowed,
+    Limited { retry_after: Duration },
+}
+
+type RequestRateWindows =
+    BTreeMap<(RequestRateSubject, RequestRateClass), VecDeque<(Instant, u64)>>;
+
+#[derive(Default)]
+pub struct RequestRateLedger {
+    windows: Mutex<RequestRateWindows>,
+}
+
+impl RequestRateLedger {
+    pub async fn check_and_record(
+        &self,
+        subject: RequestRateSubject,
+        class: RequestRateClass,
+        amount: u64,
+        policy: RequestRatePolicy,
+        now: Instant,
+    ) -> RequestRateDecision {
+        let mut windows = self.windows.lock().await;
+        let entries = windows.entry((subject, class)).or_default();
+        while entries
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= policy.window)
+        {
+            entries.pop_front();
+        }
+        let used = entries.iter().map(|(_, amount)| *amount).sum::<u64>();
+        if used.saturating_add(amount) > policy.limit {
+            let retry_after = entries
+                .front()
+                .map(|(at, _)| policy.window.saturating_sub(now.duration_since(*at)))
+                .unwrap_or(policy.window);
+            return RequestRateDecision::Limited { retry_after };
+        }
+        entries.push_back((now, amount));
+        RequestRateDecision::Allowed
+    }
+
+    pub async fn retain_recent(&self, oldest: Instant) {
+        self.windows.lock().await.retain(|_, entries| {
+            while entries.front().is_some_and(|(at, _)| *at < oldest) {
+                entries.pop_front();
+            }
+            !entries.is_empty()
+        });
+    }
+}
+
+/// 合流した呼び出しへ配る remote 取得の結果(#1207)。
+///
+/// 走査は呼び出し側の future から切り離して実行するため、結果は共有できる形で持つ。
+pub type SharedRemoteFetchResult = Result<Option<Arc<Vec<u8>>>, Arc<anyhow::Error>>;
+
+type RemoteFetchResultSender = watch::Sender<Option<SharedRemoteFetchResult>>;
+type RemoteFetchResultReceiver = watch::Receiver<Option<SharedRemoteFetchResult>>;
+
+/// `RemoteFetchRetryState::begin` の結果。
+pub enum RemoteFetchBegin {
+    /// この呼び出しが走査を実行する。結果は sender へ 1 回だけ流す。
+    Lead(RemoteFetchResultSender),
+    /// 同じ対象の走査が実行中。結果を受け取るだけで、新しい走査は始めない。
+    Join(RemoteFetchResultReceiver),
     CoolingDown,
 }
 
-/// リモートフェッチ失敗のクールダウン(対象キー毎)。
-#[derive(Default)]
+/// serviceごとの失敗cooldown。明示的なremote取得の合流と実行枠は
+/// iroh-nodeのNetworkWorkRuntimeがnode単位で所有する（#1221）。
+/// `begin`の旧予約APIとwalk permitは互換用に残すが、通常取得taskは起動しない。
 pub struct RemoteFetchRetryState {
+    instance_id: u64,
     retry_after: BTreeMap<String, Instant>,
+    retry_deadlines: BTreeSet<(Instant, String)>,
+    in_flight: BTreeMap<String, RemoteFetchResultReceiver>,
+    walk_permits: Arc<Semaphore>,
+}
+
+impl Default for RemoteFetchRetryState {
+    fn default() -> Self {
+        Self {
+            instance_id: REMOTE_FETCH_STATE_SEQUENCE
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("remote fetch service identity exhausted"),
+            retry_after: BTreeMap::new(),
+            retry_deadlines: BTreeSet::new(),
+            in_flight: BTreeMap::new(),
+            walk_permits: Arc::new(Semaphore::new(REMOTE_FETCH_MAX_CONCURRENT_WALKS)),
+        }
+    }
 }
 
 impl RemoteFetchRetryState {
-    pub fn try_begin(&mut self, key: &str, now: Instant) -> RemoteFetchStart {
-        if self
-            .retry_after
-            .get(key)
-            .is_some_and(|retry_after| *retry_after > now)
-        {
-            return RemoteFetchStart::CoolingDown;
-        }
-        self.retry_after.remove(key);
-        RemoteFetchStart::Ready
+    /// Process-local service generation, never reused after this ledger drops.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
-    pub fn finish(&mut self, key: &str, success: bool, now: Instant) {
-        if success {
-            self.retry_after.remove(key);
-        } else {
-            self.retry_after
-                .insert(key.to_string(), now + REMOTE_FETCH_RETRY_COOLDOWN);
+    pub fn is_cooling_down(&self, key: &str, now: Instant) -> bool {
+        self.retry_after
+            .get(key)
+            .is_some_and(|deadline| *deadline > now)
+    }
+
+    /// `cooldown_key` は失敗クールダウンの単位、`flight_key` は合流の単位。
+    /// 保存先が異なる取得(永続 / 一時)は `flight_key` を分けて合流させない。
+    pub fn begin(
+        &mut self,
+        cooldown_key: &str,
+        flight_key: &str,
+        now: Instant,
+    ) -> RemoteFetchBegin {
+        if let Some(receiver) = self.in_flight.get(flight_key) {
+            // 結果を流さずに sender が消えた予約(走査 task の異常終了)は引き継がない。
+            if receiver.borrow().is_some() || receiver.has_changed().is_ok() {
+                return RemoteFetchBegin::Join(receiver.clone());
+            }
+            self.in_flight.remove(flight_key);
         }
+        if self
+            .retry_after
+            .get(cooldown_key)
+            .is_some_and(|retry_after| *retry_after > now)
+        {
+            return RemoteFetchBegin::CoolingDown;
+        }
+        self.remove_cooldown(cooldown_key);
+        let (sender, receiver) = watch::channel(None);
+        self.in_flight.insert(flight_key.to_string(), receiver);
+        RemoteFetchBegin::Lead(sender)
+    }
+
+    pub fn finish(&mut self, cooldown_key: &str, flight_key: &str, success: bool, now: Instant) {
+        self.in_flight.remove(flight_key);
+        while let Some((deadline, key)) = self.retry_deadlines.first() {
+            if *deadline > now {
+                break;
+            }
+            let key = key.clone();
+            self.remove_cooldown(&key);
+        }
+        self.remove_cooldown(cooldown_key);
+        if success || cooldown_key.len() > REMOTE_FETCH_MAX_COOLDOWN_KEY_BYTES {
+            return;
+        }
+        if self.retry_after.len() >= REMOTE_FETCH_MAX_COOLDOWNS {
+            let (_, key) = self
+                .retry_deadlines
+                .first()
+                .expect("nonempty cooldown index")
+                .clone();
+            self.remove_cooldown(&key);
+        }
+        let deadline = now + REMOTE_FETCH_RETRY_COOLDOWN;
+        self.retry_after.insert(cooldown_key.to_owned(), deadline);
+        self.retry_deadlines
+            .insert((deadline, cooldown_key.to_owned()));
+    }
+
+    fn remove_cooldown(&mut self, key: &str) {
+        if let Some(deadline) = self.retry_after.remove(key) {
+            self.retry_deadlines.remove(&(deadline, key.to_owned()));
+        }
+    }
+
+    pub fn walk_permits(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.walk_permits)
+    }
+
+    pub fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    pub fn cooldown_len(&self) -> usize {
+        self.retry_after.len()
     }
 }
 
@@ -81,16 +337,40 @@ pub struct PeerAddrBook {
     learned_peers: Mutex<BTreeMap<String, EndpointAddr>>,
     seed_peers: Mutex<BTreeMap<String, EndpointAddr>>,
     imported_peers: Mutex<BTreeMap<String, EndpointAddr>>,
+    health: Arc<BlobPeerHealth>,
+    fetch_cursor: Mutex<[Option<String>; 3]>,
+    recent_peers: Mutex<VecDeque<RecentPeer>>,
+    #[cfg(test)]
+    sampled_peer_count: std::sync::atomic::AtomicUsize,
+}
+
+struct RecentPeer {
+    id: String,
+    expires_at: Instant,
+    imported: bool,
 }
 
 impl PeerAddrBook {
     pub fn new(endpoint: Endpoint, discovery: Arc<MemoryLookup>) -> Self {
+        Self::with_fetch_health(endpoint, discovery, Arc::new(BlobPeerHealth::default()))
+    }
+
+    pub fn with_fetch_health(
+        endpoint: Endpoint,
+        discovery: Arc<MemoryLookup>,
+        health: Arc<BlobPeerHealth>,
+    ) -> Self {
         Self {
             endpoint,
             discovery,
             learned_peers: Mutex::new(BTreeMap::new()),
             seed_peers: Mutex::new(BTreeMap::new()),
             imported_peers: Mutex::new(BTreeMap::new()),
+            health,
+            fetch_cursor: Mutex::new([None, None, None]),
+            recent_peers: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            sampled_peer_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -116,26 +396,142 @@ impl PeerAddrBook {
         peers
     }
 
+    /// Sample a moving, bounded window before ranking. Source precedence for
+    /// every sampled identity remains learned -> seed -> imported.
+    pub async fn ranked_peers(&self) -> Vec<EndpointAddr> {
+        let preferred = self.health.preferred().await;
+        let (recent, newest_import) = {
+            let mut recent = self.recent_peers.lock().await;
+            let now = Instant::now();
+            recent.retain(|peer| peer.expires_at > now);
+            (
+                recent
+                    .iter()
+                    .map(|peer| peer.id.clone())
+                    .collect::<Vec<_>>(),
+                recent
+                    .iter()
+                    .find(|peer| peer.imported)
+                    .map(|peer| peer.id.clone()),
+            )
+        };
+        let mut peers = {
+            let mut cursors = self.fetch_cursor.lock().await;
+            let learned = self.learned_peers.lock().await;
+            let seeds = self.seed_peers.lock().await;
+            let imported = self.imported_peers.lock().await;
+            let mut sampled = Vec::new();
+            for (index, source) in [&*learned, &*seeds, &*imported].into_iter().enumerate() {
+                sampled.extend(fetch_source_window(source, &mut cursors[index]));
+            }
+            #[cfg(test)]
+            self.sampled_peer_count
+                .store(sampled.len(), Ordering::Relaxed);
+            let ids = preferred
+                .into_iter()
+                .map(|peer| peer.to_string())
+                .chain(recent)
+                .chain(sampled);
+            let mut seen = BTreeSet::new();
+            ids.filter(|id| seen.insert(id.clone()))
+                .filter_map(|id| {
+                    learned
+                        .get(&id)
+                        .or_else(|| seeds.get(&id))
+                        .or_else(|| imported.get(&id))
+                        .cloned()
+                })
+                .take(12)
+                .collect::<Vec<_>>()
+        };
+        self.health.rank(&mut peers).await;
+        if let Some(imported) = newest_import
+            && let Some(position) = peers
+                .iter()
+                .position(|peer| peer.id.to_string() == imported)
+            && position >= 4
+        {
+            peers.swap(3, position);
+        }
+        peers.truncate(4);
+        peers
+    }
+
+    pub async fn begin_fetch_attempt(&self, peer: EndpointId) -> Option<BlobPeerAttempt> {
+        self.health.begin(peer).await
+    }
+
+    pub async fn record_connection_state(
+        &self,
+        peer: EndpointId,
+        generation: u64,
+        status: PeerConnectionStatus,
+    ) {
+        self.health.connection(peer, generation, status).await;
+    }
+
+    pub async fn begin_connection_attempt(&self, peer: EndpointId) -> u64 {
+        self.health
+            .begin(peer)
+            .await
+            .map(|attempt| attempt.generation())
+            .unwrap_or_default()
+    }
+
+    pub async fn record_peer_fetch_request(&self, peer: EndpointId) -> RequestRateDecision {
+        self.health.record_request(peer).await
+    }
+
+    pub async fn record_fetch_success(&self, peer: EndpointId, latency: Duration) {
+        self.health.success(peer, latency).await;
+    }
+
+    pub async fn record_fetch_failure(&self, peer: EndpointId, failure: PeerFetchFailure) {
+        self.health.failure(peer, failure).await;
+    }
+
+    pub async fn peer_state_snapshot(&self, peer: EndpointId) -> Option<PeerStateSnapshot> {
+        self.health.snapshot(peer).await
+    }
+
     /// learned 台帳へ挿入し、台帳に変化があったかを返す(同値なら false)。
     pub async fn insert_learned_peer_addr(&self, endpoint_addr: EndpointAddr) -> bool {
         if !endpoint_addr.is_empty() {
             self.discovery.add_endpoint_info(endpoint_addr.clone());
         }
         let key = endpoint_addr.id.to_string();
-        let mut learned_peers = self.learned_peers.lock().await;
-        if learned_peers.get(key.as_str()) == Some(&endpoint_addr) {
-            return false;
-        }
-        learned_peers.insert(key, endpoint_addr);
-        true
+        let changed = {
+            let mut learned_peers = self.learned_peers.lock().await;
+            if learned_peers.get(key.as_str()) == Some(&endpoint_addr) {
+                false
+            } else {
+                learned_peers.insert(key.clone(), endpoint_addr);
+                true
+            }
+        };
+        self.note_recent_peer(key, false).await;
+        changed
     }
 
     pub async fn insert_imported_peer_addr(&self, endpoint_addr: EndpointAddr) {
         self.discovery.add_endpoint_info(endpoint_addr.clone());
+        let key = endpoint_addr.id.to_string();
         self.imported_peers
             .lock()
             .await
-            .insert(endpoint_addr.id.to_string(), endpoint_addr);
+            .insert(key.clone(), endpoint_addr);
+        self.note_recent_peer(key, true).await;
+    }
+
+    async fn note_recent_peer(&self, peer: String, imported: bool) {
+        let mut recent = self.recent_peers.lock().await;
+        recent.retain(|existing| existing.id != peer);
+        recent.push_front(RecentPeer {
+            id: peer,
+            expires_at: Instant::now() + RECENT_PEER_FETCH_WINDOW,
+            imported,
+        });
+        recent.truncate(4);
     }
 
     /// endpoint の remote_info と relay URL から learned ピアを記録し、
@@ -243,33 +639,35 @@ impl PeerAddrBook {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // かつて docs-sync / blob-service に同名で重複していたテストの単一版(WP-H2)。
-    #[test]
-    fn remote_fetch_retry_state_cools_down_failures_without_blocking_active_fetches() {
-        let now = Instant::now();
-        let mut state = RemoteFetchRetryState::default();
-
-        assert_eq!(state.try_begin("hash-a", now), RemoteFetchStart::Ready);
-        assert_eq!(state.try_begin("hash-a", now), RemoteFetchStart::Ready);
-
-        state.finish("hash-a", false, now);
-        assert_eq!(
-            state.try_begin("hash-a", now + Duration::from_secs(1)),
-            RemoteFetchStart::CoolingDown
+fn fetch_source_window(
+    source: &BTreeMap<String, EndpointAddr>,
+    cursor: &mut Option<String>,
+) -> Vec<String> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let mut keys = Vec::with_capacity(4);
+    if let Some(after) = cursor.as_ref() {
+        keys.extend(
+            source
+                .range((Excluded(after.clone()), Unbounded))
+                .take(4)
+                .map(|(key, _)| key.clone()),
         );
-        assert_eq!(
-            state.try_begin("hash-a", now + REMOTE_FETCH_RETRY_COOLDOWN),
-            RemoteFetchStart::Ready
-        );
-
-        state.finish("hash-a", true, now + REMOTE_FETCH_RETRY_COOLDOWN);
-        assert_eq!(
-            state.try_begin("hash-a", now + REMOTE_FETCH_RETRY_COOLDOWN),
-            RemoteFetchStart::Ready
-        );
+        if keys.len() < 4 {
+            keys.extend(
+                source
+                    .range(..=after.clone())
+                    .take(4 - keys.len())
+                    .map(|(key, _)| key.clone()),
+            );
+        }
+    } else {
+        keys.extend(source.keys().take(4).cloned());
     }
+    if let Some(last) = keys.last() {
+        *cursor = Some(last.clone());
+    }
+    keys
 }
+
+#[cfg(test)]
+mod tests;

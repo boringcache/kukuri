@@ -194,7 +194,7 @@ impl DirectMessageStore for SqliteStore {
         sqlx::query(
             r#"
             UPDATE dm_messages
-            SET acked_at = ?3
+            SET acked_at = COALESCE(acked_at, ?3)
             WHERE dm_id = ?1 AND message_id = ?2
             "#,
         )
@@ -261,6 +261,251 @@ impl DirectMessageStore for SqliteStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_direct_message_outbox).collect()
+    }
+
+    async fn list_direct_message_outbox_candidate_page(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox candidate page limit"
+        );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing candidate cycle end"
+        );
+        let end = match cycle_end {
+            Some(end) => Some(end.clone()),
+            None => sqlx::query(
+                "SELECT created_at, message_id, dm_id FROM dm_outbox \
+                 ORDER BY created_at DESC, message_id DESC, dm_id DESC LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| -> Result<DirectMessageOutboxCursor> {
+                Ok(DirectMessageOutboxCursor {
+                    created_at: row.try_get("created_at")?,
+                    message_id: row.try_get("message_id")?,
+                    dm_id: row.try_get("dm_id")?,
+                })
+            })
+            .transpose()?,
+        };
+        let Some(end) = end else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                "SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at \
+                 FROM dm_outbox WHERE (created_at, message_id, dm_id) > (?1, ?2, ?3) \
+                 AND (created_at, message_id, dm_id) <= (?4, ?5, ?6) \
+                 ORDER BY created_at, message_id, dm_id LIMIT ?7",
+            )
+            .bind(after.created_at)
+            .bind(after.message_id.as_str())
+            .bind(after.dm_id.as_str())
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
+            .bind((limit + 1) as i64)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at \
+                 FROM dm_outbox WHERE (created_at, message_id, dm_id) <= (?1, ?2, ?3) \
+                 ORDER BY created_at, message_id, dm_id LIMIT ?4",
+            )
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
+            .bind((limit + 1) as i64)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = rows.len() > limit;
+        let items = rows
+            .into_iter()
+            .take(limit)
+            .map(row_to_direct_message_outbox)
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = has_more.then(|| {
+            let last = items.last().expect("nonempty candidate page");
+            DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            }
+        });
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end: Some(end),
+        })
+    }
+
+    async fn list_direct_message_outbox_for_peer_page(
+        &self,
+        peer_pubkey: &str,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox page limit"
+        );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing outbox cycle end"
+        );
+        let cycle_end = match cycle_end {
+            Some(end) => Some(end.clone()),
+            None => sqlx::query(
+                "SELECT created_at, message_id, dm_id FROM dm_outbox \
+                 WHERE peer_pubkey = ?1 ORDER BY created_at DESC, message_id DESC, dm_id DESC LIMIT 1",
+            )
+            .bind(peer_pubkey)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| -> Result<DirectMessageOutboxCursor> {
+                Ok(DirectMessageOutboxCursor {
+                    created_at: row.try_get("created_at")?,
+                    message_id: row.try_get("message_id")?,
+                    dm_id: row.try_get("dm_id")?,
+                })
+            })
+            .transpose()?,
+        };
+        let Some(end) = cycle_end.as_ref() else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
+        let fetch_limit = (limit + 1) as i64;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE peer_pubkey = ?1
+                  AND (created_at, message_id, dm_id) > (?2, ?3, ?4)
+                  AND (created_at, message_id, dm_id) <= (?5, ?6, ?7)
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC
+                LIMIT ?8
+                "#,
+            )
+            .bind(peer_pubkey)
+            .bind(after.created_at)
+            .bind(after.message_id.as_str())
+            .bind(after.dm_id.as_str())
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE peer_pubkey = ?1
+                  AND (created_at, message_id, dm_id) <= (?2, ?3, ?4)
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC
+                LIMIT ?5
+                "#,
+            )
+            .bind(peer_pubkey)
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = rows.len() > limit;
+        let items = rows
+            .into_iter()
+            .take(limit)
+            .map(row_to_direct_message_outbox)
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = if has_more {
+            items.last().map(|last| DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end,
+        })
+    }
+
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>> {
+        anyhow::ensure!(
+            new_limit <= 3 && retry_limit <= 1 && new_limit + retry_limit > 0,
+            "invalid direct message outbox due limits"
+        );
+        let mut selected = Vec::with_capacity(new_limit + retry_limit);
+        if new_limit > 0 {
+            let rows = sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE last_attempt_at IS NULL
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC, peer_pubkey ASC
+                LIMIT ?1
+                "#,
+            )
+            .bind(new_limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            selected.extend(
+                rows.into_iter()
+                    .map(row_to_direct_message_outbox)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        if retry_limit > 0 {
+            let rows = sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE last_attempt_at IS NOT NULL AND last_attempt_at <= ?1
+                ORDER BY last_attempt_at ASC, created_at ASC, message_id ASC, dm_id ASC, peer_pubkey ASC
+                LIMIT ?2
+                "#,
+            )
+            .bind(retry_due_at_or_before)
+            .bind(retry_limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            selected.extend(
+                rows.into_iter()
+                    .map(row_to_direct_message_outbox)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        Ok(selected)
     }
 
     async fn touch_direct_message_outbox_attempt(
