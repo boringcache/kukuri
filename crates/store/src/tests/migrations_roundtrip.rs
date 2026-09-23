@@ -25,7 +25,7 @@
 //!   envelopes の 2 本のみ)。
 //! - TRIGGER は sqlite_master.sql の空白正規化テキストを固定する。
 //!   CHECK 制約・VIEW は現行スキーマに存在しないため snapshot の対象外。
-//! - partial index の WHERE 句(notifications に 4 本)は pragma で取れないため、
+//! - partial index の WHERE 句は pragma で取れないため、
 //!   index に限り sqlite_master.sql の空白正規化テキストを併用する。
 //! - テーブル・index は名前順ソート。_sqlx_migrations はスキーマ比較から除外し
 //!   (undo 由来 DB と materialize 由来 DB で installed_on が異なるため)、
@@ -40,7 +40,7 @@ use super::migrations::materialize_sqlite_fixture;
 
 /// 全世代の up migration version(migrations/ ディレクトリのファイル名から
 /// 観測した生リテラル、昇順)。世代の追加・削除はここと golden の両方に現れる。
-const EXPECTED_VERSIONS: [i64; 32] = [
+const EXPECTED_VERSIONS: [i64; 33] = [
     20260310000000,
     20260312000000,
     20260315000000,
@@ -73,6 +73,7 @@ const EXPECTED_VERSIONS: [i64; 32] = [
     20260922010000,
     20260923000000,
     20260923010000,
+    20260923020000,
 ];
 
 /// 各世代 k について「全適用 → undo(V[k-1]) → 中間世代スキーマと一致 →
@@ -89,7 +90,7 @@ async fn per_generation_stepwise_round_trip() {
     let versions = migrator_up_versions();
     assert_eq!(
         versions, EXPECTED_VERSIONS,
-        "embedded store migration generations drifted from the observed 32 versions"
+        "embedded store migration generations drifted from the observed 33 versions"
     );
 
     let full_snapshot = schema_snapshot(store.pool())
@@ -185,7 +186,7 @@ async fn fully_migrated_schema_matches_golden() {
     assert_eq!(
         migrator_up_versions(),
         EXPECTED_VERSIONS,
-        "embedded store migration generations drifted from the observed 32 versions"
+        "embedded store migration generations drifted from the observed 33 versions"
     );
     assert_eq!(
         applied_migration_versions(store.pool())

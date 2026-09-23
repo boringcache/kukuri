@@ -2,6 +2,7 @@ use super::*;
 
 impl AppService {
     pub async fn shutdown(&self) {
+        self.shutdown_direct_message_outbox_retry().await;
         self.shutdown_account_receive_offers().await;
         self.services.session_projections.clear().await;
         let topics_to_unsubscribe = self

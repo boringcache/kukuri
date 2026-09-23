@@ -192,12 +192,9 @@ async fn real_account_route_fetches_bound_provider_manifest_and_reflects_dm() {
         })
         .await
         .unwrap();
-    AppService::flush_direct_message_outbox_page_for_peer(
+    AppService::flush_due_direct_message_outbox(
         &sender_app.services,
-        &sender.public_key_hex(),
-        &recipient.public_key_hex(),
-        None,
-        None,
+        Utc::now().timestamp_millis(),
     )
     .await
     .unwrap();

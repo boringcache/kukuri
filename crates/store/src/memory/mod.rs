@@ -37,10 +37,14 @@ type LivePresenceValue = (i64, i64);
 type MemoryReactionProjectionRows = HashMap<(String, String, String), ReactionProjectionRow>;
 type MemoryDirectMessageRows = HashMap<(String, String), DirectMessageMessageRow>;
 type DirectMessageOutboxPeerKey = (String, i64, String, String);
+type DirectMessageOutboxNewKey = (i64, String, String, String);
+type DirectMessageOutboxRetryKey = (i64, i64, String, String, String);
 #[derive(Default)]
 struct MemoryDirectMessageOutboxRows {
     rows: HashMap<(String, String), DirectMessageOutboxRow>,
     by_peer: BTreeSet<DirectMessageOutboxPeerKey>,
+    never_attempted: BTreeSet<DirectMessageOutboxNewKey>,
+    attempted: BTreeSet<DirectMessageOutboxRetryKey>,
     by_dm: HashMap<String, BTreeSet<String>>,
 }
 type MemoryDirectMessageTombstones = HashMap<(String, String), DirectMessageTombstoneRow>;

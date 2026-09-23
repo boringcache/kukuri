@@ -15,7 +15,7 @@ async fn dm_open_does_not_duplicate_active_subscription_when_mutual_auto_subscri
         last_error: None,
         topic_diagnostics: Vec::new(),
     }));
-    let hint_transport = Arc::new(CountingClosingHintTransport::default());
+    let hint_transport = Arc::new(CountingPendingHintTransport::default());
     let docs_sync = Arc::new(MemoryDocsSync::default());
     let blob_service = Arc::new(MemoryBlobService::default());
     let store = Arc::new(MemoryStore::default());
@@ -72,6 +72,13 @@ async fn dm_open_does_not_duplicate_active_subscription_when_mutual_auto_subscri
     sleep(Duration::from_millis(50)).await;
 
     assert_eq!(*hint_transport.subscribe_count.lock().await, 1);
+    assert_eq!(
+        app.subscription_registry
+            .dm_outbox_retry_starts
+            .load(Ordering::SeqCst),
+        1,
+        "opening the same peer twice must keep one account retry owner"
+    );
 }
 
 #[tokio::test]
@@ -89,7 +96,7 @@ async fn dm_list_does_not_restart_active_subscription_after_open() {
         last_error: None,
         topic_diagnostics: Vec::new(),
     }));
-    let hint_transport = Arc::new(CountingClosingHintTransport::default());
+    let hint_transport = Arc::new(CountingPendingHintTransport::default());
     let docs_sync = Arc::new(MemoryDocsSync::default());
     let blob_service = Arc::new(MemoryBlobService::default());
     let store = Arc::new(MemoryStore::default());

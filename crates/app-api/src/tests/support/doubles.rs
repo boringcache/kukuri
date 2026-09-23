@@ -268,15 +268,15 @@ impl HintTransport for NoopHintTransport {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CountingClosingHintTransport {
+pub(crate) struct CountingPendingHintTransport {
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
 }
 
 #[async_trait]
-impl HintTransport for CountingClosingHintTransport {
+impl HintTransport for CountingPendingHintTransport {
     async fn subscribe_hints(&self, _topic: &TopicId) -> Result<HintStream> {
         *self.subscribe_count.lock().await += 1;
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(Box::pin(futures_util::stream::pending()))
     }
 
     async fn unsubscribe_hints(&self, _topic: &TopicId) -> Result<()> {
@@ -294,6 +294,7 @@ pub(crate) struct TrackingHintTransport {
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
     pub(crate) unsubscribed_topics: Arc<TokioMutex<Vec<String>>>,
     pub(crate) published_count: Arc<AtomicUsize>,
+    pub(crate) publish_hint_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub(crate) resolved_destination: Arc<TokioMutex<Option<EndpointAddr>>>,
     pub(crate) resolved_count: Arc<AtomicUsize>,
     pub(crate) resolve_barrier: Option<Arc<tokio::sync::Barrier>>,
@@ -332,6 +333,10 @@ impl HintTransport for TrackingHintTransport {
 
     async fn publish_hint(&self, topic: &TopicId, hint: GossipHint) -> Result<()> {
         self.published_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(barrier) = &self.publish_hint_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
         let sender = self.hint_sender(topic).await;
         let _ = sender.send(HintEnvelope {
             hint,

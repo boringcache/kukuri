@@ -213,6 +213,14 @@ sender/recipient/conversation/message照合を通す。旧pairwise ACKも移行�
 最初に記録した配達時刻を保持する。ACKのofferにはACKを返さず、未ACKのDM outboxは受信確認まで消さない。
 送信offerとACK offerの1回の待機は各2秒で打ち切り、失敗は保護outboxの次回再送へ委ねる。
 同一account runtimeが同時に発行するDM/ACK offerは最大4件とし、満杯時は待機列を作らず延期する。
+DM outboxの周期再送は相手ごとの購読taskから分離し、account runtimeの1 ownerが2秒ごとに処理する。
+端末内のdue索引から未試行の古い順を最大3行、期限到来済み再試行の古い順を最大1行選ぶ。
+各行は試行時刻を永続更新してから送信可否を確認し、送信不可/失敗でも保護rowを消さない。
+これにより継続する新規送信が古い再試行を押し出さず、古い失敗が新規送信を塞がない。
+索引の先頭4行以外や全peer/全outboxの読取り、相手ごとのretry timerは通常tickで行わない。
+ownerは再起動時のprojection復元後に取得し、shutdown/予期しないowner dropで処理中の照合・送信を取消す。
+旧pairwise hint送信も1回2秒で打ち切る。保留したpeerのためにaccount ownerの残りのlaneや
+同じ行のaccount offerが無期限に止まらないようにし、失敗しても保護outboxを維持する。
 更新済み端末同士の未完了DMを保全するための移行であり、旧版との互換期間は設けない。
 
 private rotation/freeze/失効には投稿通知と別の制御capsuleを使う。

@@ -17,6 +17,11 @@ pub(crate) struct SubscriptionRegistry {
     pub(crate) account_receive_offer_lease: Arc<std::sync::Mutex<Option<ReceiveOfferLease>>>,
     pub(crate) account_receive_offer_closed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) account_receive_offer_shutdown: Arc<tokio::sync::Notify>,
+    /// One account-wide owner for due protected DM outbox work.
+    pub(crate) dm_outbox_retry_task: Arc<Mutex<Option<AbortOnDropTask>>>,
+    pub(crate) dm_outbox_retry_closed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) dm_outbox_retry_starts: Arc<std::sync::atomic::AtomicUsize>,
     /// 公開 topic の購読 task(key = topic_id)。
     pub(crate) subscriptions: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     /// DM の購読 task(key = dm topic)。

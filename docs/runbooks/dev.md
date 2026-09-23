@@ -89,6 +89,11 @@ cargo xtask desktop-visual-test
 未該当の項目は理由を短く記し、全項目の機械的な再検査を目的にしない。
 #1221ではユーザー指示に従ってローカルtestを変更関連箇所に限り、全suiteはPR CIで確認する。
 独立監査は従来どおり固定headで行う。
+Store migrationを追加・変更したPRでは、up/downの対と`crates/store/src/tests/migrations.rs`の
+世代数、`migrations_roundtrip.rs`の`EXPECTED_VERSIONS`、
+`fixtures/schema/store_schema_full.txt`を同じ差分で確認する。意図したschema変更ならgoldenを
+再生成して差分をreviewし、対応する世代/roundtrip/goldenの局所testと変更indexのquery planを
+PR前に実行する。世代数だけの同期でgoldenをCI任せにしない。
 
 irohのmapped address回収を変更・更新するときは
 `python tools/check_iroh_resource_contract.py`（Python 3.13）で固定SHAの回収contractを確認する。

@@ -59,7 +59,8 @@ impl AppService {
             self.current_author_pubkey().as_str(),
         )
         .await?;
-        self.reconcile_direct_message_subscriptions().await
+        self.reconcile_direct_message_subscriptions().await?;
+        self.start_direct_message_outbox_retry().await
     }
 
     pub(crate) async fn restart_direct_message_subscriptions(&self) -> Result<()> {

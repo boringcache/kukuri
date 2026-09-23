@@ -317,10 +317,23 @@ index idx_dm_messages_timeline table=dm_messages unique=0 origin=c partial=0
   key seqno=1 cid=4 name=Some("created_at")
   key seqno=2 cid=1 name=Some("message_id")
   sql=Some("CREATE INDEX idx_dm_messages_timeline ON dm_messages(dm_id, created_at DESC, message_id DESC)")
+index idx_dm_outbox_attempted_due table=dm_outbox unique=0 origin=c partial=1
+  key seqno=0 cid=5 name=Some("last_attempt_at")
+  key seqno=1 cid=4 name=Some("created_at")
+  key seqno=2 cid=1 name=Some("message_id")
+  key seqno=3 cid=0 name=Some("dm_id")
+  key seqno=4 cid=2 name=Some("peer_pubkey")
+  sql=Some("CREATE INDEX idx_dm_outbox_attempted_due ON dm_outbox(last_attempt_at, created_at, message_id, dm_id, peer_pubkey) WHERE last_attempt_at IS NOT NULL")
 index idx_dm_outbox_created_at table=dm_outbox unique=0 origin=c partial=0
   key seqno=0 cid=4 name=Some("created_at")
   key seqno=1 cid=1 name=Some("message_id")
   sql=Some("CREATE INDEX idx_dm_outbox_created_at ON dm_outbox(created_at ASC, message_id ASC)")
+index idx_dm_outbox_never_attempted table=dm_outbox unique=0 origin=c partial=1
+  key seqno=0 cid=4 name=Some("created_at")
+  key seqno=1 cid=1 name=Some("message_id")
+  key seqno=2 cid=0 name=Some("dm_id")
+  key seqno=3 cid=2 name=Some("peer_pubkey")
+  sql=Some("CREATE INDEX idx_dm_outbox_never_attempted ON dm_outbox(created_at, message_id, dm_id, peer_pubkey) WHERE last_attempt_at IS NULL")
 index idx_dm_outbox_peer_cursor table=dm_outbox unique=0 origin=c partial=0
   key seqno=0 cid=2 name=Some("peer_pubkey")
   key seqno=1 cid=4 name=Some("created_at")

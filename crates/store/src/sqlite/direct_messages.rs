@@ -367,6 +367,59 @@ impl DirectMessageStore for SqliteStore {
         })
     }
 
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>> {
+        anyhow::ensure!(
+            new_limit <= 3 && retry_limit <= 1 && new_limit + retry_limit > 0,
+            "invalid direct message outbox due limits"
+        );
+        let mut selected = Vec::with_capacity(new_limit + retry_limit);
+        if new_limit > 0 {
+            let rows = sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE last_attempt_at IS NULL
+                ORDER BY created_at ASC, message_id ASC, dm_id ASC, peer_pubkey ASC
+                LIMIT ?1
+                "#,
+            )
+            .bind(new_limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            selected.extend(
+                rows.into_iter()
+                    .map(row_to_direct_message_outbox)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        if retry_limit > 0 {
+            let rows = sqlx::query(
+                r#"
+                SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
+                FROM dm_outbox
+                WHERE last_attempt_at IS NOT NULL AND last_attempt_at <= ?1
+                ORDER BY last_attempt_at ASC, created_at ASC, message_id ASC, dm_id ASC, peer_pubkey ASC
+                LIMIT ?2
+                "#,
+            )
+            .bind(retry_due_at_or_before)
+            .bind(retry_limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            selected.extend(
+                rows.into_iter()
+                    .map(row_to_direct_message_outbox)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        Ok(selected)
+    }
+
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,

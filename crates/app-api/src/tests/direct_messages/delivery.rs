@@ -56,10 +56,9 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
         blobs.clone(),
         sender.clone(),
     );
-    let (published, _, _) =
-        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
-            .await
-            .unwrap();
+    let published = AppService::flush_due_direct_message_outbox(&services, 1_000)
+        .await
+        .unwrap();
     assert_eq!(published, 1);
     assert_eq!(hints.resolved_count.load(Ordering::SeqCst), 1);
     let offers = hints.offers.lock().await;
@@ -97,7 +96,7 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
         .unwrap();
     timeout(
         Duration::from_secs(1),
-        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None),
+        AppService::flush_due_direct_message_outbox(&services, 3_000),
     )
     .await
     .expect("busy account offer permits must defer without queuing")
@@ -112,7 +111,7 @@ async fn dm_outbox_page_sends_sealed_account_offer_without_consuming_protected_r
     );
     drop(_busy);
     hints.fail_offer_publish.store(true, Ordering::SeqCst);
-    AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
+    AppService::flush_due_direct_message_outbox(&services, 5_000)
         .await
         .unwrap();
     assert!(hints.resolved_destination.lock().await.is_none());
@@ -186,10 +185,10 @@ async fn revoked_mutual_after_destination_lookup_sends_no_account_dm_offer() {
         sender,
     );
     let local_for_revoke = local.clone();
-    let flush = tokio::spawn(async move {
-        AppService::flush_direct_message_outbox_page_for_peer(&services, &local, &peer, None, None)
-            .await
-    });
+    let flush =
+        tokio::spawn(
+            async move { AppService::flush_due_direct_message_outbox(&services, 1_000).await },
+        );
     timeout(Duration::from_secs(5), barrier.wait())
         .await
         .expect("destination lookup must reach the pause");
@@ -212,7 +211,181 @@ async fn revoked_mutual_after_destination_lookup_sends_no_account_dm_offer() {
 }
 
 #[tokio::test]
-async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
+async fn account_dm_retry_owner_is_single_and_shutdown_cancels_active_lookup() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let local = sender.public_key_hex();
+    let peer = recipient.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        vec![AuthorRelationshipProjectionRow {
+            local_author_pubkey: local.clone(),
+            author_pubkey: peer.clone(),
+            following: true,
+            followed_by: true,
+            mutual: true,
+            friend_of_friend: false,
+            friend_of_friend_via_pubkeys: Vec::new(),
+            derived_at: 1,
+        }],
+    )
+    .await
+    .unwrap();
+    let row = DirectMessageOutboxRow {
+        dm_id: direct_message_id_for_participants(&sender.public_key(), &recipient.public_key()),
+        message_id: "cancel-owner-lookup".into(),
+        peer_pubkey: peer,
+        frame_blob_hash: BlobHash::new("cc".repeat(32)),
+        created_at: 42,
+        last_attempt_at: None,
+    };
+    store.put_direct_message_outbox(row.clone()).await.unwrap();
+    for index in 0..100 {
+        store
+            .put_direct_message_outbox(DirectMessageOutboxRow {
+                dm_id: format!("unrelated-dm-{index}"),
+                message_id: format!("unrelated-message-{index}"),
+                peer_pubkey: format!("unrelated-peer-{index}"),
+                frame_blob_hash: BlobHash::new("dd".repeat(32)),
+                created_at: 43,
+                last_attempt_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut hint_double = TrackingHintTransport::default();
+    hint_double.resolve_barrier = Some(barrier.clone());
+    let hints = Arc::new(hint_double);
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        Arc::new(StaticTransport::new(PeerSnapshot::default())),
+        hints.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        sender,
+    );
+    app.start_direct_message_outbox_retry().await.unwrap();
+    app.start_direct_message_outbox_retry().await.unwrap();
+    assert_eq!(
+        app.subscription_registry
+            .dm_outbox_retry_starts
+            .load(Ordering::SeqCst),
+        1
+    );
+    timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .expect("owner must enter destination lookup");
+    timeout(Duration::from_secs(2), app.shutdown())
+        .await
+        .expect("shutdown must cancel the active lookup");
+    assert!(app.start_direct_message_outbox_retry().await.is_err());
+    assert!(
+        app.subscription_registry
+            .dm_outbox_retry_task
+            .lock()
+            .await
+            .is_none()
+    );
+    assert!(hints.offers.lock().await.is_empty());
+    assert!(
+        store
+            .get_direct_message_outbox(&row.dm_id, &row.message_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn blocked_pairwise_publish_cannot_stop_other_peer_or_account_offer() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+    use kukuri_transport::EndpointAddr;
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let peers = [generate_keys(), generate_keys()];
+    let local = sender.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        peers
+            .iter()
+            .map(|peer| AuthorRelationshipProjectionRow {
+                local_author_pubkey: local.clone(),
+                author_pubkey: peer.public_key_hex(),
+                following: true,
+                followed_by: true,
+                mutual: true,
+                friend_of_friend: false,
+                friend_of_friend_via_pubkeys: Vec::new(),
+                derived_at: 1,
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+    for (index, peer) in peers.iter().enumerate() {
+        store
+            .put_direct_message_outbox(DirectMessageOutboxRow {
+                dm_id: direct_message_id_for_participants(&sender.public_key(), &peer.public_key()),
+                message_id: format!("blocked-pairwise-{index}"),
+                peer_pubkey: peer.public_key_hex(),
+                frame_blob_hash: BlobHash::new("aa".repeat(32)),
+                created_at: index as i64,
+                last_attempt_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut hint_double = TrackingHintTransport::default();
+    hint_double.publish_hint_barrier = Some(barrier.clone());
+    let hints = Arc::new(hint_double);
+    *hints.resolved_destination.lock().await = Some(EndpointAddr::new(
+        iroh::SecretKey::from_bytes(&[30; 32]).public(),
+    ));
+    let services = ServiceHandles::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(
+            StaticTransport::new(PeerSnapshot::default()).with_local_endpoint_id(
+                iroh::SecretKey::from_bytes(&[31; 32]).public().to_string(),
+            ),
+        ),
+        hints.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        sender,
+    );
+    let flush =
+        tokio::spawn(
+            async move { AppService::flush_due_direct_message_outbox(&services, 1_000).await },
+        );
+    timeout(Duration::from_secs(2), barrier.wait())
+        .await
+        .expect("first peer must enter the blocked pairwise publisher");
+    assert_eq!(
+        timeout(Duration::from_secs(7), flush)
+            .await
+            .expect("a blocked peer must not stall account retry owner")
+            .unwrap()
+            .unwrap(),
+        2
+    );
+    assert_eq!(hints.offers.lock().await.len(), 2);
+    assert_eq!(store.list_direct_message_outbox().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn dm_due_owner_processes_bounded_new_and_retry_lanes() {
     use kukuri_core::BlobHash;
     use kukuri_store::DirectMessageOutboxRow;
 
@@ -261,7 +434,7 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
                 peer_pubkey: peer.clone(),
                 frame_blob_hash: BlobHash::new("target-hash"),
                 created_at: 42,
-                last_attempt_at: None,
+                last_attempt_at: Some(0),
             },
         )
         .await
@@ -279,56 +452,44 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
         Arc::new(MemoryBlobService::default()),
         local_keys,
     );
-    let mut cursor = None;
-    let mut cycle_end = None;
-    for (page_index, expected) in [64, 64, 2].into_iter().enumerate() {
-        let (published, next, end) = AppService::flush_direct_message_outbox_page_for_peer(
-            &services,
-            local.as_str(),
-            peer.as_str(),
-            cursor.as_ref(),
-            cycle_end.as_ref(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(published, expected);
+    for tick in 0..3 {
+        let processed = AppService::flush_due_direct_message_outbox(&services, 3_000)
+            .await
+            .unwrap();
+        assert_eq!(processed, 4);
         assert_eq!(
             hint_transport.published_count.load(Ordering::SeqCst),
-            [64, 128, 130][page_index]
+            tick + 1,
+            "only the mutual retry lane publishes while unrelated new rows rotate"
         );
         assert_eq!(
             hint_transport.resolved_count.load(Ordering::SeqCst),
-            page_index + 1,
-            "recipient binding lookup must run once per peer page, not once per row"
+            tick + 1,
+            "only one mutual recipient is resolved in this bounded tick"
         );
-        cursor = next;
-        cycle_end = end;
-        if page_index < 2 {
-            for index in 0..64 {
-                DirectMessageStore::put_direct_message_outbox(
-                    projection_store.as_ref(),
-                    DirectMessageOutboxRow {
-                        dm_id: "dm-target".into(),
-                        message_id: format!("new-{page_index}-{index:04}"),
-                        peer_pubkey: peer.clone(),
-                        frame_blob_hash: BlobHash::new("target-hash"),
-                        created_at: 43 + page_index as i64,
-                        last_attempt_at: None,
-                    },
-                )
-                .await
-                .unwrap();
-            }
+        for index in 0..3 {
+            DirectMessageStore::put_direct_message_outbox(
+                projection_store.as_ref(),
+                DirectMessageOutboxRow {
+                    dm_id: "dm-unrelated".into(),
+                    message_id: format!("later-{tick}-{index}"),
+                    peer_pubkey: unrelated.clone(),
+                    frame_blob_hash: BlobHash::new("unrelated-hash"),
+                    created_at: 43,
+                    last_attempt_at: None,
+                },
+            )
+            .await
+            .unwrap();
         }
     }
-    assert!(cursor.is_none());
     let mut fresh_hints = hint_transport.subscribe_hints(&topic).await.unwrap();
     let app = AppService::from_handles(services);
     let fresh = app
         .send_direct_message_internal(peer.as_str(), Some("fresh"), None, Vec::new())
         .await
         .unwrap();
-    assert_eq!(hint_transport.published_count.load(Ordering::SeqCst), 131);
+    assert_eq!(hint_transport.published_count.load(Ordering::SeqCst), 4);
     let received = timeout(Duration::from_secs(1), fresh_hints.next())
         .await
         .unwrap()
@@ -521,7 +682,7 @@ async fn dm_outbox_retry_stops_when_mutual_is_lost_and_resumes_when_it_returns()
         store.clone(),
         store.clone(),
         transport.clone(),
-        hint_transport,
+        hint_transport.clone(),
         docs_sync,
         blob_service,
         keys_local.clone(),
@@ -530,6 +691,7 @@ async fn dm_outbox_retry_stops_when_mutual_is_lost_and_resumes_when_it_returns()
     app.rebuild_author_relationships()
         .await
         .expect("seed relationship projection");
+    app.start_direct_message_outbox_retry().await.unwrap();
     assert!(
         app.subscription_registry
             .direct_message_subscriptions
@@ -557,6 +719,7 @@ async fn dm_outbox_retry_stops_when_mutual_is_lost_and_resumes_when_it_returns()
     assert_eq!(queued_outbox.len(), 1);
     assert_eq!(queued_outbox[0].message_id, message_id);
     assert_eq!(queued_outbox[0].last_attempt_at, None);
+    let published_before_loss = hint_transport.published_count.load(Ordering::SeqCst);
 
     store
         .upsert_follow_edge(follow_peer_to_local_inactive)
@@ -608,7 +771,12 @@ async fn dm_outbox_retry_stops_when_mutual_is_lost_and_resumes_when_it_returns()
         .list_direct_message_outbox()
         .await
         .expect("list outbox while retry is stopped");
-    assert_eq!(stopped_outbox[0].last_attempt_at, None);
+    assert_eq!(stopped_outbox.len(), 1);
+    assert_eq!(
+        hint_transport.published_count.load(Ordering::SeqCst),
+        published_before_loss,
+        "mutual loss must suppress network retry even while the owner rotates the row"
+    );
 
     let follow_peer_to_local_restored = parse_follow_edge(
         &build_follow_edge_envelope(
@@ -647,9 +815,8 @@ async fn dm_outbox_retry_stops_when_mutual_is_lost_and_resumes_when_it_returns()
                 .list_direct_message_outbox()
                 .await
                 .expect("list outbox after mutual restore");
-            if outbox
-                .iter()
-                .any(|row| row.message_id == message_id && row.last_attempt_at.is_some())
+            if outbox.iter().any(|row| row.message_id == message_id)
+                && hint_transport.published_count.load(Ordering::SeqCst) > published_before_loss
             {
                 break;
             }

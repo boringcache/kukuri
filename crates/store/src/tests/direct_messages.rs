@@ -1,5 +1,158 @@
 use super::*;
 
+async fn assert_due_outbox_lanes_remain_bounded_during_new_inserts<S: DirectMessageStore>(
+    store: &S,
+) {
+    for index in 0..1_000 {
+        DirectMessageStore::put_direct_message_outbox(
+            store,
+            DirectMessageOutboxRow {
+                dm_id: format!("new-dm-{}", index % 17),
+                message_id: format!("new-{index:04}"),
+                peer_pubkey: format!("peer-{}", index % 17),
+                frame_blob_hash: BlobHash::new("new-hash"),
+                created_at: 42,
+                last_attempt_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for index in 0..130 {
+        DirectMessageStore::put_direct_message_outbox(
+            store,
+            DirectMessageOutboxRow {
+                dm_id: format!("old-dm-{}", index % 17),
+                message_id: format!("old-{index:04}"),
+                peer_pubkey: format!("peer-{}", index % 17),
+                frame_blob_hash: BlobHash::new("old-hash"),
+                created_at: 1,
+                last_attempt_at: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        DirectMessageStore::list_due_direct_message_outbox(store, 98, 4, 1)
+            .await
+            .is_err()
+    );
+    assert!(
+        DirectMessageStore::list_due_direct_message_outbox(store, 98, 3, 2)
+            .await
+            .is_err()
+    );
+    let mut old_seen = std::collections::BTreeSet::new();
+    for tick in 0..130 {
+        let rows = DirectMessageStore::list_due_direct_message_outbox(store, 98, 3, 1)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.last_attempt_at.is_none())
+                .count(),
+            3
+        );
+        let retry = rows
+            .iter()
+            .find(|row| row.last_attempt_at.is_some())
+            .unwrap();
+        old_seen.insert(retry.message_id.clone());
+        for row in rows {
+            DirectMessageStore::touch_direct_message_outbox_attempt(
+                store,
+                &row.dm_id,
+                &row.message_id,
+                100,
+            )
+            .await
+            .unwrap();
+        }
+        for insert in 0..3 {
+            DirectMessageStore::put_direct_message_outbox(
+                store,
+                DirectMessageOutboxRow {
+                    dm_id: "continuous-new".into(),
+                    message_id: format!("later-{tick:03}-{insert}"),
+                    peer_pubkey: "later-peer".into(),
+                    frame_blob_hash: BlobHash::new("later-hash"),
+                    created_at: 200,
+                    last_attempt_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        old_seen.len(),
+        130,
+        "continuous new rows cannot starve retries"
+    );
+}
+
+#[tokio::test]
+async fn due_dm_outbox_lanes_keep_new_and_old_work_bounded() {
+    let memory = MemoryStore::default();
+    assert_due_outbox_lanes_remain_bounded_during_new_inserts(&memory).await;
+    let sqlite = SqliteStore::connect_memory().await.unwrap();
+    assert_due_outbox_lanes_remain_bounded_during_new_inserts(&sqlite).await;
+}
+
+async fn assert_due_indexes_forget_removed_protected_rows<S: DirectMessageStore>(store: &S) {
+    for (dm_id, message_id, attempted_at) in [
+        ("dm-new", "new", None),
+        ("dm-retry", "retry", Some(0)),
+        ("dm-clear", "clear", None),
+    ] {
+        DirectMessageStore::put_direct_message_outbox(
+            store,
+            DirectMessageOutboxRow {
+                dm_id: dm_id.into(),
+                message_id: message_id.into(),
+                peer_pubkey: "peer".into(),
+                frame_blob_hash: BlobHash::new("hash"),
+                created_at: 42,
+                last_attempt_at: attempted_at,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        DirectMessageStore::list_due_direct_message_outbox(store, 98, 3, 1)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    DirectMessageStore::touch_direct_message_outbox_attempt(store, "dm-new", "new", 100)
+        .await
+        .unwrap();
+    DirectMessageStore::remove_direct_message_outbox(store, "dm-retry", "retry")
+        .await
+        .unwrap();
+    DirectMessageStore::clear_direct_message_local(store, "dm-clear")
+        .await
+        .unwrap();
+    assert!(
+        DirectMessageStore::list_due_direct_message_outbox(store, 98, 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn due_outbox_indexes_forget_ack_and_local_clear() {
+    let memory = MemoryStore::default();
+    assert_due_indexes_forget_removed_protected_rows(&memory).await;
+    let sqlite = SqliteStore::connect_memory().await.unwrap();
+    assert_due_indexes_forget_removed_protected_rows(&sqlite).await;
+}
+
 async fn assert_peer_outbox_pages_are_bounded<S: DirectMessageStore>(store: &S) {
     let target = "a".repeat(64);
     let other = "b".repeat(64);
@@ -237,6 +390,36 @@ async fn direct_message_outbox_peer_page_uses_the_sqlite_cursor_index() {
             .any(|detail| detail.contains("idx_dm_outbox_peer_cursor")),
         "peer cursor query must use its index: {details:?}"
     );
+}
+
+#[tokio::test]
+async fn due_direct_message_outbox_uses_both_sqlite_lane_indexes() {
+    use sqlx::Row;
+    let store = SqliteStore::connect_memory().await.unwrap();
+    for (query, expected) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT dm_id FROM dm_outbox WHERE last_attempt_at IS NULL \
+             ORDER BY created_at, message_id, dm_id, peer_pubkey LIMIT 3",
+            "idx_dm_outbox_never_attempted",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT dm_id FROM dm_outbox WHERE last_attempt_at IS NOT NULL \
+             AND last_attempt_at <= 98 ORDER BY last_attempt_at, created_at, message_id, dm_id, peer_pubkey LIMIT 1",
+            "idx_dm_outbox_attempted_due",
+        ),
+    ] {
+        let details = sqlx::query(query)
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>();
+        assert!(
+            details.iter().any(|detail| detail.contains(expected)),
+            "{details:?}"
+        );
+    }
 }
 
 #[tokio::test]
