@@ -6,7 +6,7 @@ Preview tagは`vX.Y.Z-preview.N`。Windows NSIS／updater、Linux AppImage／Deb
 
 Windows x64のMicrosoft Store版は、このGitHub Release経路とは別に[Windows Microsoft Store配布](windows-microsoft-store.md)でMSIXを作る。Store版の更新はMicrosoft Store／Windowsへ委譲し、GitHub updaterや別のapp内Store updaterを動かさない。Store用identity、version、PFX、Partner Center候補をNSIS assetへ混在させない。
 
-version／tag／source SHAと公開の依頼範囲を先に確定する。実装PRの承認はRelease公開の承認と区別する。既存tag／公開assetの上書き、検証用一時鍵の転用はしない。
+version／tag／source SHA、対象成果物の有限な一覧、draft作成または公開までの依頼範囲と成功判定を先に確定する。実装PRの承認はRelease公開の承認と区別する。既存tag／公開assetの上書き、検証用一時鍵の転用はしない。
 
 GUIはWindows／Linuxとも既存`cargo xtask desktop-package`を使う。Ubuntu 22.04はLinux build基盤で、全Linux環境の保証ではない。確認済み範囲と延期環境は[AppImage作業記録](../progress/2026-09-05-issue-889-linux-appimage.md)、利用方法は[quickstart](./mvp-user-quickstart.md)と[Linux CLI](./linux-cli.md)を参照する。
 
@@ -27,7 +27,7 @@ npx pnpm@10.16.1 tauri signer generate --write-keys <secure-private-key-path>
 
 ## 検証
 
-path別の選定は[REFACTORING.md](../../REFACTORING.md#path別検証マトリクス)。既存必須CIは維持し、同じsource・code・依存・条件で成功した検証を理由なく重複しない。
+path別の選定は[REFACTORING.md](../../REFACTORING.md#path別検証マトリクス)。以下はcommandの参照一覧で、ローカルは変更関連の検証、全体はCIを使う。同じsource・code・依存・条件で成功した証拠は再利用する。公開する実成果物の署名・hash・完全性の確認は、その候補に結び付けて行う。
 
 ```bash
 cargo xtask release-check v0.1.8-preview.2

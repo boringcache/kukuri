@@ -2,7 +2,7 @@
 
 LP・Product Hunt・note・X 向けの素材を、撮影（Playwright）とレンダリング（Remotion）で再生成する手順。
 
-制作仕様の正本は [LP・告知素材の共通brief](../progress/2026-09-15-promo-lp-brief.md)。本書は実行手順だけを扱う。
+制作仕様の正本は [LP・告知素材の共通brief](../progress/2026-09-15-promo-lp-brief.md)。本書は実行手順だけを扱う。開始前に今回納品するcut・言語・媒体・形式と確認条件を固定し、該当成果物が揃えば終了する。未依頼の別媒体・別テーマや追加のpolishを増やさない。
 
 ## 前提
 
@@ -144,7 +144,7 @@ cd tools/promo && node scripts/import-still.mjs device-captures/s9-dome-teaser.j
 
 ### 撮影が途中で失敗したとき
 
-そのまま同じコマンドを再実行する。対象ディレクトリは作り直されるため、古い素材が新しい撮影として残ることはない。`video.webm` が空の場合は撮影が失敗として報告され、manifest は書かれない。
+失敗したcutと原因を確認してから、その対象に絞って再実行する。対象ディレクトリは作り直されるため、古い素材が新しい撮影として残ることはない。原因や前提が変わらないまま同じ失敗を繰り返さない。`video.webm` が空の場合は撮影が失敗として報告され、manifest は書かれない。
 
 ## 3. 編集を確認する（Remotion Studio）
 

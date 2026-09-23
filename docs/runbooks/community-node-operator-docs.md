@@ -80,7 +80,7 @@ node は、`COMMUNITY_NODE_RELATION_DISTANCE_OPTOUT_MIN_PROXIMITY` を `(0, 1]` 
 
 将来 Phase B capability が追加された場合、それを有効化するには config に
 `acknowledge_planned_capabilities: true` を明示する必要がある。現行3機能の有効化には不要だが、
-実体のない「運用中」開示を生成しないためフィールドと検証機構は維持する。
+実体のない「運用中」開示を生成しない。これは現行schemaの説明であり、未提供capabilityの実装や将来向けの汎用化を文書生成作業の完了条件へ追加しない。
 
 ## サブコマンド
 

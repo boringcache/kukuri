@@ -1,6 +1,6 @@
 # Community Node Production Rollout / Live Verification
 
-最終更新日: 2026-09-17
+最終更新日: 2026-09-24
 
 専用 `openai-moderation` を使用する配備は、[動画・OpenAI Moderationの運用](community-node-openai-moderation.md) の設定、tmpfs、合成readiness probe、構成世代更新も適用する。
 
@@ -21,6 +21,8 @@ domain、actor、image digest は汎用既定値ではない。Terraform の初�
 - health/readiness だけで完了とし、実投稿の media fetch・allow-only index・非残留を見落とす
 
 ## 0. 変数と記録先
+
+対象revision・node・capability、今回確認するtopic/object、観測期間・待機期限と成功条件を先に固定する。標準rolloutは更新した構成の起動・readiness・必要な公開面と実投稿の確認で終了する。障害復旧・secret rotation・過去migrationの個別確認は該当するものだけ選び、全分岐を毎回実行しない。期限を超えて判定できなければ未完了とし、対象や試行を増やし続けない。
 
 作業開始前に値を固定し、同じ値を作業記録へ残す。secret 値は記録しない。
 
@@ -295,8 +297,8 @@ sudo systemctl list-timers kukuri-readiness.timer --all
 - `permanent_blob_storage_disabled` がpass
 - worker running、supported public scopes opened、sync / ingest fresh
 - `post_scheduler` の processing / retry_wait / oldest_pending_at が実進捗と整合し、同じ値のまま停止していない
-- `scan_errors=0` かつ失敗からallowへのfallbackが0
-- Postgres truthとArcadeDB projectionが一致
+- 固定した無害な検証投稿が期待どおり処理され、失敗をallowへ変えるfallbackが0。過去の累積エラーや対象外peerの取得不能だけを今回の失敗としない
+- 固定した対象objectのPostgres truthとArcadeDB projectionが一致。全履歴の走査・再構築を待たない
 - relation analysis recent
 
 readinessの成功だけではlive media確認の代わりにならない。
@@ -450,7 +452,7 @@ channelを付けたことをAPIで照合する。Email channelはCloud Monitorin
 
 logのsecret非含有監査では、secret値を `grep "$SECRET" ...` のようにcommand lineへ載せてはならない。
 値は権限0700の一時directoryへ取得し、root-only scriptのprocess内で読み、出力はsecret IDごとの
-match countだけにする。journal、startup log、全稼働container logを対象にし、`matches=0` を記録する。
+match countだけにする。対象期間を固定したjournal、startup log、対象container logを調べ、`matches=0`を記録する。過去全ログへ範囲を拡張しない。
 
 誤ってsecret値をargvやjournalへ出した場合は、そこで監査を止める。対象secretをrotateし、該当する
 journal archive / container logを保持方針に従ってrotate・vacuumした後、新旧両方の値で0件を再確認する。
@@ -459,14 +461,13 @@ journal archive / container logを保持方針に従ってrotate・vacuumした�
 ### 5.5 `BlobText` 本文の再投影と検索確認
 
 本文取得処理を変更した `cn-indexer` のrolloutでは、ArcadeDBのvolumeやentryを手動削除しない。
-workerは起動直後とpoll interval（既定300秒）ごとにsupported scopeを全件見直しし、同一objectを
-冪等upsertする。新revision起動後に次を実施する。
+現行workerには起動時・周期的な全件見直しが残るが、これは設計原則上の未解消点である。全件処理の完了を運用上の成功条件にせず、対象objectと確認期限を固定して次を実施する。
 
-1. `cn-indexer` の `/v1/status` とlogで、起動後の全件見直しが完了し、対象scopeにbackoffが無いことを確認する。
+1. `cn-indexer` の `/v1/status` と対象期間のlogで、固定した投稿の処理が進み、対象scopeが停止していないことを確認する。期限内に到達しなければ取得不能・待機・処理失敗を区別して記録する。
 2. read-onlyのArcadeDB照会で、対象objectの `text` が空文字でなく、期待する本文を含むことを確認する。
 3. topic内検索とsupported set横断検索でASCII語と日本語語をそれぞれ検索し、期待object IDが返ることを確認する。
 4. 同じscopeの発見一覧にも同じobject IDが存在し、検索だけが欠落する不整合が無いことを確認する。
-5. 取得不能、hash不一致、byte数不一致、上限超過、非UTF-8の本文は真実源と投影から除外され、空本文entryとして残らないことを確認する。
+5. 本文拒否の挙動を変更する場合は、受入条件に含めた取得不能・不正本文等について、空本文entryや未検証本文を投影しないことを関連testで確認する。rolloutのたびに未依頼の異常系を追加しない。
 
 `BlobText` のraw bytesは `BlobService::fetch_blob_ephemeral` で取得し、検証とscanの間だけ保持する。
 Postgresは本文を持たず、ArcadeDBには検証・allow判定済みの検索用textだけを投影する。本文blobの非残留は
@@ -483,7 +484,7 @@ object IDが返ることを確認する。CLIでは `set_topic_gossip_enabled` �
 readinessの `truth=projection=0` はデータ整合性の結果であり、検索可能性の成功証拠ではない。
 本文取得失敗も `skipped_non_allow` に含まれるため、有害判定と同一視しない。本文が再取得不能な
 場合は索引を抑止する既存境界を維持し、供給元の接続・保持状態と最新logを照合する。
-再起動・再巡回後にも実結果と監視値を確認する。過去の検索・media検証で今回の実動を代替しない。
+今回の対象投稿について実結果と監視値を確認する。過去の成功を今回の対象の結果に読み替えず、全件再巡回や追加の再起動をその確認手段として強制しない。
 
 #1212以降、投稿処理は`COMMUNITY_NODE_INDEXER_MAX_CONCURRENT_POSTS`（既定4）で上限付き並列化される。
 復旧時は`/v1/status`の`post_scheduler`と`last_pass_duration_ms`を記録する。並列度を上げる前にVMの
@@ -493,74 +494,39 @@ readinessの鮮度やfail-closed判定を緩めない。remote blob取得は1件
 
 ### 5.6 verdict再利用とrisk signal集約の確認（#1050）
 
-`cn-indexer` は内容とscan構成が不変のsubjectについて保存済みverdictを再利用し、risk signalは
-鍵ごとに1行へ集約する。#1050以降のrolloutでは、migration適用後に次を確認する。
+`cn-indexer`は内容とscan構成が不変のsubjectについて保存済みverdictを再利用し、risk signalを鍵ごとに集約する。この経路を変更するrolloutで、事前に選んだ既存投稿と新規投稿だけを確認する。
 
-1. 事前（backup後、`cn-migrate` 前）に活性重複鍵の件数と、通報から参照される行が2件以上ある鍵の
-   件数を記録する。後者は0件であることを確認する（0件でない場合は2件目以降が失効扱いになる）。
+1. [重複集約migration](../../crates/cn-core/migrations/202609150002_risk_signal_dedupe.sql)を初めて導入する場合は、backup取得後・`cn-migrate`前に移行対象の活性重複鍵と通報から参照される行を確認する。同一鍵に参照行が2件以上ある場合、migrationは2件目以降を削除せず失効させるため、該当鍵が0件であることを確認する。0件でなければ適用を止め、既存通報への影響と実行可否を先に確定する。適用後はmigration記録、対象鍵の結果と `uq_cn_safety_risk_signals_active_key` の存在を確認する。この移行対象の事前確認を、適用済みの通常rolloutで毎回実行する全DB照合へ広げない。
+2. 対象の既存投稿を処理した際の `scans_reused` / `scans_fresh` と対象risk signalを照合し、同じ内容・構成で不要な再scanや追加行が発生しないことを確認する。
+3. 無害な新規投稿1件の到着から `indexed_at` までを、固定した待機期限で確認する。他投稿の再scanや全件passの終了を待たない。
+4. その操作の前後で `event_whole_scope_fallbacks` と対象期間のlogを比較する。scope全体へのfallbackを観測したら、件数非依存の達成とはせず未解消として記録する。
+5. peer更新を変更した場合は、対象peerの登録後の本文/media取得を同じ投稿で確認する。対象batchの失敗時はその原因を記録し、全peer・全scopeの強制再適用で成功扱いにしない。
 
-```bash
-PG_CONTAINER="$(sudo docker ps -qf name=cn-postgres)"
-sudo docker exec "$PG_CONTAINER" sh -lc \
-  "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -At -F '|' \
-   -c \"SELECT issuer_node_id, target, target_id, category, basis, count(*)
-       FROM cn_safety.risk_signals
-       WHERE appeal_status IS DISTINCT FROM 'cleared' AND expires_at IS NULL
-       GROUP BY 1,2,3,4,5 HAVING count(*) > 1;\""
-```
-
-2. `cn-migrate` 後に同じSQLが0行であること、`pg_indexes` に
-   `uq_cn_safety_risk_signals_active_key` があることを確認する。
-3. 新revisionの `/v1/status` で `scans_reused` が全件見直しごとに増え、`scans_fresh` が新規・変更
-   投稿の件数に留まることを確認する。`last_pass_duration_ms` が旧revisionの全件再scan時
-   （generalの13件で約3分）から大きく短くなっていること、変更通知後に
-   `last_event_ingest_duration_ms` と `last_index_lag_secs` が記録されることを確認する。
-4. 2巡以上経過後に `cn_safety.risk_signals` と `cn_safety.signed_moderation_events` の件数が
-   pass を跨いで増えていないことを確認する。
-5. benignな新規投稿を1件行い、replica到着から `cn_index.index_entries.indexed_at` までが
-   数十秒以内（当該投稿のscan 1回分 + debounce）であることを確認する。他投稿の再scanを待たない。
-6. #1065以降のrevisionでは、5の投稿の前後で `/v1/status` の `event_whole_scope_fallbacks` が
-   増えず、indexerのDEBUG logに `changed keys are not object-scoped` が出ないことを確認する。
-   増えた場合は `last_whole_scope_fallback_reason` の種別prefixを記録する（添付付き投稿の
-   `manifests/media` は仕様どおりscope全体へ倒れる）。
-7. #1154以降のrevisionでは、全件見直し後に起動・heartbeat登録したclientからblob本文または
-   media付き投稿を行い、次の全件見直しを待たずに索引されることを確認する。変更通知のdebounce
-   batchごとに `refreshed docs sync and media fetch seed peers from active bootstrap registrations` が1回
-   記録され、そのlogの `active` / `applied` に投稿元peer（およびoperator指定seed）が含まれることを
-   確認する。peer更新が失敗した場合はそのbatchを索引せず、次の通知または全件見直しで再試行する。
-
-`hold`（scan failure / provider unavailable / media取得不能）は再利用されず毎pass再試行される。
-`scans_fresh` が既存投稿数ぶん増え続ける場合は、対象verdictがholdのままか、policy / provider
-構成のfingerprintが起動ごとに変わっていないかをlogで確認する。
+現行の周期pass、holdの再試行、scope全体fallbackの実装が残っていることと、この有限な運用確認の成功は別である。保存された判定やcacheの再利用だけで、全件走査・保持量・失敗回数への依存が解消したと判断しない。
 
 ### 5.7 content advisory 付き索引と trust 不変の確認（#1054）
 
 nsfw / objectionable の suspected は `allow` + content advisory で索引され（ADR 0028 §8）、trust の
 評価値には寄与しない。`policy_version` が `2026-09-public-node-v3` になり scan 構成 fingerprint が
-変わるため、反映直後の 1 巡だけ全件再 scan（`scans_fresh` が既存件数ぶん増える）が起き、これが
-過去に除外された投稿の backfill になる。2 巡目以降は `scans_reused` に戻る。
+変わる構成では、現行実装が過去投稿を再scanし得る。これは当時の移行挙動であり、全件backfillを現在の設計目標やrolloutの終了条件にはしない。確認対象の投稿を先に固定する。
 
-1. `cn-migrate` 後に `cn_safety.scan_verdicts.advisory_labels` 列があり、既存行が `[]` であること。
+1. 該当migrationの適用記録と `cn_safety.scan_verdicts.advisory_labels` 列の存在を確認する。既適用の環境で全既存行が初期値であることを再要求しない。
 
-```bash
-sudo docker exec "$PG_CONTAINER" sh -lc \
-  "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -At -F '|' \
-   -c \"SELECT count(*) FILTER (WHERE advisory_labels <> '[]'::jsonb), count(*)
-       FROM cn_safety.scan_verdicts;\""
-```
-
-2. 初回 pass 完了後、nsfw 相当の benign 投稿（過去に `exclude` だったもの、または検証用の投稿）の
+2. 対象処理の完了後、nsfw 相当の benign 投稿（過去に `exclude` だったもの、または検証用の投稿）の
    verdict が `action = allow` / `policy_version = 2026-09-public-node-v3` で、`advisory_labels` に
    `category` / `label`（`adult` または `sensitive`）/ `signal_id` を持つこと。対応する
    `cn_index.index_entries` 行があること。
 
 ```bash
+OBJECT_ID="<64-hex-post-id>"
+case "$OBJECT_ID" in (*[!0-9a-f]*|'') echo 'invalid object id' >&2; exit 1;; esac
+test "${#OBJECT_ID}" -eq 64 || exit 1
+PG_CONTAINER="$(sudo docker ps -qf name=cn-postgres)"
 sudo docker exec "$PG_CONTAINER" sh -lc \
   "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -At -F '|' \
-   -c \"SELECT v.subject_id, v.action, v.policy_version, v.advisory_labels,
-              (SELECT count(*) FROM cn_index.index_entries e WHERE e.verdict_id = v.id)
+   -c \"SELECT v.subject_id, v.action, v.policy_version, v.advisory_labels
        FROM cn_safety.scan_verdicts v
-       WHERE v.advisory_labels <> '[]'::jsonb ORDER BY v.updated_at DESC LIMIT 5;\""
+       WHERE v.subject_kind = 'post' AND v.subject_id = '$OBJECT_ID';\""
 ```
 
 3. 認証・同意済み client から `GET /v1/index/search?scope_kind=public_topic&scope_id=<topic>&q=<語>`
@@ -570,7 +536,7 @@ sudo docker exec "$PG_CONTAINER" sh -lc \
    `raw_contribution = 0` で並び、`relative` / `trust` が反映前の値から動いていないこと。
    `GET /v1/trust/pull/{pubkey}` の basis にこれらが出ないこと。
 5. `cn_safety.risk_signals` で対象投稿の signal が 1 件（`severity = low`、`basis = classifier_score`）
-   であること。2 巡以上経過後も件数が増えないこと（§5.6 の 4 と同じ）。
+   であること。固定した対象投稿の再処理でも同じ鍵の行が増えないこと（§5.6）。
 6. `general_action` を `hold` / `exclude` へ厳格化した node では、同じ投稿が索引に入らないこと
    （既定の `label` 運用では確認不要）。
 
@@ -655,7 +621,7 @@ sudo docker run --rm --network community-node_default --env-file .env \
 - migration後にAPI / indexerがhealthyへ戻らない
 - required providerが継続的に失敗しreadinessが閉じたまま
 - truth/projection不一致が再投影待ち時間を超えて続く
-- benign contentが誤ってallow、またはunsafe contentが表出する安全性regression
+- 検証対象のbenign contentが誤って除外される、または拒否対象が表出するregression
 - startup再実行後も容量・証明書・networkの障害が解消しない
 
 rollbackでもtagではなく、直前に記録した4つのdigestを使う。apply前backupを保持し、DB schemaを

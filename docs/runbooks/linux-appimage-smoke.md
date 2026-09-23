@@ -2,7 +2,7 @@
 
 ## 状態と対象
 
-#889の開発・検証手順。生成機能と実機確認は実装中で、配布開始を意味しない。
+#889で整備した生成・検証手順と当時の確認記録。現行の公開状況は[Release手順](release.md)と対象Releaseの成果物一覧で確認し、過去の未完了記述を新たな作業条件にしない。
 検証済み範囲は [作業記録](../progress/2026-09-05-issue-889-linux-appimage.md)、署名とデータ分類は [ADR 0049](../adr/0049-linux-gui-cli-control-plane.md) を参照する。公開Releaseへの集約と利用者向け導線は#890が所有する。
 
 - 生成: Ubuntu 22.04、x86_64、repositoryのRust／pnpm／Tauri固定版。
