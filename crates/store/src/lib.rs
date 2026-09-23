@@ -22,6 +22,6 @@ pub use models::{
 pub use sqlite::{SqliteStore, StoreStartupError};
 pub use traits::{
     BlobCacheStore, ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
-    NotificationStore, ObjectProjectionStore, PostWithdrawalStore, ProjectionStore,
-    ReactionBookmarkStore, SocialProjectionStore, Store,
+    NOTIFICATION_DISPATCH_PAGE_SIZE, NotificationStore, ObjectProjectionStore, PostWithdrawalStore,
+    ProjectionStore, ReactionBookmarkStore, SocialProjectionStore, Store,
 };

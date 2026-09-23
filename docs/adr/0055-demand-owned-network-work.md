@@ -275,6 +275,12 @@ owner要求として登録する。OS通知dispatch、UI描画、音声/videoの
 これらの既存timerを維持する場合も、新たなnetwork workはownerへ渡す。
 CN indexerは別processなので独立したownerを持つが、同じ受付・停止・差分の契約を使う。
 
+OS通知dispatchはlocal inboxの全件読取りを行わない。新規INSERTにだけ単調な永続sequenceを付け、
+64件の索引ページを処理してからcursorを進める。既存rowはmigration時にsequenceを付けず、
+初回起動・account切替・restoreでは現在のheadをbaselineとして過去toastを抑える。
+同一`received_at`の件数に依存するID集合は保存しない。ページ間でaccount切替guardを解放し、
+quiet/read/self/種類設定と成人向けpreview gateを従来どおりOS表示の前に適用する。
+
 ## 7. 状態遷移と検証
 
 以下のtest名は追加予定のcontract識別子であり、成功済みの証拠ではない。

@@ -29,7 +29,7 @@ intervalは現行値であり新設計の推奨値ではない。
 | N13 `run_community_node_session_maintenance_once/start_community_node_session_scheduler`、`cn-runtime/scheduler_support.rs` | runtime起動、15秒、設定node全体 | `MaintenanceTasks`がjobごとのfutureを所有、Skip、shutdown停止 | 所有は既存。node全体再列挙とstatusからselfheal。P3due索引 | NW-6、mixed認証/同意 |
 | N14 `maybe_self_heal_community_node_connectivity/repair_community_node_connectivity`、`cn-runtime/reconnect_support.rs` | sync status不健全、期限付きbackoff | reconnect成功でreset、seed/購読再適用へ連鎖 | 全active/全ready nodeへ波及。P3差分と観測 | NW-5/6/7 |
 | N15 `observe_sync_status_once/start_sync_status_observer`、`runtime/sync_status_observer.rs` | 3秒、全体snapshot | runtime shutdown。変更snapshotだけemit | 全peers/topic/nodeの再集計。P3増減集計 | NW-1/6 |
-| N16 `commands/background_notifications.rs::spawn` とdispatch | 受信event + 60秒fallback、trayでも継続 | runtime/アプリ寿命。通知一覧読取り→OS dispatch | 通知全件、同timestampのID集合に上限なし。P3cursor | NW-8、OS設定/二重toast |
+| N16 `commands/background_notifications.rs::spawn` とdispatch | 受信event + 60秒fallback、trayでも継続 | runtime/アプリ寿命。新規通知sequenceの64件ページ→OS dispatch | P3で全件読取りと同timestamp ID集合を撤去。各ページ後にaccount切替guardを解放し、local inbox/UI一覧は別経路 | NW-8、OS設定/二重toast |
 | N17 `cn-indexer/src/participant.rs/scheduler.rs` | scope設定、docs/hint event、再評価 | post job台帳1,024、lease dropでcancel記録 | 現行の有界schedulerを再利用。scope境界/差分はP4 | CN-AC-1〜4、NW-9/10 |
 | N18 UI `shell/data/timelineMerge.ts`、`slices/timeline.ts`、`viewModels/useTimelineViewModels.ts` | refresh/event/遡り/列切替 | UI observer寿命、再取得をapp-apiへ渡す | 累積窓のmap/merge/setState・cacheをP3で索引/窓化 | UI-AC群、100/1k/10k、focus/scroll/draft |
 | N19 `join_live_session/stop_live_presence_task`、`live.rs/service/live_game_support.rs` | 参加中liveごと10秒、TTL30秒 | ended判定またはleave/shutdownでtask停止、hint送信とlocal presence更新 | 参加数に比例。P3の参加leaseへ登録、hiddenでは停止しない | NW-4/7、live終了契約 |
@@ -223,3 +223,13 @@ N44の全callerは `rg -n 'prepare_display_fetch' crates`、型の実装とstack
 | N52 | QUIC connect / blob転送 → 型付き欠損・stream応答・local故障 → health/cache | blob ALPNだけ。health/rate各1,024件、稼働attempt pinと世代照合、request window満杯は延期。型付き欠損/ERR_INTERNAL(3)/local errorを接続不良へ混ぜない | PEER-1/3、実Iroh欠損3mode・local store故障、2,048履歴/1,024 pin/rate tests |
 
 N50〜52のsensitive sinkは選択された既存`PeerAddrBook`内のendpointへのblob hash送信と一時観測cache。新候補はsource台帳に存在するIDへ限定し、scope/capabilityの検証をhealthや直近成功で代替しない。旧`merged_peers`と`available_peer_ids`、source snapshot、SDK内部のaddress/watch集合はなお全件経路であり、P3残作業とする。
+
+## N16のlocal OS通知dispatch差分（P3）
+
+| ID | 入口 → helper → sink | guard / 停止 | 対応contract |
+| --- | --- | --- | --- |
+| N56 | `put_notification_if_absent` → SQLite insert trigger / memory index → 単調dispatch sequence | duplicateは番号を消費しない。既存rowはmigration時NULLのまま、64件固定の索引ページのみ読む。再起動後もheadを保持 | `dispatch_pages_follow_insertion_order_for_tied_timestamps`、`dispatch_migration_excludes_existing_inbox_rows_without_rewriting_them` |
+| N57 | runtime通知event / 60秒fallback → Tauri `drain_pending/poll_once` → OS toast | 初回/account切替/restoreは現在headだけをbaselineに保存。1ページ後にaccount guardを解放、cursorはscalarで永続化。quiet/read/self/種類設定・成人向けpreview gateを通る通知のみOS送信 | `dispatch_cursor_storage_does_not_grow_with_same_timestamp_history`、`cursor_tracks_insertion_order_without_timestamp_tie_state` |
+
+N56の保存sinkは通知rowと同一INSERT transaction内のsequence/索引だけで、本文や既存inboxを複製しない。
+N57はlocal OS通知のみを送る。新しいnetwork I/O、private参照の外部送信、通知の履歴backfillは行わない。

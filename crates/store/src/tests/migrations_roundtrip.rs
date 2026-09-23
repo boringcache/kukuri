@@ -23,9 +23,9 @@
 //!   on_update/on_delete/match)を id・seq 順(決定的)で各テーブル直下に含める
 //!   (現行スキーマの FK は 20260310 up.sql の topic_objects / object_threads →
 //!   envelopes の 2 本のみ)。
-//! - CHECK 制約・VIEW・TRIGGER は現行スキーマに 1 つも存在しないため snapshot の
-//!   対象外(導入する場合はこの正規化への追加が必要)。
-//! - partial index の WHERE 句(notifications に 3 本)は pragma で取れないため、
+//! - TRIGGER は sqlite_master.sql の空白正規化テキストを固定する。
+//!   CHECK 制約・VIEW は現行スキーマに存在しないため snapshot の対象外。
+//! - partial index の WHERE 句(notifications に 4 本)は pragma で取れないため、
 //!   index に限り sqlite_master.sql の空白正規化テキストを併用する。
 //! - テーブル・index は名前順ソート。_sqlx_migrations はスキーマ比較から除外し
 //!   (undo 由来 DB と materialize 由来 DB で installed_on が異なるため)、
@@ -40,7 +40,7 @@ use super::migrations::materialize_sqlite_fixture;
 
 /// 全世代の up migration version(migrations/ ディレクトリのファイル名から
 /// 観測した生リテラル、昇順)。世代の追加・削除はここと golden の両方に現れる。
-const EXPECTED_VERSIONS: [i64; 30] = [
+const EXPECTED_VERSIONS: [i64; 31] = [
     20260310000000,
     20260312000000,
     20260315000000,
@@ -71,6 +71,7 @@ const EXPECTED_VERSIONS: [i64; 30] = [
     20260921030000,
     20260922000000,
     20260922010000,
+    20260923000000,
 ];
 
 /// 各世代 k について「全適用 → undo(V[k-1]) → 中間世代スキーマと一致 →
@@ -87,7 +88,7 @@ async fn per_generation_stepwise_round_trip() {
     let versions = migrator_up_versions();
     assert_eq!(
         versions, EXPECTED_VERSIONS,
-        "embedded store migration generations drifted from the observed 30 versions"
+        "embedded store migration generations drifted from the observed 31 versions"
     );
 
     let full_snapshot = schema_snapshot(store.pool())
@@ -183,7 +184,7 @@ async fn fully_migrated_schema_matches_golden() {
     assert_eq!(
         migrator_up_versions(),
         EXPECTED_VERSIONS,
-        "embedded store migration generations drifted from the observed 30 versions"
+        "embedded store migration generations drifted from the observed 31 versions"
     );
     assert_eq!(
         applied_migration_versions(store.pool())
@@ -251,6 +252,7 @@ async fn applied_migration_versions(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<V
 /// - 続けて全テーブルの index を index 名順に、pragma index_list のメタ
 ///   (unique/origin/partial)+ pragma index_info のキー列(seqno 順)+
 ///   sqlite_master.sql の空白正規化テキスト(自動 index は None)を 1 行ずつ。
+/// - trigger は名前順に、対象tableと空白正規化した定義を1行ずつ。
 /// - _sqlx_migrations と sqlite 内部オブジェクトは除外。
 async fn schema_snapshot(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<String> {
     let table_names = sqlx::query_scalar::<_, String>(
@@ -352,6 +354,21 @@ async fn schema_snapshot(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<String> {
         let normalized_sql =
             raw_sql.map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" "));
         snapshot.push_str(&format!("  sql={normalized_sql:?}\n"));
+    }
+
+    let triggers = sqlx::query(
+        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+    for trigger in triggers {
+        let name: String = trigger.get("name");
+        let table: String = trigger.get("tbl_name");
+        let sql: String = trigger.get("sql");
+        let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        snapshot.push_str(&format!(
+            "trigger {name} table={table} sql={normalized:?}\n"
+        ));
     }
 
     Ok(snapshot)
