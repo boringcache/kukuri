@@ -64,6 +64,9 @@ struct HintTopicState {
     // 現状の読み手は cfg(test) のアクセサのみ(診断 UI への露出は契約変更のため別 WP)。
     #[cfg_attr(not(test), allow(dead_code))]
     invalid_hint_count: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+    closed_notify: Arc<Notify>,
+    update_warmup_task: Option<JoinHandle<()>>,
     _receiver_task: JoinHandle<()>,
 }
 
@@ -86,6 +89,8 @@ struct TopicWarmupCoordinator {
     permits: Arc<Semaphore>,
     in_flight_peers: Arc<StdRwLock<BTreeSet<String>>>,
     warmup_cursor: Arc<AtomicU64>,
+    #[cfg(test)]
+    initial_warmup_tasks: Arc<AtomicUsize>,
 }
 
 impl Default for TopicWarmupCoordinator {
@@ -94,6 +99,8 @@ impl Default for TopicWarmupCoordinator {
             permits: Arc::new(Semaphore::new(2)),
             in_flight_peers: Arc::new(StdRwLock::new(BTreeSet::new())),
             warmup_cursor: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            initial_warmup_tasks: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -117,6 +124,9 @@ pub struct IrohGossipTransport {
     receive_offer_topic: Mutex<Option<ReceiveOfferTopicState>>,
     outbound_offer_holds: Mutex<VecDeque<OutboundOfferHold>>,
     offer_closed: AtomicBool,
+    hint_closed: AtomicBool,
+    #[cfg(test)]
+    hint_existing_snapshot_observed: Arc<Notify>,
     offer_shutdown_notify: Notify,
     #[cfg(test)]
     offer_receiver_tasks: Arc<AtomicUsize>,
@@ -152,10 +162,16 @@ pub(crate) use topics::{initial_topic_join_timeout, topic_to_gossip_id};
 impl Drop for IrohGossipTransport {
     fn drop(&mut self) {
         self.offer_closed.store(true, Ordering::Release);
+        self.hint_closed.store(true, Ordering::Release);
         self.offer_shutdown_notify.notify_waiters();
         if let Ok(mut topics) = self.topic_states.try_lock() {
             for (_, state) in topics.drain() {
+                state.closed.store(true, Ordering::Release);
+                state.closed_notify.notify_waiters();
                 state._receiver_task.abort();
+                if let Some(update) = state.update_warmup_task {
+                    update.abort();
+                }
             }
         }
         if let Ok(mut subscribed_topics) = self.subscribed_topics.try_lock() {

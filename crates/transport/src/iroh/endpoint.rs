@@ -81,6 +81,9 @@ impl IrohGossipTransport {
             receive_offer_topic: Mutex::new(None),
             outbound_offer_holds: Mutex::new(VecDeque::new()),
             offer_closed: AtomicBool::new(false),
+            hint_closed: AtomicBool::new(false),
+            #[cfg(test)]
+            hint_existing_snapshot_observed: Arc::new(Notify::new()),
             offer_shutdown_notify: Notify::new(),
             #[cfg(test)]
             offer_receiver_tasks: Arc::new(AtomicUsize::new(0)),
@@ -130,6 +133,9 @@ impl IrohGossipTransport {
             receive_offer_topic: Mutex::new(None),
             outbound_offer_holds: Mutex::new(VecDeque::new()),
             offer_closed: AtomicBool::new(false),
+            hint_closed: AtomicBool::new(false),
+            #[cfg(test)]
+            hint_existing_snapshot_observed: Arc::new(Notify::new()),
             offer_shutdown_notify: Notify::new(),
             #[cfg(test)]
             offer_receiver_tasks: Arc::new(AtomicUsize::new(0)),
