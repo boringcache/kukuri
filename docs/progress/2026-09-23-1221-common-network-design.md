@@ -351,3 +351,8 @@ Postgres+Valkeyを使う既存CN APIのfresh candidateとprivacyの2件も、int
 新bucketがTTLなしで残るblockerを発見した。SADDとEXPIREをRedis pipelineのatomic transactionへ
 統合し、`MULTI→SADD→EXPIRE→EXEC`を固定するcontractと正常時のTTL testで確認する。
 旧headの監査FAILはこのdeltaがPASSするまでmerge根拠に使わない。
+
+修正headのCN CIでは新Valkey実接続test3件が同時に`timed out`でFAILした。composeのValkeyは
+healthyで、失敗は約500ms後。pin済みredis clientの既定response timeoutは500msで、
+局所の単独実行では3件とも成功していた。rendezvous専用接続のconnect/response timeoutを
+2秒に明示し、無制限待機や再試行taskを増やさず、負荷時の関連testを再確認する。

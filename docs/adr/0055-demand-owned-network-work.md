@@ -132,6 +132,7 @@ CN使用時は自分のaccount routeと短期送信先routeをtopic rendezvous�
 bindingを確認する。rendezvous応答自体をaccountの証明にしない。設定nodeのauth/consentを維持する。
 CNのtopic presenceは15秒の時間窓を直近4個だけ候補探索し、topic-peerを45秒、窓keyを60秒で失効させる。
 窓の時刻は共有Valkeyの`TIME`を使い、複数CN API hostの時計差を候補漏れへ持ち込まない。
+Valkeyへの接続・応答は各2秒で打ち切り、失敗で全件走査や即時retryへ拡大しない。
 各窓から最大16件を標本し、topic所属期限とpeer情報を最大64件だけ検証して最大8件を返す。
 Redis `SRANDMEMBER`の正のcountは[返却数に比例する操作](https://redis.io/docs/latest/commands/srandmember/)であり、
 topic全参加者の`SMEMBERS`は使わない。候補の完全列挙や応答だけによるaccount認証は行わない。

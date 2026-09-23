@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use redis::AsyncCommands;
@@ -11,6 +12,7 @@ const RENDEZVOUS_BUCKET_SECONDS: u64 = 15;
 const RENDEZVOUS_BUCKETS_TO_READ: u64 = 4;
 const RENDEZVOUS_CANDIDATE_LIMIT: usize = 8;
 const RENDEZVOUS_SAMPLE_PER_BUCKET: usize = 16;
+const RENDEZVOUS_REDIS_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct TopicRendezvousStore {
@@ -75,7 +77,7 @@ impl TopicRendezvousStore {
         active_topics.extend(joins.iter().cloned());
         active_topics.extend(refreshes.iter().cloned());
 
-        let mut connection = self.client.get_multiplexed_async_connection().await?;
+        let mut connection = self.connection().await?;
         // A shared Valkey clock keeps bucket selection consistent across CN API replicas.
         let now_seconds = match now_override {
             Some(now) => now,
@@ -215,6 +217,16 @@ impl TopicRendezvousStore {
     fn peer_key(&self, endpoint_id: &str) -> String {
         format!("{}:peer:{endpoint_id}", self.key_prefix)
     }
+
+    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection> {
+        let config = redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(Some(RENDEZVOUS_REDIS_TIMEOUT))
+            .set_response_timeout(Some(RENDEZVOUS_REDIS_TIMEOUT));
+        Ok(self
+            .client
+            .get_multiplexed_async_connection_with_config(&config)
+            .await?)
+    }
 }
 
 fn normalize_key_prefix(value: &str) -> Result<String> {
@@ -266,6 +278,8 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static REDIS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn request(endpoint_id: &str, topic: &str) -> TopicRendezvousHeartbeat {
         TopicRendezvousHeartbeat {
             endpoint_id: endpoint_id.to_string(),
@@ -314,6 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn rendezvous_candidates_do_not_grow_with_topic_membership() -> Result<()> {
+        let _redis = REDIS_TEST_LOCK.lock().await;
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let store = test_store(nonce)?;
         let topic = "a".repeat(64);
@@ -340,6 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_topic_cannot_extend_an_expired_membership() -> Result<()> {
+        let _redis = REDIS_TEST_LOCK.lock().await;
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let store = test_store(nonce)?;
         let older_topic = "b".repeat(64);
@@ -388,13 +404,14 @@ mod tests {
 
     #[tokio::test]
     async fn rendezvous_bucket_and_membership_have_finite_ttls() -> Result<()> {
+        let _redis = REDIS_TEST_LOCK.lock().await;
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let store = test_store(nonce)?;
         let topic = "d".repeat(64);
         store
             .heartbeat_at(request("peer-a", &topic), &[], 1_000)
             .await?;
-        let mut connection = store.client.get_multiplexed_async_connection().await?;
+        let mut connection = store.connection().await?;
         let bucket_ttl: i64 = connection
             .ttl(store.topic_bucket_key(&topic, 1_000 / RENDEZVOUS_BUCKET_SECONDS))
             .await?;
