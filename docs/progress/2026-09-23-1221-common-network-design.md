@@ -305,3 +305,7 @@ WindowsのTauri test executableは`STATUS_ENTRYPOINT_NOT_FOUND`で起動でき�
 WSL/Linuxで当該`background_notifications` 8件が成功した。
 Tauri clippyは既存の3種類のlint（`drop_non_drop`、`collapsible_if`、`err_expect`）だけを
 明示的に除外して成功した。全体とslowはPR/CIで確認する。
+
+初回PR headの全体Rust CIで、別のmigration契約`migrations.rs`が世代数を30に固定していてFAILした。
+新世代のup/downが揃う判定と全replay後の件数を31へ更新し、関連migration 12件を局所で確認した。
+`migrations_roundtrip.rs`の31世代/goldenと合わせ、固定値の両入口を更新してからCIを再実行する。
