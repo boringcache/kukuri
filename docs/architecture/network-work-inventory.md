@@ -76,7 +76,7 @@ iroh-docs 0.101.0（pin `e7233d14853cb4db9966e30050bac1e689cdeec8`）。
 | U07 | gossip hyparviewの既定active viewは5、passive viewは30、topicごとの有界集合 | per-topic上限を既存成果として再利用。全topicの合計/共有接続はowner予算と整合させる |
 | U08 | iroh-docs `on_replica_event -> start_download` はremote entryから独自downloader/task/hash provider台帳へ進む。app-apiのblob受付を通らない | docsのdownload policyとownerへの取得委譲を設計する。neighbor content-ready経路と未実行hash台帳も確認し、app-api側8枠だけで全取得有界としない |
 | U09 | iroh-gossipの既定message上限は4,096bytes。private replica IDの最大形はこれを超え得る | 最大長locatorをhintへ丸ごと入れない。固定サイズの暗号化参照から、署名provider/epoch制限付きで有界payloadを取得するwireを先に検証 |
-| U10 | 公開 `actor::SyncHandle` と `net::{connect_and_sync,handle_connection}` はstorage actor、接続先1件、namespace受信callbackを組み合わせられる | `explicit_docs_sync_ignores_cached_peer_and_rejects_other_namespace` / `explicit_docs_sync_cancel_closes_remote_connection` が成功。選択peer/受信拒否/cancelのための依存forkは不要。本実装の全caller移行、通知変換、内部address台帳は別途未完了 |
+| U10 | 公開 `actor::SyncHandle` と `net::{connect_and_sync,handle_connection}` はstorage actor、接続先1件、namespace受信callbackを組み合わせられる | `explicit_docs_sync_ignores_cached_peer_and_rejects_other_namespace` / `explicit_docs_sync_cancel_closes_remote_connection` が成功。production nodeも高水準`DocsApi`と同一Engineの`SyncHandle`を保持し、memory/persistentのstore layoutと再openを維持する。選択peer/受信拒否/cancelのための依存forkは不要。全caller移行、通知変換、内部address台帳は未完了 |
 
 ### U06/U07の回収漏れ修正
 

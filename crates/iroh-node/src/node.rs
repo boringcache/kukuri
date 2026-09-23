@@ -12,7 +12,10 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher};
 use iroh_blobs::api::Store as BlobStore;
 use iroh_blobs::store::{fs::options::Options as BlobStoreOptions, mem::MemStore};
+use iroh_docs::actor::SyncHandle;
 use iroh_docs::api::DocsApi;
+use iroh_docs::engine::{DefaultAuthorStorage, Engine};
+use iroh_docs::store::Store as DocsStore;
 use iroh_gossip::net::Gossip;
 use kukuri_transport::{
     ConnectMode, DhtDiscoveryOptions, RECEIVE_BINDING_ALPN, ReceiveBindingSlot,
@@ -47,12 +50,38 @@ async fn spawn_docs(
     endpoint: Endpoint,
     blobs: BlobStore,
     gossip: Gossip,
-) -> Result<iroh_docs::protocol::Docs> {
-    let docs_builder = match root {
-        Some(path) => iroh_docs::protocol::Docs::persistent(path.to_path_buf()),
-        None => iroh_docs::protocol::Docs::memory(),
+) -> Result<SpawnedDocs> {
+    // Keep the high-level API and its persistent store layout while retaining
+    // the public SyncHandle for demand-owned, selected-peer sessions. The
+    // high-level Docs::Builder discards this handle after creating the Engine.
+    let (replica_store, author_store) = match root {
+        Some(path) => (
+            DocsStore::persistent(path.join(DOCS_STORE_FILE_NAME))?,
+            DefaultAuthorStorage::Persistent(path.join(DEFAULT_AUTHOR_FILE_NAME)),
+        ),
+        None => (DocsStore::memory(), DefaultAuthorStorage::Mem),
     };
-    docs_builder.spawn(endpoint, blobs, gossip).await
+    let downloader = blobs.downloader(&endpoint);
+    let engine = Engine::spawn(
+        endpoint,
+        gossip,
+        replica_store,
+        blobs,
+        downloader,
+        author_store,
+        None,
+    )
+    .await?;
+    let sync = engine.sync.clone();
+    Ok(SpawnedDocs {
+        protocol: iroh_docs::protocol::Docs::new(engine),
+        sync,
+    })
+}
+
+struct SpawnedDocs {
+    protocol: iroh_docs::protocol::Docs,
+    sync: SyncHandle,
 }
 
 async fn recover_persistent_docs(
@@ -61,7 +90,7 @@ async fn recover_persistent_docs(
     blobs: BlobStore,
     gossip: Gossip,
     original_error: anyhow::Error,
-) -> Result<iroh_docs::protocol::Docs> {
+) -> Result<SpawnedDocs> {
     let recovery_dir = move_corrupt_docs_store(root)
         .with_context(|| format!("failed to recover iroh docs store at {}", root.display()))?;
     warn!(
@@ -145,6 +174,7 @@ pub struct IrohDocsNode {
     relay_urls: Arc<StdRwLock<Vec<RelayUrl>>>,
     router: Arc<Router>,
     docs: DocsApi,
+    docs_sync: SyncHandle,
     blobs: BlobStore,
     fetch_peer_health: Arc<kukuri_transport::BlobPeerHealth>,
     receive_binding: ReceiveBindingSlot,
@@ -349,7 +379,7 @@ impl IrohDocsNode {
                 iroh_blobs::ALPN,
                 iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
-            .accept(iroh_docs::ALPN, docs.clone())
+            .accept(iroh_docs::ALPN, docs.protocol.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(RECEIVE_BINDING_ALPN, receive_binding.clone())
             .spawn();
@@ -360,7 +390,8 @@ impl IrohDocsNode {
             discovery,
             relay_urls,
             router: Arc::new(router),
-            docs: docs.api().clone(),
+            docs: docs.protocol.api().clone(),
+            docs_sync: docs.sync,
             blobs,
             fetch_peer_health: Arc::new(kukuri_transport::BlobPeerHealth::default()),
             receive_binding,
@@ -376,6 +407,12 @@ impl IrohDocsNode {
 
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// The same store used by the production DocsApi; selected-peer sync must
+    /// not create a second in-memory or persistent docs store.
+    pub fn docs_sync_handle(&self) -> SyncHandle {
+        self.docs_sync.clone()
     }
 
     pub fn gossip(&self) -> &Gossip {
