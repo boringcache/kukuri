@@ -496,7 +496,7 @@ readinessの鮮度やfail-closed判定を緩めない。remote blob取得は1件
 
 `cn-indexer`は内容とscan構成が不変のsubjectについて保存済みverdictを再利用し、risk signalを鍵ごとに集約する。この経路を変更するrolloutで、事前に選んだ既存投稿と新規投稿だけを確認する。
 
-1. 該当migrationを初めて導入する場合は適用記録と `uq_cn_safety_risk_signals_active_key` の存在を確認する。適用済みmigrationの全DB照合を毎rolloutで繰り返さない。
+1. [重複集約migration](../../crates/cn-core/migrations/202609150002_risk_signal_dedupe.sql)を初めて導入する場合は、backup取得後・`cn-migrate`前に移行対象の活性重複鍵と通報から参照される行を確認する。同一鍵に参照行が2件以上ある場合、migrationは2件目以降を削除せず失効させるため、該当鍵が0件であることを確認する。0件でなければ適用を止め、既存通報への影響と実行可否を先に確定する。適用後はmigration記録、対象鍵の結果と `uq_cn_safety_risk_signals_active_key` の存在を確認する。この移行対象の事前確認を、適用済みの通常rolloutで毎回実行する全DB照合へ広げない。
 2. 対象の既存投稿を処理した際の `scans_reused` / `scans_fresh` と対象risk signalを照合し、同じ内容・構成で不要な再scanや追加行が発生しないことを確認する。
 3. 無害な新規投稿1件の到着から `indexed_at` までを、固定した待機期限で確認する。他投稿の再scanや全件passの終了を待たない。
 4. その操作の前後で `event_whole_scope_fallbacks` と対象期間のlogを比較する。scope全体へのfallbackを観測したら、件数非依存の達成とはせず未解消として記録する。
