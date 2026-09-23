@@ -93,6 +93,7 @@ head `4d96499f`の独立監査PASS、全13CI成功、対象8pathの一致を確�
 
 `Doc::start_sync`の調査だけから上流API修正が必要と判断した草案を修正した。
 pin済みiroh-docsの公開`SyncHandle`と`net`のAPIで、storage actorと同期1回のfutureを分けられる。
+Production nodeのdocs起動を公開`Engine::spawn`と`Docs::new`の組合せにし、同じ`DocsApi`が使用する`SyncHandle`を保持する。memory/persistentで従来のstore/authorファイルを使い、再open testで同一namespaceを確認した。これは同期先を選ぶための入口であり、既存`Doc::start_sync`とnative gossip/downloaderはまだ稼働している。受信対象・LocalOnly・private失効を維持した切替testなしに旧経路を撤去しない。
 
 `cargo test -p kukuri-iroh-node --lib explicit_docs_sync` の実Iroh 2件が成功した。
 
