@@ -177,9 +177,25 @@ impl AppService {
         if dm_id != expected_dm_id {
             return Ok(false);
         }
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let Some(frame_bytes) = blob_service.fetch_blob(frame_hash).await? else {
             return Ok(false);
         };
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let frame: DirectMessageFrameV1 = serde_json::from_slice(frame_bytes.as_slice())
             .context("failed to decode direct message frame blob")?;
         if frame.message_id != message_id || frame.dm_id != dm_id {
@@ -235,6 +251,14 @@ impl AppService {
             payload.attachment_manifest.as_ref(),
         )
         .await?;
+        if !projection_store
+            .get_author_relationship(local_author_pubkey, peer_pubkey)
+            .await?
+            .as_ref()
+            .is_some_and(|relationship| relationship.mutual)
+        {
+            return Ok(false);
+        }
         let message_row = DirectMessageMessageRow {
             dm_id: dm_id.to_string(),
             message_id: message_id.to_string(),

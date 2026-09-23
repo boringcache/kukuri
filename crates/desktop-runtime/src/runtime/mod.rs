@@ -433,6 +433,9 @@ impl DesktopRuntime {
             load_content_display_settings(&db_path).adult_content_enabled,
         );
         app_service.warm_social_graph().await?;
+        if let Err(error) = app_service.start_account_receive_offers().await {
+            tracing::warn!(%error, "account receive route could not start; legacy receivers remain active");
+        }
         app_service.resume_direct_message_state().await?;
 
         let (event_sender, _) = tokio::sync::broadcast::channel(64);
