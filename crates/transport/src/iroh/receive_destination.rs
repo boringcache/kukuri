@@ -6,7 +6,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use tokio::time::Instant;
 
 use crate::receive_binding::fetch_receive_endpoint_binding;
-use kukuri_core::receive_route_for_account;
+use kukuri_core::{ReceiveEndpointLocatorV1, receive_route_for_account};
 
 const MAX_DESTINATION_ACCOUNTS: usize = 1_024;
 const CANDIDATES_PER_LOOKUP: usize = 4;
@@ -277,6 +277,60 @@ fn next_peer(
 }
 
 impl IrohGossipTransport {
+    pub(super) async fn resolve_receive_locator_page_impl(
+        &self,
+        recipient: &Pubkey,
+        locators: Vec<ReceiveEndpointLocatorV1>,
+    ) -> Result<Option<EndpointAddr>> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(
+            locators.len() <= CANDIDATES_PER_LOOKUP,
+            "too many account receive locators"
+        );
+        let mut candidates = Vec::with_capacity(locators.len());
+        let mut seen = BTreeSet::new();
+        for locator in locators {
+            locator.verify_signature_for(recipient)?;
+            let endpoint_id = locator.endpoint_id.parse()?;
+            if endpoint_id != self.endpoint.id() && seen.insert(endpoint_id) {
+                candidates.push(EndpointAddr::new(endpoint_id));
+            }
+        }
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        // A busy transport defers the outbox row. It does not queue one task
+        // per locator or widen the page when candidates fail.
+        let Ok(_permit) = self.receive_destination_probes.try_acquire() else {
+            return Ok(None);
+        };
+        let shutdown = self.offer_shutdown_notify.notified();
+        tokio::pin!(shutdown);
+        shutdown.as_mut().enable();
+        for candidate in candidates {
+            if self.offer_closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let result = tokio::select! {
+                _ = &mut shutdown => return Ok(None),
+                result = fetch_receive_endpoint_binding(
+                    &self.endpoint,
+                    candidate.clone(),
+                    recipient,
+                    Instant::now() + BINDING_PROBE_TIMEOUT,
+                ) => result,
+            };
+            if let Ok(binding) = result
+                && binding.endpoint_id() == candidate.id.to_string()
+                && !self.offer_closed.load(Ordering::Acquire)
+            {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn offer_receive_candidates_impl(
         &self,
         source: &str,

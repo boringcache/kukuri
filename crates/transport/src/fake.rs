@@ -416,6 +416,31 @@ impl HintTransport for FakeTransport {
         }))
     }
 
+    async fn resolve_receive_locator_page(
+        &self,
+        recipient: &Pubkey,
+        locators: Vec<kukuri_core::ReceiveEndpointLocatorV1>,
+    ) -> Result<Option<EndpointAddr>> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(locators.len() <= 4, "too many fake receive locators");
+        let mut candidates = Vec::with_capacity(locators.len());
+        for locator in locators {
+            locator.verify_signature_for(recipient)?;
+            let endpoint_id: iroh::EndpointId = locator.endpoint_id.parse()?;
+            candidates.push(endpoint_id);
+        }
+        let verified = self.network.verified_receive_providers.lock().await;
+        for endpoint_id in candidates {
+            if verified
+                .get(recipient.as_str())
+                .is_some_and(|ids| ids.contains(&endpoint_id.to_string()))
+            {
+                return Ok(Some(EndpointAddr::new(endpoint_id)));
+            }
+        }
+        Ok(None)
+    }
+
     async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
         Ok(ReceiveCandidateFence {
             transport_instance: 0,
@@ -545,12 +570,42 @@ impl HintTransport for FakeTransport {
 mod tests {
     use super::*;
     use kukuri_core::{
-        BlobHash, KukuriKeys, ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer,
+        BlobHash, KukuriKeys, ReceiveEndpointLocatorV1, ReceiveOfferReferenceV1,
+        ReceiveOfferScopeV1, seal_receive_offer,
     };
 
     use crate::test_support::{
         HintRoundtripParticipant, format_peer_snapshot, wait_for_hint_roundtrip,
     };
+
+    #[tokio::test]
+    async fn fake_locator_page_rejects_a_later_invalid_claim_before_returning_a_destination() {
+        let network = FakeNetwork::default();
+        let transport = FakeTransport::new("sender", network.clone());
+        let recipient = KukuriKeys::generate();
+        let endpoint_id = iroh::SecretKey::from_bytes(&[44; 32]).public();
+        let valid = ReceiveEndpointLocatorV1::sign(&recipient, &endpoint_id.to_string()).unwrap();
+        network
+            .trust_receive_provider(&recipient.public_key(), &endpoint_id.to_string())
+            .await;
+        let mut invalid = valid.clone();
+        invalid.endpoint_id = iroh::SecretKey::from_bytes(&[45; 32]).public().to_string();
+        assert!(
+            transport
+                .resolve_receive_locator_page(&recipient.public_key(), vec![valid.clone(), invalid])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            transport
+                .resolve_receive_locator_page(&recipient.public_key(), vec![valid])
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            endpoint_id
+        );
+    }
 
     #[tokio::test]
     async fn fake_account_switch_stops_delivery_to_the_old_offer_stream() {

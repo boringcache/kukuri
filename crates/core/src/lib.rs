@@ -20,6 +20,7 @@ mod private_channels;
 mod profile;
 mod reactions;
 mod receive_endpoint_binding;
+mod receive_endpoint_locator;
 mod receive_offer;
 mod rendezvous;
 mod trust_observations;
@@ -201,6 +202,7 @@ pub use receive_endpoint_binding::{
     RECEIVE_ENDPOINT_BINDING_MAX_BYTES, RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS,
     ReceiveEndpointBindingV1, VerifiedReceiveEndpointBinding, receive_route_for_account,
 };
+pub use receive_endpoint_locator::{RECEIVE_ENDPOINT_LOCATOR_MAX_BYTES, ReceiveEndpointLocatorV1};
 pub use receive_offer::{
     PRIVATE_RECEIVE_PAYLOAD_MAX_PLAINTEXT_BYTES, PrivateReceivePayloadV1, RECEIVE_OFFER_MAX_BYTES,
     RECEIVE_OFFER_MAX_LIFETIME_MS, RECEIVE_PAYLOAD_MAX_BYTES, ReceiveOfferReferenceV1,
