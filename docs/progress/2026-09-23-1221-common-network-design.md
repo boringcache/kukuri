@@ -460,3 +460,12 @@ docs/blobを時間と失敗回数に比例して増やすため失効した（AD
 N71のwriter/reader・保存方式は未実装で、上表はPR headの実装・負例・独立監査に先立つ契約。
 現行の既知peer binding交換とN70のCN候補窓は維持し、旧pairwise受信taskや起動時全件走査を
 この設計決定だけで撤去した扱いにしない。
+
+## 2026-09-24: N71計画の失効
+
+この文書のN71節は当時の判断・未実装計画の記録である。ユーザーは#1221で、CNなしでは
+チケット・seed・既存接続/既知peerの到達情報を使い、account公開鍵だけから未知endpointを発見する
+新機能を要求しない方針を採用した。短命bindingの実QUIC検証と保護outboxは維持する。
+著者制御locatorのwriter/reader/回収は作らず、#1333の本番未使用locator APIと停止中の
+未commit制御recordは不採用。現行条件は[Issue #1221](https://github.com/kukuri-app/kukuri/issues/1221)の
+`2026-09-24-outcome-v4-reachability`を参照する。

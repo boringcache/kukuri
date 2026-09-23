@@ -334,10 +334,9 @@ N69は周期再送の総peer数依存だけを減らす。起動時の全convers
 
 N70は旧全購読topic snapshotから自account受信routeを除き、own routeの更新は各CNに維持する一方、送信先routeの照会は各CNの期限到来に合わせ、node別cursorで独立に進める。旧head監査で見つかった応答後の失効race、複数CN上書き、疎なdue peekの飢餓をそれぞれfence、source所有、独立cursorで塞ぐ。401/同意要求は既存session再認証・再同意へ返し、他の失敗は5秒以上待つ。CN不使用時の署名済み著者制御state個別取得、旧pairwise受信task、起動時全件走査、既存CN topic refresh自体の総購読数依存、明示leaveを伴う差分登録は残件。
 
-## N71 著者制御stateのendpoint locator（P3・設計固定、未実装）
+## N71 著者制御endpoint locator（2026-09-24失効）
 
-| ID | 予定する入口 → helper → sink | guard / 停止 | 実装前contract |
-| --- | --- | --- | --- |
-| N71 | 自accountのendpoint/端末構成変更 → 署名付きlocator差分writer → author replicaの該当keyと旧blob/索引回収。保護outbox等の対象account需要 → 対象author replicaの有界locator reader → 未認証候補窓 → 実QUIC短命binding照合 → DM等の送信先 | 無変化tickからdocs書込み0。account/route署名、endpoint世代・旧応答の失効を各I/O前後で確認し、locator単独では配送しない。全端末/全record/全blobの列挙と全体GCを作らない。複数端末は有限窓/cursorで公平に再訪し、旧locator・blob・索引はownerが特定して有界に回収。保護outboxはACKまで保持 | 変更なし再起動・長時間待機で書込み/保持増分0、端末追加/削除・旧世代cancel・再起動時回収、候補10倍でも1回の処理上限、誤署名/失効/接続先不一致で送信0を実装前に固定する |
-
-N71の製品契約は2026-09-23に決定。著者replicaへ短命bindingを周期保存する旧案はADR 0055 §4で失効させ、短命bindingは実接続時だけ取得する。上表は実装済みを意味せず、実装path・test名・監査結果を後続PRの固定headで埋める。
+当時のN71は、account-onlyの宛先発見を著者replicaの署名付きlocatorで実装する計画だった。
+#1221の[現行Scope revision](https://github.com/kukuri-app/kukuri/issues/1221)ではCNなしの未知endpoint発見を要求せず、
+既存のticket/seed/既知peerとCN候補を実QUIC bindingで検証する。#1333の本番未使用locatorページAPIと
+停止中の制御recordは不採用とし、旧計画を残件に数えない。前節の「著者制御state」は当時の残件記録である。
