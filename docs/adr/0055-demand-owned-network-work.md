@@ -160,7 +160,10 @@ kindはmention/reply/repost/quote_repost/direct_message/followedのまま。
 受信者のpublic keyからrouteを導出する。ただしroute IDだけからendpointが判明するとは扱わない。
 送信にはaccount署名付き `ReceiveEndpointBinding`（版、account、route、endpoint ID、発行・失効時刻）を使う。
 接続時は署名のaccount/routeと実際のQUIC endpoint identityを照合する。
-bindingは投稿先の署名済み著者制御stateと接続時の交換で発見し、対象別に有限cacheへ保存する。
+著者制御stateにはaccount署名付きのendpoint locatorを保持し、endpointまたは端末構成が変わった時だけ差分更新する。
+短命bindingを著者replicaへ定期保存しない。locatorは未認証の接続候補であり、送信側は接続時に短命bindingを
+取得して、署名のaccount/routeと実QUIC endpoint identityを照合した後だけ宛先として採用する。
+検証済み宛先は対象別の有限cacheへ保存する。
 接続時交換はmanual ticketとDHTで得たpeerにも適用する。peerの自己申告やunsigned Presenceから
 accountの対応を確定しない。DHTは既知endpoint IDのaddress解決だけを担う。
 CN使用時は自分のaccount routeと短期送信先routeをtopic rendezvousへ差分登録し、返却peerへ
@@ -173,16 +176,23 @@ Redis `SRANDMEMBER`の正のcountは[返却数に比例する操作](https://red
 topic全参加者の`SMEMBERS`は使わない。候補の完全列挙や応答だけによるaccount認証は行わない。
 bucketへの追加とTTL設定は[Valkey互換の`MULTI/EXEC` transaction](https://redis.io/docs/latest/develop/using-commands/transactions/)で
 一体に実行する。caller取消や応答喪失時にTTLなしの新bucketを残さない。
-CN不使用時は、既知の署名bindingからDHT解決するか、manual ticket/seedで到達したpeerとの
-binding交換および対象著者の制御stateの個別取得を使う。全author/全peerを探索しない。
+CN不使用時は、対象著者の制御stateから個別取得した署名付きlocatorのendpoint IDをDHTで解決するか、
+manual ticket/seedで到達したpeerとのbinding交換を使う。全author/全peerを探索しない。
 binding未取得/期限切れ/宛先不在は未解決として延期し、接続成功や配送成功を捏造しない。
 既知manual ticket/seedのbinding交換はaccount別cursorで候補を進め、1試行は最大4候補・同時2照合までとする。
 候補全体を複製・整列せず、照合済み宛先はaccount別に最大1,024件、署名の期限を超えず最長10秒保持する。
 未認証候補を配送先へ渡さない。配送失敗時は該当account/endpointのcacheを失効させ、次の試行で再照合する。
 この窓は既知peerからの発見に限り、著者制御state/CN経由の候補取得とoutbox再試行を代替しない。
-endpointを再生成した側は新bindingを制御state・接続先・利用中CNへ更新する。
+endpointを再生成した側はlocatorを著者制御stateへ差分更新し、接続時の短命bindingと利用中CNのpresenceも
+新endpointへ切り替える。端末追加・削除・撤回でも該当locatorだけを更新する。
 更新がまだ到達していない間の完全配送は保証しないが、peer再発見で未完了送信を再試行する。
 DHTへ通知本体を置かず、CNに通知一覧や必須の保存queueを作らない。
+
+**2026-09-23 設計原則による改訂:** 旧案の「短命bindingを著者replicaへ周期保存する」は失効とする。
+期限更新のたびに異なるdocs/blobを作ると、旧blobと履歴が時間・失敗回数に比例して増えるためである。
+locatorは状態変化時のみ更新し、旧locator・blob・索引には所有者と有界な回収手順を持たせる。
+複数端末の候補も固定の先頭N件に依存させず、有限窓とcursorで公平に再訪する。
+locatorの失効・欠損やbinding検証失敗では配送を成功扱いにせず、保護outboxを維持する。
 送信側のroute購読も短期leaseとして上限内で開き、試行終了時に解放する。
 
 受信capsuleには署名された対象参照または既存DMの暗号化frameへの参照を入れ、
