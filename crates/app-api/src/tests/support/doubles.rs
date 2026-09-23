@@ -268,15 +268,15 @@ impl HintTransport for NoopHintTransport {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CountingClosingHintTransport {
+pub(crate) struct CountingPendingHintTransport {
     pub(crate) subscribe_count: Arc<TokioMutex<usize>>,
 }
 
 #[async_trait]
-impl HintTransport for CountingClosingHintTransport {
+impl HintTransport for CountingPendingHintTransport {
     async fn subscribe_hints(&self, _topic: &TopicId) -> Result<HintStream> {
         *self.subscribe_count.lock().await += 1;
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(Box::pin(futures_util::stream::pending()))
     }
 
     async fn unsubscribe_hints(&self, _topic: &TopicId) -> Result<()> {

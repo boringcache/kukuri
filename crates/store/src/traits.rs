@@ -451,6 +451,14 @@ pub trait DirectMessageStore: Send + Sync {
         cycle_end: Option<&DirectMessageOutboxCursor>,
         limit: usize,
     ) -> Result<DirectMessageOutboxPage>;
+    /// One account retry tick: at most three never-attempted rows and one due
+    /// retry, each selected by an index rather than a full outbox scan.
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>>;
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 const ACCOUNT_DM_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 struct AccountReceiveDestination {
     address: EndpointAddr,
     provider_endpoint_id: String,
@@ -440,63 +441,57 @@ impl AppService {
         Ok(true)
     }
 
-    pub(crate) async fn flush_direct_message_outbox_page_for_peer(
+    /// One bounded account-wide retry tick. New rows and previously attempted
+    /// rows have separate index lanes, so continuous new sends cannot starve
+    /// an older protected row and old failures cannot block all new sends.
+    pub(crate) async fn flush_due_direct_message_outbox(
         services: &ServiceHandles,
-        local_author_pubkey: &str,
-        peer_pubkey: &str,
-        after: Option<&kukuri_store::DirectMessageOutboxCursor>,
-        cycle_end: Option<&kukuri_store::DirectMessageOutboxCursor>,
-    ) -> Result<(
-        usize,
-        Option<kukuri_store::DirectMessageOutboxCursor>,
-        Option<kukuri_store::DirectMessageOutboxCursor>,
-    )> {
-        let projection_store = services.projection_store.as_ref();
-        let transport = services.transport.as_ref();
-        let keys = services.keys.as_ref();
-        let relationship = projection_store
-            .get_author_relationship(local_author_pubkey, peer_pubkey)
-            .await?;
-        if !relationship.as_ref().is_some_and(|value| value.mutual) {
-            return Ok((0, None, None));
-        }
-        let topic = derive_direct_message_topic(keys, &Pubkey::from(peer_pubkey))?;
-        let peer_count = direct_message_topic_peer_count(transport, &topic).await?;
-        let topic_has_connected_peer = peer_count > 0;
-        let mut published = 0usize;
-        let attempted_at = Utc::now().timestamp_millis();
-        let page = projection_store
-            .list_direct_message_outbox_for_peer_page(
-                peer_pubkey,
-                after,
-                cycle_end,
-                kukuri_store::DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
+        now_ms: i64,
+    ) -> Result<usize> {
+        let rows = services
+            .projection_store
+            .list_due_direct_message_outbox(
+                now_ms.saturating_sub(DIRECT_MESSAGE_RETRY_INTERVAL_MS as i64),
+                3,
+                1,
             )
             .await?;
-        let account_destination = if page.items.is_empty() {
-            None
-        } else {
-            Self::resolve_account_receive_destination(services, peer_pubkey).await
-        };
-        for row in &page.items {
-            published += usize::from(
-                Self::publish_direct_message_outbox_row(
-                    services,
-                    &topic,
-                    row,
-                    topic_has_connected_peer,
-                    account_destination.as_ref(),
-                    attempted_at,
-                )
-                .await?,
-            );
+        let mut destinations = HashMap::<String, Option<AccountReceiveDestination>>::new();
+        for row in &rows {
+            services
+                .projection_store
+                .touch_direct_message_outbox_attempt(&row.dm_id, &row.message_id, now_ms)
+                .await?;
+            if !Self::account_dm_outbox_row_can_send(services, row).await? {
+                continue;
+            }
+            let topic = derive_direct_message_topic(
+                services.keys.as_ref(),
+                &Pubkey::from(row.peer_pubkey.as_str()),
+            )?;
+            if !destinations.contains_key(&row.peer_pubkey) {
+                let destination =
+                    Self::resolve_account_receive_destination(services, &row.peer_pubkey).await;
+                destinations.insert(row.peer_pubkey.clone(), destination);
+            }
+            if !Self::account_dm_outbox_row_can_send(services, row).await? {
+                continue;
+            }
+            let destination = destinations.get(&row.peer_pubkey).and_then(Option::as_ref);
+            if let Err(error) = Self::publish_direct_message_outbox_row(
+                services,
+                &topic,
+                row,
+                false,
+                destination,
+                now_ms,
+            )
+            .await
+            {
+                tracing::debug!(%error, "due direct message outbox row deferred");
+            }
         }
-        let cycle_end = if page.next_cursor.is_some() {
-            page.cycle_end
-        } else {
-            None
-        };
-        Ok((published, page.next_cursor, cycle_end))
+        Ok(rows.len())
     }
 
     async fn publish_direct_message_outbox_row(

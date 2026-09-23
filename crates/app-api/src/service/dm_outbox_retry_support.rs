@@ -1,0 +1,70 @@
+//! One account-owned retry loop for protected DM outbox rows. Peer receive
+//! subscriptions have no retry timers and cannot block on offer publication.
+
+use super::*;
+use std::sync::atomic::Ordering;
+
+impl AppService {
+    pub(crate) async fn start_direct_message_outbox_retry(&self) -> Result<()> {
+        let closed = &self.subscription_registry.dm_outbox_retry_closed;
+        anyhow::ensure!(
+            !closed.load(Ordering::Acquire),
+            "DM outbox retry owner is closed"
+        );
+        let mut owner = self.subscription_registry.dm_outbox_retry_task.lock().await;
+        if owner.as_ref().is_some_and(|task| !task.is_finished()) {
+            return Ok(());
+        }
+        if let Some(old) = owner.take() {
+            old.abort();
+            old.wait().await;
+        }
+        anyhow::ensure!(
+            !closed.load(Ordering::Acquire),
+            "DM outbox retry owner is closed"
+        );
+        let services = self.services.clone();
+        let closed = Arc::clone(closed);
+        #[cfg(test)]
+        self.subscription_registry
+            .dm_outbox_retry_starts
+            .fetch_add(1, Ordering::SeqCst);
+        *owner = Some(AbortOnDropTask::new(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                DIRECT_MESSAGE_RETRY_INTERVAL_MS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if closed.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Err(error) = AppService::flush_due_direct_message_outbox(
+                    &services,
+                    Utc::now().timestamp_millis(),
+                )
+                .await
+                {
+                    warn!(%error, "account DM outbox retry deferred");
+                }
+            }
+        })));
+        Ok(())
+    }
+
+    pub(crate) async fn shutdown_direct_message_outbox_retry(&self) {
+        self.subscription_registry
+            .dm_outbox_retry_closed
+            .store(true, Ordering::Release);
+        let task = self
+            .subscription_registry
+            .dm_outbox_retry_task
+            .lock()
+            .await
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task.wait()).await;
+        }
+    }
+}

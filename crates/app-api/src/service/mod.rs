@@ -127,6 +127,7 @@ mod attachment_support;
 mod author_state_support;
 mod direct_messages_delivery_support;
 mod direct_messages_subscription_support;
+mod dm_outbox_retry_support;
 mod dome_connection_support;
 mod receive_offer_support;
 pub(crate) use dome_connection_support::*;

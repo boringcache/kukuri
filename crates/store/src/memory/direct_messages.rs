@@ -10,9 +10,45 @@ impl MemoryDirectMessageOutboxRows {
         )
     }
 
+    fn new_key(row: &DirectMessageOutboxRow) -> DirectMessageOutboxNewKey {
+        (
+            row.created_at,
+            row.message_id.clone(),
+            row.dm_id.clone(),
+            row.peer_pubkey.clone(),
+        )
+    }
+
+    fn retry_key(row: &DirectMessageOutboxRow, attempted_at: i64) -> DirectMessageOutboxRetryKey {
+        (
+            attempted_at,
+            row.created_at,
+            row.message_id.clone(),
+            row.dm_id.clone(),
+            row.peer_pubkey.clone(),
+        )
+    }
+
+    fn index_attempt(&mut self, row: &DirectMessageOutboxRow) {
+        if let Some(attempted_at) = row.last_attempt_at {
+            self.attempted.insert(Self::retry_key(row, attempted_at));
+        } else {
+            self.never_attempted.insert(Self::new_key(row));
+        }
+    }
+
+    fn unindex_attempt(&mut self, row: &DirectMessageOutboxRow) {
+        if let Some(attempted_at) = row.last_attempt_at {
+            self.attempted.remove(&Self::retry_key(row, attempted_at));
+        } else {
+            self.never_attempted.remove(&Self::new_key(row));
+        }
+    }
+
     fn insert(&mut self, row: DirectMessageOutboxRow) {
         self.remove(row.dm_id.as_str(), row.message_id.as_str());
         self.by_peer.insert(Self::peer_key(&row));
+        self.index_attempt(&row);
         self.by_dm
             .entry(row.dm_id.clone())
             .or_default()
@@ -26,6 +62,7 @@ impl MemoryDirectMessageOutboxRows {
             .rows
             .remove(&(dm_id.to_string(), message_id.to_string()))?;
         self.by_peer.remove(&Self::peer_key(&row));
+        self.unindex_attempt(&row);
         if let Some(messages) = self.by_dm.get_mut(dm_id) {
             messages.remove(message_id);
             if messages.is_empty() {
@@ -42,6 +79,7 @@ impl MemoryDirectMessageOutboxRows {
         for message_id in messages {
             if let Some(row) = self.rows.remove(&(dm_id.to_string(), message_id)) {
                 self.by_peer.remove(&Self::peer_key(&row));
+                self.unindex_attempt(&row);
             }
         }
     }
@@ -312,20 +350,46 @@ impl DirectMessageStore for MemoryStore {
         })
     }
 
+    async fn list_due_direct_message_outbox(
+        &self,
+        retry_due_at_or_before: i64,
+        new_limit: usize,
+        retry_limit: usize,
+    ) -> Result<Vec<DirectMessageOutboxRow>> {
+        anyhow::ensure!(
+            new_limit <= 3 && retry_limit <= 1 && new_limit + retry_limit > 0,
+            "invalid direct message outbox due limits"
+        );
+        let rows = self.direct_message_outbox_rows.read().await;
+        let mut selected = Vec::with_capacity(new_limit + retry_limit);
+        for (_, message_id, dm_id, _) in rows.never_attempted.iter().take(new_limit) {
+            if let Some(row) = rows.rows.get(&(dm_id.clone(), message_id.clone())) {
+                selected.push(row.clone());
+            }
+        }
+        for (attempted_at, _, message_id, dm_id, _) in rows.attempted.iter().take(retry_limit) {
+            if *attempted_at <= retry_due_at_or_before
+                && let Some(row) = rows.rows.get(&(dm_id.clone(), message_id.clone()))
+            {
+                selected.push(row.clone());
+            }
+        }
+        Ok(selected)
+    }
+
     async fn touch_direct_message_outbox_attempt(
         &self,
         dm_id: &str,
         message_id: &str,
         attempted_at: i64,
     ) -> Result<()> {
-        if let Some(row) = self
-            .direct_message_outbox_rows
-            .write()
-            .await
-            .rows
-            .get_mut(&(dm_id.to_string(), message_id.to_string()))
-        {
+        let mut rows = self.direct_message_outbox_rows.write().await;
+        let key = (dm_id.to_string(), message_id.to_string());
+        if let Some(mut row) = rows.rows.get(&key).cloned() {
+            rows.unindex_attempt(&row);
             row.last_attempt_at = Some(attempted_at);
+            rows.index_attempt(&row);
+            rows.rows.insert(key, row);
         }
         Ok(())
     }

@@ -119,6 +119,14 @@ async fn dm_restart_resumes_pending_outbox_and_local_delete_prevents_duplicate_r
         .resume_direct_message_state()
         .await
         .expect("resume direct message state");
+    assert_eq!(
+        reopened_app_a
+            .subscription_registry
+            .dm_outbox_retry_starts
+            .load(Ordering::SeqCst),
+        1,
+        "restore starts one account retry owner"
+    );
     assert!(
         reopened_app_a
             .subscription_registry
@@ -151,12 +159,9 @@ async fn dm_restart_resumes_pending_outbox_and_local_delete_prevents_duplicate_r
             last_error: None,
         }];
     }
-    let _published = AppService::flush_direct_message_outbox_page_for_peer(
+    let _published = AppService::flush_due_direct_message_outbox(
         &reopened_app_a.services,
-        a_pubkey.as_str(),
-        b_pubkey.as_str(),
-        None,
-        None,
+        Utc::now().timestamp_millis() + DIRECT_MESSAGE_RETRY_INTERVAL_MS as i64,
     )
     .await
     .expect("flush queued direct message after restart");
