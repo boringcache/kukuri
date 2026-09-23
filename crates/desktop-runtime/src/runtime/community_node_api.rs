@@ -213,7 +213,6 @@ impl DesktopRuntime {
         }
         save_community_node_config(&self.db_path, &next_config)?;
         *self.community_node_config.lock().await = next_config.clone();
-        *self.account_candidate_selected_node.lock().await = None;
         self.iroh_stack
             .transport
             .clear_receive_candidates(None)
@@ -255,7 +254,6 @@ impl DesktopRuntime {
         }
         save_community_node_config(&self.db_path, &CommunityNodeConfig::default())?;
         *self.community_node_config.lock().await = CommunityNodeConfig::default();
-        *self.account_candidate_selected_node.lock().await = None;
         self.iroh_stack
             .transport
             .clear_receive_candidates(None)

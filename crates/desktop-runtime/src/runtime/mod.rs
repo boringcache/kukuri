@@ -116,8 +116,6 @@ pub struct DesktopRuntime {
     pub(crate) discovery_config: Arc<Mutex<DiscoveryConfig>>,
     pub(crate) community_node_config: Arc<Mutex<CommunityNodeConfig>>,
     pub(crate) community_node_sessions: Arc<Mutex<HashMap<String, CommunityNodeSessionState>>>,
-    pub(crate) account_candidate_cn_cursor: AtomicU64,
-    pub(crate) account_candidate_selected_node: Mutex<Option<String>>,
     pub(crate) community_node_dome_heartbeats:
         Arc<Mutex<HashMap<String, kukuri_core::SignedDomeHostHeartbeatV1>>>,
     pub(crate) community_node_rendezvous_seed_peers:
@@ -462,8 +460,6 @@ impl DesktopRuntime {
             discovery_config: Arc::new(Mutex::new(discovery_config)),
             community_node_config: Arc::new(Mutex::new(community_node_config)),
             community_node_sessions: Arc::new(Mutex::new(HashMap::new())),
-            account_candidate_cn_cursor: AtomicU64::new(0),
-            account_candidate_selected_node: Mutex::new(None),
             community_node_dome_heartbeats: Arc::new(Mutex::new(HashMap::new())),
             community_node_rendezvous_seed_peers: Arc::new(Mutex::new(HashMap::new())),
             community_node_session_guard: Default::default(),

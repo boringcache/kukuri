@@ -42,6 +42,7 @@ struct RendezvousSource {
 
 struct CachedDestination {
     address: EndpointAddr,
+    source: Option<String>,
     expires_at_ms: i64,
     expires_at: Instant,
 }
@@ -93,7 +94,7 @@ impl DestinationWindow {
         &mut self,
         recipient: &Pubkey,
         sources: [&BTreeMap<String, EndpointAddr>; 3],
-    ) -> (Vec<EndpointAddr>, u64) {
+    ) -> (Vec<(EndpointAddr, Option<String>)>, u64) {
         let entry = self.touch(recipient);
         let mut selected = Vec::with_capacity(CANDIDATES_PER_LOOKUP);
         let mut seen = BTreeSet::new();
@@ -102,12 +103,18 @@ impl DestinationWindow {
             .retain(|_, source| source.expires_at > Instant::now());
         let rendezvous_candidates = entry
             .rendezvous_sources
-            .values()
-            .flat_map(|source| source.candidates.iter().cloned())
+            .iter()
+            .flat_map(|(key, source)| {
+                source
+                    .candidates
+                    .iter()
+                    .cloned()
+                    .map(|address| (address, Some(key.clone())))
+            })
             .collect::<Vec<_>>();
         for _ in 0..rendezvous_candidates.len().min(2) {
             let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
-            if seen.insert(candidate.id) {
+            if seen.insert(candidate.0.id) {
                 selected.push(candidate);
             }
         }
@@ -120,7 +127,7 @@ impl DestinationWindow {
             if let Some(candidate) = next_peer(sources[source], &mut entry.cursors[source])
                 && seen.insert(candidate.id)
             {
-                selected.push(candidate);
+                selected.push((candidate, None));
             }
         }
         for _ in 0..rendezvous_candidates.len().min(CANDIDATES_PER_LOOKUP) {
@@ -128,7 +135,7 @@ impl DestinationWindow {
                 break;
             }
             let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
-            if seen.insert(candidate.id) {
+            if seen.insert(candidate.0.id) {
                 selected.push(candidate);
             }
         }
@@ -168,22 +175,29 @@ impl DestinationWindow {
         for entry in self.entries.values_mut() {
             match source {
                 Some(source) => {
-                    if let Some(removed) = entry.rendezvous_sources.remove(source) {
-                        let removed_verified = entry.verified.as_ref().is_some_and(|cached| {
-                            removed
-                                .candidates
-                                .iter()
-                                .any(|candidate| candidate.id == cached.address.id)
-                                && !entry.rendezvous_sources.values().any(|other| {
-                                    other
-                                        .candidates
-                                        .iter()
-                                        .any(|candidate| candidate.id == cached.address.id)
-                                })
-                        });
-                        if removed_verified {
+                    let removed = entry.rendezvous_sources.remove(source).is_some();
+                    let cached_endpoint = entry
+                        .verified
+                        .as_ref()
+                        .filter(|cached| cached.source.as_deref() == Some(source))
+                        .map(|cached| cached.address.id);
+                    if let Some(endpoint_id) = cached_endpoint {
+                        let replacement =
+                            entry.rendezvous_sources.iter().find_map(|(name, other)| {
+                                other
+                                    .candidates
+                                    .iter()
+                                    .any(|candidate| candidate.id == endpoint_id)
+                                    .then(|| name.clone())
+                            });
+                        if let Some(cached) = entry.verified.as_mut() {
+                            cached.source = replacement.clone();
+                        }
+                        if replacement.is_none() {
                             entry.verified = None;
                         }
+                    }
+                    if removed || cached_endpoint.is_some() {
                         entry.revision = entry.revision.wrapping_add(1);
                     }
                 }
@@ -201,6 +215,7 @@ impl DestinationWindow {
         recipient: &Pubkey,
         revision: u64,
         address: EndpointAddr,
+        source: Option<String>,
         expires_at_ms: i64,
         expires_at: Instant,
     ) -> bool {
@@ -212,6 +227,7 @@ impl DestinationWindow {
         }
         entry.verified = Some(CachedDestination {
             address,
+            source,
             expires_at_ms,
             expires_at,
         });
@@ -237,8 +253,8 @@ impl DestinationWindow {
 
 fn next_rendezvous_candidate(
     entry: &mut DestinationEntry,
-    candidates: &[EndpointAddr],
-) -> EndpointAddr {
+    candidates: &[(EndpointAddr, Option<String>)],
+) -> (EndpointAddr, Option<String>) {
     let index = entry.rendezvous_cursor % candidates.len();
     entry.rendezvous_cursor = entry.rendezvous_cursor.wrapping_add(1);
     candidates[index].clone()
@@ -364,7 +380,7 @@ impl IrohGossipTransport {
             .await
             .select(recipient, [&configured, &bootstrap, &imported]);
         drop((configured, bootstrap, imported));
-        for candidate in candidates {
+        for (candidate, source) in candidates {
             if self.offer_closed.load(Ordering::Acquire) {
                 return Ok(None);
             }
@@ -393,6 +409,7 @@ impl IrohGossipTransport {
                 recipient,
                 revision,
                 candidate.clone(),
+                source,
                 expires_at_ms,
                 Instant::now() + Duration::from_millis((expires_at_ms - now_ms) as u64),
             );

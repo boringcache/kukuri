@@ -44,28 +44,18 @@ impl DesktopRuntime {
                 )
             })
             .unwrap_or_default();
-        let query_recipient_routes =
-            self.account_candidate_selected_node.lock().await.as_deref() == Some(base_url);
-        let page = if query_recipient_routes {
-            Some(
-                self.app_service
-                    .pending_receive_destination_recipients(after.as_ref(), cycle_end.as_ref())
-                    .await
-                    .map_err(CommunityNodeRequestError::Other)?,
-            )
-        } else {
-            None
-        };
-        if page
-            .as_ref()
-            .is_some_and(|page| page.recipients.len() > MAX_ACCOUNT_QUERY_RECIPIENTS)
-        {
+        let page = self
+            .app_service
+            .pending_receive_destination_recipients(after.as_ref(), cycle_end.as_ref())
+            .await
+            .map_err(CommunityNodeRequestError::Other)?;
+        if page.recipients.len() > MAX_ACCOUNT_QUERY_RECIPIENTS {
             return Err(CommunityNodeRequestError::Other(anyhow!(
                 "account receive demand exceeds bounded rendezvous window"
             )));
         }
         let mut by_key = BTreeMap::<String, Pubkey>::new();
-        for recipient in page.iter().flat_map(|page| &page.recipients) {
+        for recipient in &page.recipients {
             if *recipient == self.author_keys.public_key() {
                 continue;
             }
@@ -205,10 +195,8 @@ impl DesktopRuntime {
             )));
         }
         if let Some(session) = self.community_node_sessions.lock().await.get_mut(base_url) {
-            if let Some(page) = page {
-                session.account_candidate_after = page.next_cursor;
-                session.account_candidate_cycle_end = page.cycle_end;
-            }
+            session.account_candidate_after = page.next_cursor;
+            session.account_candidate_cycle_end = page.cycle_end;
             session.rendezvous_refresh_deadline = Utc::now().timestamp().saturating_add(
                 (response.expires_in_seconds.min(i64::MAX as u64) as i64)
                     .saturating_sub(COMMUNITY_NODE_TOPIC_RENDEZVOUS_REFRESH_MARGIN_SECONDS),

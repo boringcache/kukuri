@@ -37,7 +37,7 @@ fn destination_window_rotates_through_large_peer_history_in_four_candidate_steps
         let (candidates, _) =
             state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
         assert!(candidates.len() <= CANDIDATES_PER_LOOKUP);
-        observed.extend(candidates.into_iter().map(|candidate| candidate.id));
+        observed.extend(candidates.into_iter().map(|candidate| candidate.0.id));
     }
     assert_eq!(observed.len(), 1_000);
 }
@@ -56,6 +56,7 @@ fn invalidation_rejects_stale_lookup_and_state_has_a_fixed_account_cap() {
         &recipient,
         revision,
         address.clone(),
+        None,
         i64::MAX,
         Instant::now() + Duration::from_secs(1),
     ));
@@ -90,7 +91,7 @@ fn destination_cursor_reaches_old_peer_during_new_inserts_and_deletes() {
         peers.insert(id.to_string(), EndpointAddr::new(id));
         let (candidates, _) =
             state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
-        reached |= candidates.iter().any(|candidate| candidate.id == target);
+        reached |= candidates.iter().any(|candidate| candidate.0.id == target);
         let first = peers.keys().next().unwrap().clone();
         if first != target.to_string() {
             peers.remove(&first);
@@ -126,8 +127,8 @@ fn rendezvous_window_does_not_starve_known_peer_cursor() {
         observed_known.extend(
             candidates
                 .into_iter()
-                .filter(|item| peers.contains_key(&item.id.to_string()))
-                .map(|item| item.id),
+                .filter(|item| peers.contains_key(&item.0.id.to_string()))
+                .map(|item| item.0.id),
         );
     }
     assert_eq!(observed_known.len(), 1_000);
@@ -147,6 +148,7 @@ fn cache_expires_and_invalidating_another_endpoint_preserves_current_binding() {
         &recipient,
         revision,
         address.clone(),
+        None,
         100,
         Instant::now() + Duration::from_secs(1),
     ));
@@ -164,10 +166,35 @@ fn cache_expires_and_invalidating_another_endpoint_preserves_current_binding() {
         &recipient,
         revision,
         address,
+        None,
         i64::MAX,
         Instant::now() - Duration::from_secs(1),
     ));
     assert!(state.cached(&recipient, 99).is_none());
+}
+
+#[test]
+fn revoking_source_clears_cache_even_after_its_candidate_list_changes() {
+    let recipient = Pubkey::from("account-source-revoke");
+    let address = EndpointAddr::new(SecretKey::from_bytes(&[18; 32]).public());
+    let mut state = DestinationWindow::default();
+    state.observe_rendezvous("cn-a", &recipient, vec![address.clone()]);
+    let (_, revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    assert!(state.store_verified(
+        &recipient,
+        revision,
+        address,
+        Some("cn-a".into()),
+        i64::MAX,
+        Instant::now() + Duration::from_secs(10),
+    ));
+    state.observe_rendezvous("cn-a", &recipient, Vec::new());
+    assert!(state.cached(&recipient, 0).is_some());
+    state.clear_rendezvous(Some("cn-a"));
+    assert!(state.cached(&recipient, 0).is_none());
 }
 
 #[test]
@@ -184,6 +211,7 @@ fn invalidating_old_probe_cannot_replace_newer_verified_endpoint() {
         &recipient,
         old_revision,
         EndpointAddr::new(new_id),
+        None,
         i64::MAX,
         Instant::now() + Duration::from_secs(1),
     ));
@@ -192,6 +220,7 @@ fn invalidating_old_probe_cannot_replace_newer_verified_endpoint() {
         &recipient,
         old_revision,
         EndpointAddr::new(old_id),
+        None,
         i64::MAX,
         Instant::now() + Duration::from_secs(1),
     ));
@@ -212,6 +241,7 @@ async fn shutdown_during_cache_lock_wait_does_not_return_cached_destination() {
         &recipient,
         revision,
         EndpointAddr::new(id),
+        None,
         i64::MAX,
         Instant::now() + Duration::from_secs(10),
     ));

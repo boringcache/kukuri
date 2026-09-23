@@ -19,12 +19,6 @@ impl DesktopRuntime {
         if config.nodes.is_empty() {
             return Vec::new();
         }
-        let selected = self
-            .account_candidate_cn_cursor
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
-            % config.nodes.len();
-        *self.account_candidate_selected_node.lock().await =
-            Some(config.nodes[selected].base_url.clone());
         let mut jobs = config
             .nodes
             .iter()
@@ -103,51 +97,5 @@ impl DesktopRuntime {
                 }
             }
         }));
-    }
-}
-
-#[cfg(test)]
-mod account_candidate_tests {
-    use super::*;
-    use crate::identity::IdentityStorageMode;
-    use kukuri_transport::TransportNetworkConfig;
-
-    #[tokio::test]
-    async fn candidate_cn_selection_rotates_beyond_the_source_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("candidate-cn-selection.db");
-        let runtime = DesktopRuntime::new_with_config_and_identity(
-            &db_path,
-            TransportNetworkConfig::loopback(),
-            IdentityStorageMode::FileOnly,
-        )
-        .await
-        .unwrap();
-        let urls = (0..9)
-            .map(|index| format!("http://127.0.0.1:{}", 19000 + index))
-            .collect::<Vec<_>>();
-        *runtime.community_node_config.lock().await = CommunityNodeConfig {
-            trust_node_priority: Vec::new(),
-            nodes: urls
-                .iter()
-                .map(|url| CommunityNodeNodeConfig {
-                    base_url: url.clone(),
-                    resolved_urls: None,
-                    content_advisory_enabled: true,
-                })
-                .collect(),
-        };
-        for expected in &urls {
-            let _ = runtime.community_node_maintenance_jobs().await;
-            assert_eq!(
-                runtime
-                    .account_candidate_selected_node
-                    .lock()
-                    .await
-                    .as_ref(),
-                Some(expected)
-            );
-        }
-        runtime.shutdown().await;
     }
 }

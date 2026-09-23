@@ -551,6 +551,34 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url_b = format!("http://{}", listener_b.local_addr().unwrap());
+    let state_b = Arc::new(MockRendezvousCommunityNodeState {
+        base_url: base_url_b.clone(),
+        seed_peers: vec![CommunityNodeSeedPeer::new("33".repeat(32), None).unwrap()],
+        heartbeat_hits: Arc::new(AtomicUsize::new(0)),
+        bootstrap_hits: Arc::new(AtomicUsize::new(0)),
+        rendezvous_hits: Arc::new(AtomicUsize::new(0)),
+        rendezvous_requests: Arc::new(Mutex::new(Vec::new())),
+        account_candidate: None,
+        rendezvous_failure: Arc::new(AtomicBool::new(false)),
+    });
+    let app_b = Router::new()
+        .route("/v1/policies", get(mock_current_policies))
+        .route("/v1/consents/status", get(mock_bootstrap_consent_status))
+        .route(
+            "/v1/bootstrap/heartbeat",
+            post(mock_rendezvous_bootstrap_heartbeat),
+        )
+        .route("/v1/bootstrap/nodes", get(mock_rendezvous_bootstrap_nodes))
+        .route(
+            "/v1/rendezvous/topics/heartbeat",
+            post(mock_rendezvous_topics_heartbeat),
+        )
+        .with_state(state_b.clone());
+    let server_b = tokio::spawn(async move {
+        let _ = axum::serve(listener_b, app_b).await;
+    });
     persist_community_node_token(
         &db_path,
         IdentityStorageMode::FileOnly,
@@ -561,17 +589,31 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
         },
     )
     .unwrap();
+    persist_community_node_token(
+        &db_path,
+        IdentityStorageMode::FileOnly,
+        base_url_b.as_str(),
+        &StoredCommunityNodeToken {
+            access_token: "fake-token".into(),
+            expires_at: Utc::now().timestamp() + 3600,
+        },
+    )
+    .unwrap();
     *runtime.community_node_config.lock().await = CommunityNodeConfig {
         trust_node_priority: Vec::new(),
-        nodes: vec![CommunityNodeNodeConfig {
-            content_advisory_enabled: true,
-            base_url: base_url.clone(),
-            resolved_urls: Some(
-                CommunityNodeResolvedUrls::new(base_url.clone(), Vec::new(), Vec::new()).unwrap(),
-            ),
-        }],
+        nodes: [base_url.clone(), base_url_b.clone()]
+            .into_iter()
+            .map(|url| CommunityNodeNodeConfig {
+                content_advisory_enabled: true,
+                base_url: url.clone(),
+                resolved_urls: Some(
+                    CommunityNodeResolvedUrls::new(url, Vec::new(), Vec::new()).unwrap(),
+                ),
+            })
+            .collect(),
     };
     seed_local_community_node_consents(&runtime, base_url.as_str(), 1);
+    seed_local_community_node_consents(&runtime, base_url_b.as_str(), 1);
     for _ in 0..4 {
         runtime.run_community_node_session_maintenance_once().await;
         if state
@@ -584,6 +626,16 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
                     && request.refreshes.contains(&recipient_key)
                     && request.refreshes.len() <= 5
             })
+            && state_b
+                .rendezvous_requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| {
+                    request.refreshes.contains(&own_key)
+                        && request.refreshes.contains(&recipient_key)
+                        && request.refreshes.len() <= 5
+                })
         {
             break;
         }
@@ -592,6 +644,14 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
             .lock()
             .await
             .get_mut(&base_url)
+        {
+            session.rendezvous_refresh_deadline = 0;
+        }
+        if let Some(session) = runtime
+            .community_node_sessions
+            .lock()
+            .await
+            .get_mut(&base_url_b)
         {
             session.rendezvous_refresh_deadline = 0;
         }
@@ -606,6 +666,16 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
         "requests={requests:?}"
     );
     drop(requests);
+    let requests_b = state_b.rendezvous_requests.lock().await;
+    assert!(
+        requests_b.iter().any(|request| {
+            request.refreshes.contains(&own_key)
+                && request.refreshes.contains(&recipient_key)
+                && request.refreshes.len() <= 5
+        }),
+        "second CN must get its own recipient page: {requests_b:?}"
+    );
+    drop(requests_b);
     let resolved = runtime
         .iroh_stack
         .transport
@@ -614,6 +684,22 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
         .unwrap()
         .unwrap();
     assert_eq!(resolved.id, receiver.endpoint().id());
+    runtime
+        .deactivate_community_node_connectivity(&base_url_b)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .iroh_stack
+            .transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        receiver.endpoint().id(),
+        "second CN deactivation must not remove the first CN's bound recipient"
+    );
     {
         let mut sessions = runtime.community_node_sessions.lock().await;
         let session = sessions.get_mut(&base_url).unwrap();
@@ -657,6 +743,7 @@ async fn account_rendezvous_queries_one_due_recipient_without_public_topic_snaps
     runtime.shutdown().await;
     receiver.shutdown().await.unwrap();
     server.abort();
+    server_b.abort();
 }
 
 #[tokio::test]
