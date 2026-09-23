@@ -80,6 +80,10 @@ impl IrohGossipTransport {
             topic_states: Arc::new(Mutex::new(HashMap::new())),
             receive_offer_topic: Mutex::new(None),
             outbound_offer_holds: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            offer_receiver_tasks: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            offer_hold_tasks: Arc::new(AtomicUsize::new(0)),
             topic_warmups: Arc::new(TopicWarmupCoordinator::default()),
             last_error: Arc::new(Mutex::new(None)),
             discovery_mode: Arc::new(Mutex::new(DiscoveryMode::StaticPeer)),
@@ -119,6 +123,10 @@ impl IrohGossipTransport {
             topic_states: Arc::new(Mutex::new(HashMap::new())),
             receive_offer_topic: Mutex::new(None),
             outbound_offer_holds: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            offer_receiver_tasks: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            offer_hold_tasks: Arc::new(AtomicUsize::new(0)),
             topic_warmups: Arc::new(TopicWarmupCoordinator::default()),
             last_error: Arc::new(Mutex::new(None)),
             discovery_mode: Arc::new(Mutex::new(DiscoveryMode::StaticPeer)),

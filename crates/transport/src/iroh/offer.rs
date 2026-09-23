@@ -8,6 +8,24 @@ const OFFER_BOOTSTRAP_PER_SOURCE: usize = 4;
 const MAX_OUTBOUND_OFFER_HOLDS: usize = 32;
 const OUTBOUND_OFFER_HOLD: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+struct CountedOfferTask(Arc<AtomicUsize>);
+
+#[cfg(test)]
+impl CountedOfferTask {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CountedOfferTask {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl IrohGossipTransport {
     pub(crate) async fn offer_bootstrap_window(&self) -> Vec<EndpointAddr> {
         let mut selected = Vec::with_capacity(3 * OFFER_BOOTSTRAP_PER_SOURCE);
@@ -35,13 +53,18 @@ impl IrohGossipTransport {
         let mut current = self.receive_offer_topic.lock().await;
         if let Some(state) = current.as_ref()
             && state.route == route.as_str()
+            && !state.closing
         {
             return Ok(stream_from_offer_sender(&state.broadcaster));
         }
-        if let Some(old) = current.take() {
+        if current.is_some() {
+            let mut subscribed = self.subscribed_topics.lock().await;
+            let old = current.as_mut().expect("offer route exists");
+            old.closing = true;
             old.receiver_task.abort();
-            let _ = old.receiver_task.await;
-            self.subscribed_topics.lock().await.remove(&old.route);
+            let _ = (&mut old.receiver_task).await;
+            let old = current.take().expect("closed offer route exists");
+            subscribed.remove(&old.route);
         }
 
         let peers = self.offer_bootstrap_window().await;
@@ -60,7 +83,13 @@ impl IrohGossipTransport {
         let (sender, mut receiver) = topic.split();
         let (broadcaster, _) = broadcast::channel(64);
         let forward = broadcaster.clone();
+        // Registration cannot suspend after the receiver task is spawned.
+        let mut subscribed = self.subscribed_topics.lock().await;
+        #[cfg(test)]
+        let task_guard = CountedOfferTask::new(Arc::clone(&self.offer_receiver_tasks));
         let task = tokio::spawn(async move {
+            #[cfg(test)]
+            let _task_guard = task_guard;
             while let Some(event) = receiver.next().await {
                 let Ok(GossipEvent::Received(message)) = event else {
                     continue;
@@ -74,12 +103,10 @@ impl IrohGossipTransport {
                 }
             }
         });
-        self.subscribed_topics
-            .lock()
-            .await
-            .insert(route.as_str().to_string());
+        subscribed.insert(route.as_str().to_string());
         *current = Some(ReceiveOfferTopicState {
             route: route.as_str().to_string(),
+            closing: false,
             broadcaster: broadcaster.clone(),
             _sender: sender,
             receiver_task: task,
@@ -94,10 +121,13 @@ impl IrohGossipTransport {
             .as_ref()
             .is_some_and(|state| state.route == route.as_str())
         {
-            let old = current.take().expect("matching offer route");
+            let mut subscribed = self.subscribed_topics.lock().await;
+            let old = current.as_mut().expect("matching offer route");
+            old.closing = true;
             old.receiver_task.abort();
-            let _ = old.receiver_task.await;
-            self.subscribed_topics.lock().await.remove(&old.route);
+            let _ = (&mut old.receiver_task).await;
+            let old = current.take().expect("closed offer route");
+            subscribed.remove(&old.route);
         }
         Ok(())
     }
@@ -129,18 +159,24 @@ impl IrohGossipTransport {
         timeout(Duration::from_secs(10), topic.joined())
             .await
             .context("account receive route join timed out")??;
+        let mut holds = self.outbound_offer_holds.lock().await;
         topic.broadcast(payload.into()).await?;
 
         // Keep the sending subscription alive briefly after the gossip actor
         // accepts the message. Eviction and transport shutdown abort every hold.
         let now = tokio::time::Instant::now();
+        #[cfg(test)]
+        let task_guard = CountedOfferTask::new(Arc::clone(&self.offer_hold_tasks));
         let task = tokio::spawn(async move {
+            #[cfg(test)]
+            let _task_guard = task_guard;
             sleep(OUTBOUND_OFFER_HOLD).await;
             drop(topic);
         });
-        let mut holds = self.outbound_offer_holds.lock().await;
         while holds.front().is_some_and(|hold| hold.expires_at <= now) {
-            holds.pop_front();
+            if let Some(old) = holds.pop_front() {
+                old.task.abort();
+            }
         }
         holds.push_back(OutboundOfferHold {
             expires_at: now + OUTBOUND_OFFER_HOLD,
@@ -155,9 +191,15 @@ impl IrohGossipTransport {
     }
 
     pub(super) async fn shutdown_receive_offers(&self) {
-        if let Some(state) = self.receive_offer_topic.lock().await.take() {
+        let mut current = self.receive_offer_topic.lock().await;
+        if current.is_some() {
+            let mut subscribed = self.subscribed_topics.lock().await;
+            let state = current.as_mut().expect("offer route exists");
+            state.closing = true;
             state.receiver_task.abort();
-            let _ = state.receiver_task.await;
+            let _ = (&mut state.receiver_task).await;
+            let state = current.take().expect("closed offer route");
+            subscribed.remove(&state.route);
         }
         let holds = self
             .outbound_offer_holds

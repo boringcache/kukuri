@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 #[cfg(test)]
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
@@ -67,6 +69,7 @@ struct HintTopicState {
 
 struct ReceiveOfferTopicState {
     route: String,
+    closing: bool,
     broadcaster: broadcast::Sender<ReceiveOfferEnvelope>,
     _sender: GossipSender,
     receiver_task: JoinHandle<()>,
@@ -110,6 +113,10 @@ pub struct IrohGossipTransport {
     topic_states: Arc<Mutex<HashMap<String, HintTopicState>>>,
     receive_offer_topic: Mutex<Option<ReceiveOfferTopicState>>,
     outbound_offer_holds: Mutex<VecDeque<OutboundOfferHold>>,
+    #[cfg(test)]
+    offer_receiver_tasks: Arc<AtomicUsize>,
+    #[cfg(test)]
+    offer_hold_tasks: Arc<AtomicUsize>,
     topic_warmups: Arc<TopicWarmupCoordinator>,
     last_error: Arc<Mutex<Option<String>>>,
     discovery_mode: Arc<Mutex<DiscoveryMode>>,

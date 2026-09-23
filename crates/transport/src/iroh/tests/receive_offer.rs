@@ -168,3 +168,87 @@ async fn account_route_bootstrap_window_is_independent_of_imported_history() {
     transport.shutdown().await;
     transport._router.take().unwrap().shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn cancelling_offer_subscribe_before_registration_leaves_no_receiver_task() {
+    let transport = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+    let recipient = KukuriKeys::generate().public_key();
+    let registration_guard = transport.subscribed_topics.lock().await;
+    let subscriber = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { transport.subscribe_receive_offers(&recipient).await }
+    });
+    timeout(Duration::from_secs(2), async {
+        while transport.receive_offer_topic.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        transport.offer_receiver_tasks.load(Ordering::SeqCst),
+        0,
+        "a receiver task cannot start before its owner can register it"
+    );
+    subscriber.abort();
+    let _ = subscriber.await;
+    drop(registration_guard);
+    assert_eq!(transport.offer_receiver_tasks.load(Ordering::SeqCst), 0);
+    let mut transport = Arc::try_unwrap(transport).ok().unwrap();
+    transport.shutdown().await;
+    transport._router.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_offer_publish_before_registration_leaves_no_hold_task() {
+    let left = Arc::new(IrohGossipTransport::bind_local().await.unwrap());
+    let mut right = IrohGossipTransport::bind_local().await.unwrap();
+    left.discovery.add_endpoint_info(right.endpoint.addr());
+    right.discovery.add_endpoint_info(left.endpoint.addr());
+    let sender = KukuriKeys::generate();
+    let recipient = KukuriKeys::generate();
+    let _incoming = right
+        .subscribe_receive_offers(&recipient.public_key())
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let offer = seal_receive_offer(
+        &sender,
+        &recipient.public_key(),
+        ReceiveOfferReferenceV1 {
+            provider_endpoint_id: left.endpoint.id().to_string(),
+            payload_hash: BlobHash("11".repeat(32)),
+            payload_bytes: 1,
+            scope: ReceiveOfferScopeV1::PublicSource,
+        },
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    let registration_guard = left.outbound_offer_holds.lock().await;
+    let publisher = tokio::spawn({
+        let left = Arc::clone(&left);
+        let recipient = recipient.public_key();
+        let destination = right.endpoint.addr();
+        async move {
+            left.publish_receive_offer(&recipient, destination, offer)
+                .await
+        }
+    });
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        left.offer_hold_tasks.load(Ordering::SeqCst),
+        0,
+        "a hold task cannot start before its owner can register it"
+    );
+    publisher.abort();
+    let _ = publisher.await;
+    drop(registration_guard);
+    assert_eq!(left.offer_hold_tasks.load(Ordering::SeqCst), 0);
+    let mut left = Arc::try_unwrap(left).ok().unwrap();
+    left.shutdown().await;
+    right.shutdown().await;
+    left._router.take().unwrap().shutdown().await.unwrap();
+    right._router.take().unwrap().shutdown().await.unwrap();
+}

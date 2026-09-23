@@ -16,10 +16,10 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use iroh::EndpointAddr;
 use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId, receive_route_for_account};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 #[cfg(test)]
 use tokio::time::timeout;
 use tokio_stream::wrappers::BroadcastStream;
@@ -39,6 +39,11 @@ pub struct FakeNetwork {
     known_peers: Arc<Mutex<BTreeSet<String>>>,
 }
 
+struct FakeOfferRoute {
+    route: String,
+    stop: watch::Sender<bool>,
+}
+
 #[derive(Clone)]
 pub struct FakeTransport {
     local_id: String,
@@ -47,6 +52,7 @@ pub struct FakeTransport {
     bootstrap_seed_peers: Arc<Mutex<BTreeSet<String>>>,
     imported_peers: Arc<Mutex<BTreeSet<String>>>,
     subscribed_topics: Arc<Mutex<BTreeSet<String>>>,
+    active_offer_route: Arc<Mutex<Option<FakeOfferRoute>>>,
     discovery_mode: Arc<Mutex<DiscoveryMode>>,
     env_locked: Arc<Mutex<bool>>,
 }
@@ -60,6 +66,7 @@ impl FakeTransport {
             bootstrap_seed_peers: Arc::new(Mutex::new(BTreeSet::new())),
             imported_peers: Arc::new(Mutex::new(BTreeSet::new())),
             subscribed_topics: Arc::new(Mutex::new(BTreeSet::new())),
+            active_offer_route: Arc::new(Mutex::new(None)),
             discovery_mode: Arc::new(Mutex::new(DiscoveryMode::StaticPeer)),
             env_locked: Arc::new(Mutex::new(false)),
         }
@@ -313,16 +320,61 @@ impl HintTransport for FakeTransport {
 
     async fn subscribe_receive_offers(&self, recipient: &Pubkey) -> Result<ReceiveOfferStream> {
         let route = receive_route_for_account(recipient)?;
-        self.subscribed_topics.lock().await.insert(route.0);
         let sender = self.offer_sender(recipient).await?;
-        let stream =
-            BroadcastStream::new(sender.subscribe()).filter_map(|event| async move { event.ok() });
+        let mut active = self.active_offer_route.lock().await;
+        let mut topics = self.subscribed_topics.lock().await;
+        let stop = match active.as_ref() {
+            Some(current) if current.route == route.as_str() => current.stop.clone(),
+            _ => {
+                if let Some(old) = active.take() {
+                    let _ = old.stop.send(true);
+                    topics.remove(&old.route);
+                }
+                let (stop, _) = watch::channel(false);
+                *active = Some(FakeOfferRoute {
+                    route: route.as_str().to_string(),
+                    stop: stop.clone(),
+                });
+                stop
+            }
+        };
+        topics.insert(route.as_str().to_string());
+        let stream = stream::unfold(
+            (sender.subscribe(), stop.subscribe()),
+            |(mut receiver, mut stop)| async move {
+                loop {
+                    if *stop.borrow() {
+                        return None;
+                    }
+                    tokio::select! {
+                        biased;
+                        changed = stop.changed() => {
+                            let _ = changed;
+                            return None;
+                        }
+                        event = receiver.recv() => match event {
+                            Ok(envelope) => return Some((envelope, (receiver, stop))),
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        },
+                    }
+                }
+            },
+        );
         Ok(Box::pin(stream))
     }
 
     async fn unsubscribe_receive_offers(&self, recipient: &Pubkey) -> Result<()> {
         let route = receive_route_for_account(recipient)?;
-        self.subscribed_topics.lock().await.remove(route.as_str());
+        let mut active = self.active_offer_route.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|current| current.route == route.as_str())
+        {
+            let old = active.take().expect("matching offer route");
+            let _ = old.stop.send(true);
+            self.subscribed_topics.lock().await.remove(route.as_str());
+        }
         Ok(())
     }
 
@@ -346,10 +398,87 @@ impl HintTransport for FakeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kukuri_core::{
+        BlobHash, KukuriKeys, ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer,
+    };
 
     use crate::test_support::{
         HintRoundtripParticipant, format_peer_snapshot, wait_for_hint_roundtrip,
     };
+
+    #[tokio::test]
+    async fn fake_account_switch_stops_delivery_to_the_old_offer_stream() {
+        let transport = FakeTransport::new("sender", FakeNetwork::default());
+        let sender = KukuriKeys::generate();
+        let old = KukuriKeys::generate();
+        let current = KukuriKeys::generate();
+        let mut old_stream = transport
+            .subscribe_receive_offers(&old.public_key())
+            .await
+            .unwrap();
+        let mut current_stream = transport
+            .subscribe_receive_offers(&current.public_key())
+            .await
+            .unwrap();
+        let now = Utc::now().timestamp_millis();
+        let offer = seal_receive_offer(
+            &sender,
+            &old.public_key(),
+            ReceiveOfferReferenceV1 {
+                provider_endpoint_id: "11".repeat(32),
+                payload_hash: BlobHash("22".repeat(32)),
+                payload_bytes: 1,
+                scope: ReceiveOfferScopeV1::PublicSource,
+            },
+            now,
+            now + 60_000,
+        )
+        .unwrap();
+        let endpoint = iroh::SecretKey::from_bytes(&[3; 32]).public();
+        transport
+            .publish_receive_offer(&old.public_key(), EndpointAddr::new(endpoint), offer)
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), old_stream.next())
+                .await
+                .unwrap()
+                .is_none(),
+            "switch must close the old account stream before further delivery"
+        );
+        transport
+            .unsubscribe_receive_offers(&current.public_key())
+            .await
+            .unwrap();
+        let current_offer = seal_receive_offer(
+            &sender,
+            &current.public_key(),
+            ReceiveOfferReferenceV1 {
+                provider_endpoint_id: "11".repeat(32),
+                payload_hash: BlobHash("22".repeat(32)),
+                payload_bytes: 1,
+                scope: ReceiveOfferScopeV1::PublicSource,
+            },
+            now,
+            now + 60_000,
+        )
+        .unwrap();
+        transport
+            .publish_receive_offer(
+                &current.public_key(),
+                EndpointAddr::new(endpoint),
+                current_offer,
+            )
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), current_stream.next())
+                .await
+                .unwrap()
+                .is_none(),
+            "unsubscribe must close the current account stream"
+        );
+    }
 
     fn initial_topic_join_timeout() -> Duration {
         if cfg!(target_os = "windows") || std::env::var_os("GITHUB_ACTIONS").is_some() {
