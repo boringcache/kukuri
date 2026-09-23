@@ -13,7 +13,6 @@ mod private_channels;
 mod profile;
 mod reactions;
 mod receive_endpoint_binding;
-mod receive_endpoint_locator;
 mod signing_canonical;
 mod wire_constants;
 mod wire_snapshot;

@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::Stream;
 pub use iroh::EndpointAddr;
-use kukuri_core::{GossipHint, Pubkey, ReceiveEndpointLocatorV1, SealedReceiveOfferV1, TopicId};
+use kukuri_core::{GossipHint, Pubkey, SealedReceiveOfferV1, TopicId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -141,17 +141,6 @@ pub trait HintTransport: Send + Sync {
         _recipient: &Pubkey,
     ) -> Result<Option<EndpointAddr>> {
         anyhow::bail!("authenticated receive destination resolution is not supported")
-    }
-
-    /// Probe one bounded page of author-signed locator candidates. A locator
-    /// is never an authenticated destination: every result needs a fresh
-    /// binding from the actual QUIC endpoint. The caller owns page fairness.
-    async fn resolve_receive_locator_page(
-        &self,
-        _recipient: &Pubkey,
-        _locators: Vec<ReceiveEndpointLocatorV1>,
-    ) -> Result<Option<EndpointAddr>> {
-        anyhow::bail!("account receive locator resolution is not supported")
     }
 
     /// A token captured before CN I/O; a clear or transport rebuild makes it stale.
