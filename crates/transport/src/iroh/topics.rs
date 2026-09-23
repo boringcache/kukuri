@@ -54,27 +54,34 @@ impl TopicWarmupCoordinator {
         gossip: &Gossip,
         peers: &[EndpointAddr],
     ) {
-        let mut tasks = Vec::new();
-        for peer in peers.iter().cloned() {
-            let coordinator = self.clone();
-            let endpoint = endpoint.clone();
-            let gossip = gossip.clone();
-            tasks.push(tokio::spawn(async move {
-                coordinator.warmup_peer(endpoint, gossip, peer).await;
-            }));
+        let selected = self.warmup_window(peers);
+        futures_util::stream::iter(selected)
+            .for_each_concurrent(2, |peer| {
+                let endpoint = endpoint.clone();
+                let gossip = gossip.clone();
+                async move {
+                    self.warmup_peer(endpoint, gossip, peer).await;
+                }
+            })
+            .await;
+    }
+
+    fn warmup_window(&self, peers: &[EndpointAddr]) -> Vec<EndpointAddr> {
+        if peers.is_empty() {
+            return Vec::new();
         }
-        for task in tasks {
-            let _ = task.await;
-        }
+        let start = self.warmup_cursor.fetch_add(4, Ordering::Relaxed) as usize % peers.len();
+        (0..peers.len().min(4))
+            .map(|offset| peers[(start + offset) % peers.len()].clone())
+            .collect()
     }
 
     async fn warmup_peer(&self, endpoint: Endpoint, gossip: Gossip, peer: EndpointAddr) {
-        let peer_key = peer.id.to_string();
-        let Some(_in_flight_guard) = self.try_mark_peer_in_flight(peer_key) else {
+        let Ok(_permit) = self.permits.try_acquire() else {
             return;
         };
-
-        let Ok(_permit) = self.permits.acquire().await else {
+        let peer_key = peer.id.to_string();
+        let Some(_in_flight_guard) = self.try_mark_peer_in_flight(peer_key) else {
             return;
         };
         // Active endpoint paths can belong to docs/blob connections. They do not
@@ -518,6 +525,48 @@ impl IrohGossipTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warmup_samples_a_moving_four_peer_window_from_large_history() {
+        for history in [100_usize, 1_000] {
+            let peers = (0..history)
+                .map(|index| {
+                    let mut secret = [0_u8; 32];
+                    secret[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                    EndpointAddr::new(iroh::SecretKey::from_bytes(&secret).public())
+                })
+                .collect::<Vec<_>>();
+            let coordinator = TopicWarmupCoordinator::default();
+            let first = coordinator.warmup_window(&peers);
+            let second = coordinator.warmup_window(&peers);
+            assert_eq!(first.len(), 4, "history={history}");
+            assert_eq!(second.len(), 4, "history={history}");
+            assert_eq!(first[0].id, peers[0].id);
+            assert_eq!(second[0].id, peers[4].id);
+            assert_eq!(second[3].id, peers[7].id);
+        }
+    }
+
+    #[tokio::test]
+    async fn warmup_does_not_queue_peer_state_when_shared_dial_slots_are_full() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let coordinator = TopicWarmupCoordinator::default();
+        let first = coordinator.permits.try_acquire().unwrap();
+        let second = coordinator.permits.try_acquire().unwrap();
+        let peer = iroh::SecretKey::from_bytes(&[3; 32]).public();
+        timeout(
+            Duration::from_millis(100),
+            coordinator.warmup_peer(endpoint.clone(), gossip.clone(), EndpointAddr::new(peer)),
+        )
+        .await
+        .expect("full dial capacity must defer without a waiting future");
+        assert!(coordinator.in_flight_peers.read().unwrap().is_empty());
+        drop(first);
+        drop(second);
+        let _ = gossip.shutdown().await;
+        endpoint.close().await;
+    }
 
     #[tokio::test]
     async fn active_other_protocol_does_not_suppress_gossip_warmup() {

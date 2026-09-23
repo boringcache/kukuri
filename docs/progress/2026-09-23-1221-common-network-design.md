@@ -89,6 +89,8 @@ delta監査ではさらに、shutdownが複数のholdをdrainした後で1件ず
 
 account routeは通常topicの同期診断から分離し、既存topic数・接続状態を変えない。送信の未到達peerへのjoin待ちはshutdown通知で終了する。二端末受信・各停止競合・Fakeを含む局所検証後に固定headを監査する。
 
+N03のwarmupで全peer分のtaskをspawnしてから2 permitを待つ経路を、1回4候補の巡回窓と同時2futureへ置換する。共有dial枠が満杯ならin-flight台帳へ追加せず次回の既存retryへ委ねる。履歴100/1,000で4候補、満杯時の待機0、既存ticket/seed更新後の実gossip接続を局所testで確認。N04のtopic全体/初回bootstrap/長命retryは別の残件であり、この変更のみでgossip owner統合を完了としない。
+
 関連検証はcore `receive_offer` 8件と実gossip 1件が成功。
 初回compile時のfixtureのBlobHash構築と非推奨nonce変換を修正した後の結果である。
 core all-targets clippyも成功。二端末の通知一覧/旧DM outbox移行の完了を、このwire往復の成功へ読み替えない。
