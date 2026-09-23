@@ -175,7 +175,7 @@ impl DestinationWindow {
         for entry in self.entries.values_mut() {
             match source {
                 Some(source) => {
-                    let removed = entry.rendezvous_sources.remove(source).is_some();
+                    entry.rendezvous_sources.remove(source);
                     let cached_endpoint = entry
                         .verified
                         .as_ref()
@@ -197,16 +197,16 @@ impl DestinationWindow {
                             entry.verified = None;
                         }
                     }
-                    if removed || cached_endpoint.is_some() {
-                        entry.revision = entry.revision.wrapping_add(1);
-                    }
                 }
                 None => {
                     entry.rendezvous_sources.clear();
                     entry.verified = None;
-                    entry.revision = entry.revision.wrapping_add(1);
                 }
             }
+            // The source may already have expired or been evicted while a
+            // binding probe still holds its old candidate. Fence that probe
+            // even when this account has no current entry for the source.
+            entry.revision = entry.revision.wrapping_add(1);
         }
     }
 

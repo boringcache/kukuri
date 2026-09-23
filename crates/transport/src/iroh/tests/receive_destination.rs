@@ -195,6 +195,49 @@ fn revoking_source_clears_cache_even_after_its_candidate_list_changes() {
     assert!(state.cached(&recipient, 0).is_some());
     state.clear_rendezvous(Some("cn-a"));
     assert!(state.cached(&recipient, 0).is_none());
+    assert!(
+        !state.store_verified(
+            &recipient,
+            revision,
+            EndpointAddr::new(SecretKey::from_bytes(&[18; 32]).public()),
+            Some("cn-a".into()),
+            i64::MAX,
+            Instant::now() + Duration::from_secs(10),
+        ),
+        "a probe selected before source revoke cannot repopulate verified cache"
+    );
+}
+
+#[test]
+fn revoking_evicted_source_fences_its_in_flight_binding_probe() {
+    let recipient = Pubkey::from("account-evicted-source");
+    let address = EndpointAddr::new(SecretKey::from_bytes(&[19; 32]).public());
+    let mut state = DestinationWindow::default();
+    state.observe_rendezvous("cn-00", &recipient, vec![address.clone()]);
+    let (_, old_revision) = state.select(
+        &recipient,
+        [&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()],
+    );
+    for index in 1..=MAX_RENDEZVOUS_SOURCES {
+        state.observe_rendezvous(&format!("cn-{index:02}"), &recipient, Vec::new());
+    }
+    assert!(
+        !state.entries[&recipient]
+            .rendezvous_sources
+            .contains_key("cn-00")
+    );
+    state.clear_rendezvous(Some("cn-00"));
+    assert!(
+        !state.store_verified(
+            &recipient,
+            old_revision,
+            address,
+            Some("cn-00".into()),
+            i64::MAX,
+            Instant::now() + Duration::from_secs(10),
+        ),
+        "source revoke must fence an old probe even after source eviction"
+    );
 }
 
 #[test]
