@@ -8,13 +8,15 @@
 
 use std::fmt::Display;
 use std::future::Future;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use kukuri_core::VerifiedReceiveOffer;
 use kukuri_transport::{
-    PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchRetryState,
-    RequestRateDecision, SharedRemoteFetchResult,
+    EndpointAddr, PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchRetryState,
+    RequestRateDecision, SharedRemoteFetchResult, fetch_receive_endpoint_binding,
 };
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
@@ -91,6 +93,110 @@ async fn run_display_fetch(
     future: impl Future<Output = Result<Option<Vec<u8>>>>,
 ) -> Result<Option<Vec<u8>>> {
     within_remote_fetch_budget(future).await.unwrap_or(Ok(None))
+}
+
+/// One signed provider and one bounded ephemeral manifest. The account binding
+/// and Bao content hash are checked on the same selected endpoint, without
+/// falling back to the general peer walk or persisting the result.
+pub async fn fetch_verified_receive_offer_payload(
+    node: &Arc<IrohDocsNode>,
+    offer: &VerifiedReceiveOffer,
+    provider: EndpointAddr,
+) -> Result<Vec<u8>> {
+    let reference = offer.reference();
+    anyhow::ensure!(
+        provider.id.to_string() == reference.provider_endpoint_id,
+        "receive offer provider endpoint mismatch"
+    );
+    let max_bytes = reference.payload_bytes as u64;
+    anyhow::ensure!(
+        (1..=kukuri_core::RECEIVE_PAYLOAD_MAX_BYTES as u64).contains(&max_bytes),
+        "invalid receive offer payload size"
+    );
+    let hash = iroh_blobs::Hash::from_str(reference.payload_hash.as_str())?;
+    anyhow::ensure!(
+        current_time_ms()? < offer.expires_at_ms(),
+        "receive offer expired before fetch"
+    );
+    let deadline = Instant::now() + REMOTE_FETCH_TOTAL_TIMEOUT;
+    let lease = node
+        .network_work
+        .acquire_bounded_blob(*hash.as_bytes(), max_bytes, deadline)
+        .await?;
+    let work = async {
+        anyhow::ensure!(
+            current_time_ms()? < offer.expires_at_ms(),
+            "receive offer expired before fetch"
+        );
+        let binding = fetch_receive_endpoint_binding(
+            node.endpoint(),
+            provider.clone(),
+            offer.sender(),
+            deadline,
+        )
+        .await?;
+        anyhow::ensure!(
+            binding.endpoint_id() == reference.provider_endpoint_id,
+            "receive offer binding provider mismatch"
+        );
+        let now_ms = current_time_ms()?;
+        anyhow::ensure!(
+            now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
+            "receive offer or provider binding expired before payload request"
+        );
+        let connection = timeout(
+            REMOTE_FETCH_CONNECT_TIMEOUT,
+            node.endpoint().connect(provider, iroh_blobs::ALPN),
+        )
+        .await
+        .context("receive offer provider connect timed out")??;
+        let close = CloseOfferConnection(connection.clone());
+        let bytes = timeout(
+            REMOTE_FETCH_TRANSFER_TIMEOUT,
+            fetch_ephemeral(connection, hash, FetchMode::EphemeralBounded(max_bytes)),
+        )
+        .await
+        .context("receive offer payload transfer timed out")??;
+        drop(close);
+        anyhow::ensure!(
+            bytes.len() as u64 == max_bytes,
+            "receive offer payload size mismatch"
+        );
+        anyhow::ensure!(
+            iroh_blobs::Hash::new(&bytes) == hash,
+            "receive offer payload hash mismatch"
+        );
+        let now_ms = current_time_ms()?;
+        anyhow::ensure!(
+            now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
+            "receive offer or provider binding expired"
+        );
+        Ok(bytes)
+    };
+    let result = tokio::select! {
+        biased;
+        _ = lease.cancelled() => anyhow::bail!("receive offer payload fetch cancelled"),
+        result = tokio::time::timeout_at(deadline, work) => {
+            result.context("receive offer payload fetch timed out")?
+        }
+    };
+    anyhow::ensure!(lease.finish(), "receive offer payload fetch scope ended");
+    result
+}
+
+fn current_time_ms() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?)
+}
+
+struct CloseOfferConnection(iroh::endpoint::Connection);
+
+impl Drop for CloseOfferConnection {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"receive offer payload complete");
+    }
 }
 
 /// remote fetch の取得モード。
