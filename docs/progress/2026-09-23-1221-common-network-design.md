@@ -252,3 +252,22 @@ head `0d4506ad`の独立監査はN47/FETCH-2でFAIL。service IDにretry Arcの�
 - 取得候補は各sourceでcursorを進めながら最大4 IDだけ読み、直近に成功した2 IDと30秒以内に得た4 IDを同じsourceに存在する場合だけ加える。実addressを最大12件だけmaterialize/rankし、1要求は最大4peerへ進む。新しいmanual ticketが既存の成功peer4件に押し出される失敗を修正前に再現し、最新ticketを4枠に含める。直近ticketの連続blob要求も修正前FAIL→修正後PASS。source履歴100/1,000件で読取りは各source4以下、別bookにだけ存在する健康peerは選択0。transport関連testsと実blob取得・docsのdirect候補testが成功。
 
 保存済みsource台帳とSDK内部address mapはまだ上限化していない。`merged_peers`、`available_peer_ids`、保存/復旧のsnapshotは全sourceを読むのでP3に残し、この結果を全peer経路の完了とは判定しない。protocolごとのroute優先度はper-peer `connect_candidates`のdirect→remote_info→relay順を維持した。全体・slow/複数nodeの確認はPR/CIへ委譲する。
+
+## P3: 本番nodeへの署名付き受信binding登録
+
+ADR 0055 §4.1の交換proofを本番nodeで利用できるようにする。対象はN53〜55とNW-8のendpoint対応であり、
+暗号化offer配送、scope認可、既存通知/DM listenerの移行は後続である。
+
+- node生成時はアカウント鍵が未読込なので、Routerには空のslotだけを登録し、要求を即拒否する。
+- identity load後のruntimeだけが同じnodeへ鍵を導入する。別accountへの差し替えは拒否し、
+  stack再構築では旧nodeを停止してから同じ鍵を新nodeへ導入し、service差し替え前に応答可能にする。
+- 期限切れを避ける独立timerを増やさず、2件のserver受付の中で要求時に最大300秒のbindingを署名する。
+  shutdown開始時は新規受付を閉じ、進行中要求の終了を待って鍵を解除する。
+
+局所確認はtransportの実QUIC slot testとdesktop-runtimeの実node再構築test、変更crateの
+関連clippy・サイズ検査を行う。全体・slowはPR/CI、固定headの鍵/外部応答境界は独立監査で確認する。
+
+#1313 merge後のmain `6b03893a`へ差分を載せ直し、nodeの共有healthと受信slotを併存させた。
+局所結果はtransportのbinding交換6件、desktop-runtimeの実account起動/stack再構築2件、
+移動した既存docs author test1件が成功。変更3crateのall-targets clippy、rustfmt、差分、
+ファイルサイズ検査が成功。全体・slowは同headのPR/CIへ委譲する。

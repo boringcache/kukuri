@@ -15,8 +15,9 @@ use iroh_blobs::store::{fs::options::Options as BlobStoreOptions, mem::MemStore}
 use iroh_docs::api::DocsApi;
 use iroh_gossip::net::Gossip;
 use kukuri_transport::{
-    ConnectMode, DhtDiscoveryOptions, TransportNetworkConfig, TransportRelayConfig,
-    build_endpoint_builder, prepare_endpoint_for_discovery, sync_endpoint_relay_config,
+    ConnectMode, DhtDiscoveryOptions, RECEIVE_BINDING_ALPN, ReceiveBindingSlot,
+    TransportNetworkConfig, TransportRelayConfig, build_endpoint_builder,
+    prepare_endpoint_for_discovery, sync_endpoint_relay_config,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -146,6 +147,7 @@ pub struct IrohDocsNode {
     docs: DocsApi,
     blobs: BlobStore,
     fetch_peer_health: Arc<kukuri_transport::BlobPeerHealth>,
+    receive_binding: ReceiveBindingSlot,
     pub(crate) network_work: Arc<crate::network_work::NetworkWorkRuntime>,
     shutdown_started: AtomicBool,
     shutdown_result: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
@@ -341,6 +343,7 @@ impl IrohDocsNode {
                 }
             }
         };
+        let receive_binding = ReceiveBindingSlot::new(endpoint.id());
         let router = Router::builder(endpoint.clone())
             .accept(
                 iroh_blobs::ALPN,
@@ -348,6 +351,7 @@ impl IrohDocsNode {
             )
             .accept(iroh_docs::ALPN, docs.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(RECEIVE_BINDING_ALPN, receive_binding.clone())
             .spawn();
 
         let node = Arc::new(Self {
@@ -359,6 +363,7 @@ impl IrohDocsNode {
             docs: docs.api().clone(),
             blobs,
             fetch_peer_health: Arc::new(kukuri_transport::BlobPeerHealth::default()),
+            receive_binding,
             network_work: Arc::new(crate::network_work::NetworkWorkRuntime::default()),
             shutdown_started: AtomicBool::new(false),
             shutdown_result: tokio::sync::watch::channel(None).0,
@@ -383,6 +388,10 @@ impl IrohDocsNode {
 
     pub fn fetch_peer_health(&self) -> Arc<kukuri_transport::BlobPeerHealth> {
         self.fetch_peer_health.clone()
+    }
+
+    pub async fn install_receive_binding(&self, keys: Arc<kukuri_core::KukuriKeys>) -> Result<()> {
+        self.receive_binding.install(keys).await
     }
 
     pub async fn relay_urls(&self) -> Vec<RelayUrl> {
@@ -462,6 +471,7 @@ impl IrohDocsNode {
 
     pub async fn shutdown(self: Arc<Self>) -> Result<()> {
         self.network_work.close();
+        self.receive_binding.reject_new_requests();
         let mut result = self.shutdown_result.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let node = self.clone();
@@ -487,6 +497,7 @@ impl IrohDocsNode {
 
     async fn shutdown_owned(&self) -> Result<()> {
         self.network_work.close();
+        self.receive_binding.clear().await;
         // Flush before the router invokes BlobsProtocol::shutdown. A later
         // shutdown RPC may legitimately find that actor already closed.
         let blob_flush = self.blobs.sync_db().await;
@@ -512,6 +523,7 @@ impl IrohDocsNode {
 impl Drop for IrohDocsNode {
     fn drop(&mut self) {
         self.network_work.close();
+        self.receive_binding.reject_new_requests();
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }

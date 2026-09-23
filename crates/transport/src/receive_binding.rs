@@ -2,6 +2,7 @@
 //! このprotocolだけでは投稿のscope権限や通知の配送完了を認定しない。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -9,7 +10,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use kukuri_core::{
-    Pubkey, RECEIVE_ENDPOINT_BINDING_MAX_BYTES, ReceiveEndpointBindingV1,
+    KukuriKeys, Pubkey, RECEIVE_ENDPOINT_BINDING_MAX_BYTES,
+    RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS, ReceiveEndpointBindingV1,
     VerifiedReceiveEndpointBinding, receive_route_for_account,
 };
 use tokio::sync::{RwLock, Semaphore};
@@ -27,6 +29,109 @@ pub struct ReceiveBindingProtocol {
     account: Pubkey,
     binding: Arc<RwLock<ReceiveEndpointBindingV1>>,
     permits: Arc<Semaphore>,
+}
+
+/// Router起動時はaccount未確定なので、署名鍵の導入後だけbindingを返す。
+/// 固定のbindingを保持せず、要求時に短命の署名を作るため更新timerを持たない。
+#[derive(Clone)]
+pub struct ReceiveBindingSlot {
+    local_endpoint: EndpointId,
+    signer: Arc<RwLock<Option<Arc<KukuriKeys>>>>,
+    permits: Arc<Semaphore>,
+    closed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for ReceiveBindingSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiveBindingSlot")
+            .field("local_endpoint", &self.local_endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReceiveBindingSlot {
+    pub fn new(local_endpoint: EndpointId) -> Self {
+        Self {
+            local_endpoint,
+            signer: Arc::new(RwLock::new(None)),
+            permits: Arc::new(Semaphore::new(RECEIVE_BINDING_CONCURRENT_REQUESTS)),
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 既存nodeを別accountへ付け替えない。account切替はnode全体の再生成で行う。
+    pub async fn install(&self, keys: Arc<KukuriKeys>) -> Result<()> {
+        ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "receive binding slot is closed"
+        );
+        let now = now_ms();
+        ReceiveEndpointBindingV1::sign(
+            &keys,
+            &self.local_endpoint.to_string(),
+            now,
+            now + RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS,
+        )?;
+        let mut current = self.signer.write().await;
+        ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "receive binding slot is closed"
+        );
+        if let Some(existing) = current.as_ref() {
+            ensure!(
+                existing.public_key() == keys.public_key(),
+                "receive binding account cannot change on a live node"
+            );
+        }
+        *current = Some(keys);
+        Ok(())
+    }
+
+    pub async fn clear(&self) {
+        self.reject_new_requests();
+        *self.signer.write().await = None;
+    }
+
+    pub fn reject_new_requests(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    async fn serve(&self, connection: &Connection) -> Result<()> {
+        let signer = self.signer.read().await;
+        let keys = signer
+            .as_ref()
+            .context("receive binding account is not installed")?;
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        ensure!(
+            recv.read_to_end(1).await? == [1],
+            "unsupported binding request"
+        );
+        let now = now_ms();
+        let binding = ReceiveEndpointBindingV1::sign(
+            keys.as_ref(),
+            &self.local_endpoint.to_string(),
+            now,
+            now + RECEIVE_ENDPOINT_BINDING_MAX_LIFETIME_MS,
+        )?;
+        write_binding(&mut send, &binding).await
+    }
+}
+
+impl ProtocolHandler for ReceiveBindingSlot {
+    async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
+        let connection = CloseBindingConnection(connection);
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Ok(_permit) = self.permits.try_acquire() else {
+            return Ok(());
+        };
+        timeout(RECEIVE_BINDING_SERVE_TIMEOUT, self.serve(&connection.0))
+            .await
+            .context("receive binding request timed out")
+            .and_then(|result| result)
+            .map_err(|error| AcceptError::from_boxed(error.into_boxed_dyn_error()))
+    }
 }
 
 impl ReceiveBindingProtocol {
@@ -59,16 +164,23 @@ impl ReceiveBindingProtocol {
         );
         let binding = self.binding.read().await.clone();
         binding.verify_for(&self.account, &self.local_endpoint.to_string(), now_ms())?;
-        let bytes = serde_json::to_vec(&binding)?;
-        ensure!(
-            bytes.len() <= RECEIVE_ENDPOINT_BINDING_MAX_BYTES,
-            "binding response is too large"
-        );
-        send.write_all(&bytes).await?;
-        send.finish()?;
-        send.stopped().await?;
-        Ok(())
+        write_binding(&mut send, &binding).await
     }
+}
+
+async fn write_binding(
+    send: &mut iroh::endpoint::SendStream,
+    binding: &ReceiveEndpointBindingV1,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(binding)?;
+    ensure!(
+        bytes.len() <= RECEIVE_ENDPOINT_BINDING_MAX_BYTES,
+        "binding response is too large"
+    );
+    send.write_all(&bytes).await?;
+    send.finish()?;
+    send.stopped().await?;
+    Ok(())
 }
 
 impl ProtocolHandler for ReceiveBindingProtocol {

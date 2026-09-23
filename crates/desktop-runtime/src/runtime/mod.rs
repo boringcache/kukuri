@@ -383,6 +383,9 @@ impl DesktopRuntime {
         iroh_stack
             .use_account_docs_author(keys.derive_docs_author_seed())
             .await?;
+        iroh_stack
+            .use_account_receive_binding(Arc::new(keys.clone()))
+            .await?;
         let author_keys = Arc::new(keys.clone());
         let services = ServiceHandles::new(
             store.clone(),
