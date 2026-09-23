@@ -54,14 +54,14 @@ impl Default for OsNotificationSettings {
     }
 }
 
-/// High-water mark over `received_at` plus the ids that share that timestamp,
-/// so we never re-toast a notification we've already dispatched while keeping
-/// memory bounded (notifications are returned newest-first and unbounded).
+/// Insertion-order high-water mark. The old timestamp/ID-set file is read as
+/// sequence zero; pre-migration rows have no dispatch sequence, so they cannot
+/// become a toast backlog on upgrade.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DispatchCursor {
-    last_received_at: i64,
-    ids_at_last: Vec<String>,
+    #[serde(default)]
+    last_sequence: i64,
 }
 
 /// Shared, persisted state for the background dispatcher. Managed by Tauri so the
@@ -80,21 +80,19 @@ pub struct OsNotificationBackground {
 
 impl OsNotificationBackground {
     pub fn new(app: &AppHandle) -> Self {
-        let dir =
-            crate::state::base_app_data_dir(app).unwrap_or_else(|_| PathBuf::from("."));
+        let dir = crate::state::base_app_data_dir(app).unwrap_or_else(|_| PathBuf::from("."));
         let settings_path = dir.join("os-notification-settings.json");
         let cursor_path = dir.join("os-notification-cursor.json");
 
         let settings = read_json(&settings_path).unwrap_or_default();
-        let cursor_existed = cursor_path.exists();
-        let cursor = read_json(&cursor_path).unwrap_or_default();
+        let cursor = read_cursor(&cursor_path);
 
         Self {
             settings: Mutex::new(settings),
             settings_path,
-            cursor: Mutex::new(cursor),
+            cursor: Mutex::new(cursor.clone().unwrap_or_default()),
             cursor_path,
-            baseline_pending: Mutex::new(!cursor_existed),
+            baseline_pending: Mutex::new(cursor.is_none()),
             local_pubkey: Mutex::new(String::new()),
         }
     }
@@ -193,7 +191,7 @@ pub fn spawn(app: AppHandle) {
                         if matches!(
                             event,
                             kukuri_desktop_runtime::RuntimeEvent::NotificationStatusChanged
-                        ) && let Err(error) = poll_once(&event_app).await {
+                        ) && let Err(error) = drain_pending(&event_app).await {
                             debug!(%error, "event-driven notification poll skipped");
                         }
                     }
@@ -208,49 +206,57 @@ pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(FALLBACK_POLL_INTERVAL).await;
-            if let Err(error) = poll_once(&app).await {
+            if let Err(error) = drain_pending(&app).await {
                 debug!(%error, "background notification poll skipped");
             }
         }
     });
 }
 
-async fn poll_once(app: &AppHandle) -> anyhow::Result<()> {
+async fn drain_pending(app: &AppHandle) -> anyhow::Result<()> {
+    while poll_once(app).await? {
+        // Each page releases the account-switch guard before the next one.
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+/// Returns true when a full page was processed and another page may be ready.
+async fn poll_once(app: &AppHandle) -> anyhow::Result<bool> {
     let operation = app.state::<DesktopOperationState>();
     let _guard = operation.switch_guard.lock().await;
     if crate::desktop_lifecycle::require_running(app).is_err() {
-        return Ok(());
+        return Ok(false);
     }
     if !runtime_access_allowed(&app.state::<DesktopStartupState>().status()) {
-        return Ok(());
+        return Ok(false);
     }
     let Some(state) = app.try_state::<DesktopState>() else {
         // Runtime failed to initialize; nothing to dispatch.
-        return Ok(());
+        return Ok(false);
     };
     let background = app.state::<OsNotificationBackground>();
 
-    let notifications = state.runtime().list_notifications().await?;
-    let local_pubkey = resolve_local_pubkey(&state, &background).await;
-    let settings = background.settings_snapshot();
-    let adult_content_enabled = state
-        .runtime()
-        .get_content_display_settings()
-        .adult_content_enabled;
-
-    let next_cursor = compute_cursor(&notifications);
-
     // First successful poll only records a baseline so the existing backlog does
     // not surface as a burst of toasts.
-    if std::mem::replace(
-        &mut *background
-            .baseline_pending
-            .lock()
-            .expect("baseline lock poisoned"),
-        false,
-    ) {
-        store_cursor(&background, next_cursor);
-        return Ok(());
+    if *background
+        .baseline_pending
+        .lock()
+        .expect("baseline lock poisoned")
+    {
+        let head = state.runtime().notification_dispatch_head().await?;
+        if store_cursor(
+            &background,
+            DispatchCursor {
+                last_sequence: head,
+            },
+        ) {
+            *background
+                .baseline_pending
+                .lock()
+                .expect("baseline lock poisoned") = false;
+        }
+        return Ok(false);
     }
 
     let previous = background
@@ -258,13 +264,24 @@ async fn poll_once(app: &AppHandle) -> anyhow::Result<()> {
         .lock()
         .expect("cursor lock poisoned")
         .clone();
-    let to_dispatch: Vec<&NotificationView> = notifications
-        .iter()
-        .filter(|notification| is_new(notification, &previous))
-        .filter(|notification| should_send(notification, &settings, &local_pubkey))
-        .collect();
+    let notifications = state
+        .runtime()
+        .list_notification_dispatch_after(previous.last_sequence)
+        .await?;
+    if notifications.is_empty() {
+        return Ok(false);
+    }
+    let local_pubkey = resolve_local_pubkey(&state, &background).await;
+    let settings = background.settings_snapshot();
+    let adult_content_enabled = state
+        .runtime()
+        .get_content_display_settings()
+        .adult_content_enabled;
 
-    for notification in &to_dispatch {
+    for (_, notification) in &notifications {
+        if !should_send(notification, &settings, &local_pubkey) {
+            continue;
+        }
         let title = notification_title(&notification.kind).to_string();
         let body = notification_body(notification, settings.preview_body, adult_content_enabled);
         if let Err(error) = show_platform_notification(
@@ -278,8 +295,8 @@ async fn poll_once(app: &AppHandle) -> anyhow::Result<()> {
         }
     }
 
-    store_cursor(&background, next_cursor);
-    Ok(())
+    let _ = store_cursor(&background, cursor_after_page(&previous, &notifications));
+    Ok(notifications.len() == kukuri_app_api::NOTIFICATION_DISPATCH_PAGE_SIZE)
 }
 
 async fn resolve_local_pubkey(
@@ -310,45 +327,29 @@ async fn resolve_local_pubkey(
     resolved
 }
 
-fn store_cursor(background: &OsNotificationBackground, cursor: DispatchCursor) {
+fn store_cursor(background: &OsNotificationBackground, cursor: DispatchCursor) -> bool {
     if let Ok(mut guard) = background.cursor.lock() {
         *guard = cursor.clone();
     }
-    if let Err(error) = write_json(&background.cursor_path, &cursor) {
-        warn!(%error, "failed to persist OS notification cursor");
+    match write_json(&background.cursor_path, &cursor) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(%error, "failed to persist OS notification cursor");
+            false
+        }
     }
 }
 
-/// A notification is new when it is strictly newer than the cursor, or shares the
-/// cursor's timestamp but was not already handled at that timestamp.
-fn is_new(notification: &NotificationView, cursor: &DispatchCursor) -> bool {
-    if notification.received_at > cursor.last_received_at {
-        return true;
-    }
-    if notification.received_at == cursor.last_received_at {
-        return !cursor
-            .ids_at_last
-            .iter()
-            .any(|id| id == &notification.notification_id);
-    }
-    false
-}
-
-/// Recompute the cursor from the full (newest-first) notification list.
-fn compute_cursor(notifications: &[NotificationView]) -> DispatchCursor {
-    let last_received_at = notifications
-        .iter()
-        .map(|notification| notification.received_at)
-        .max()
-        .unwrap_or(0);
-    let ids_at_last = notifications
-        .iter()
-        .filter(|notification| notification.received_at == last_received_at)
-        .map(|notification| notification.notification_id.clone())
-        .collect();
+fn cursor_after_page(
+    previous: &DispatchCursor,
+    notifications: &[(i64, NotificationView)],
+) -> DispatchCursor {
     DispatchCursor {
-        last_received_at,
-        ids_at_last,
+        last_sequence: notifications
+            .last()
+            .map(|(sequence, _)| *sequence)
+            .unwrap_or(previous.last_sequence)
+            .max(previous.last_sequence),
     }
 }
 
@@ -420,6 +421,13 @@ fn notification_body(
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Option<T> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn read_cursor(path: &PathBuf) -> Option<DispatchCursor> {
+    if std::fs::metadata(path).ok()?.len() > 1_024 {
+        return None;
+    }
+    read_json::<DispatchCursor>(path).filter(|cursor| cursor.last_sequence >= 0)
 }
 
 fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> anyhow::Result<()> {
@@ -597,24 +605,57 @@ mod tests {
     }
 
     #[test]
-    fn cursor_detects_only_new_notifications() {
-        // Newest-first, like the runtime returns.
-        let first = vec![
-            notification("n2", NotificationKind::Mention, 20, None, "x", None),
-            notification("n1", NotificationKind::Mention, 10, None, "x", None),
+    fn cursor_tracks_insertion_order_without_timestamp_tie_state() {
+        let old = serde_json::json!({"lastReceivedAt":20,"idsAtLast":["n1","n2"]});
+        let migrated: DispatchCursor = serde_json::from_value(old).unwrap();
+        assert_eq!(migrated.last_sequence, 0);
+
+        let page = vec![
+            (
+                1,
+                notification("n2", NotificationKind::Mention, 20, None, "x", None),
+            ),
+            (
+                2,
+                notification("n1", NotificationKind::Mention, 20, None, "x", None),
+            ),
         ];
-        let cursor = compute_cursor(&first);
-        assert_eq!(cursor.last_received_at, 20);
-        assert_eq!(cursor.ids_at_last, vec!["n2".to_string()]);
+        let cursor = cursor_after_page(&migrated, &page);
+        assert_eq!(cursor.last_sequence, 2);
+        assert_eq!(cursor_after_page(&cursor, &[]).last_sequence, 2);
+    }
 
-        // Nothing new against its own cursor.
-        assert!(!is_new(&first[0], &cursor));
-        assert!(!is_new(&first[1], &cursor));
+    #[test]
+    fn dispatch_cursor_storage_does_not_grow_with_same_timestamp_history() {
+        let notifications = (0..2_048)
+            .map(|index| {
+                (
+                    index + 1,
+                    notification(
+                        &format!("notification-{index}"),
+                        NotificationKind::Mention,
+                        20,
+                        None,
+                        "actor",
+                        None,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let cursor = cursor_after_page(&DispatchCursor::default(), &notifications);
+        assert!(
+            serde_json::to_vec(&cursor).unwrap().len() <= 256,
+            "dispatch cursor must not retain a growing set of IDs"
+        );
+    }
 
-        // A strictly newer item is new; a second item at the same timestamp is new.
-        let n3 = notification("n3", NotificationKind::Mention, 30, None, "x", None);
-        let n2b = notification("n2b", NotificationKind::Mention, 20, None, "x", None);
-        assert!(is_new(&n3, &cursor));
-        assert!(is_new(&n2b, &cursor));
+    #[test]
+    fn oversized_or_negative_cursor_restarts_at_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cursor.json");
+        std::fs::write(&path, vec![b'x'; 1_025]).unwrap();
+        assert!(read_cursor(&path).is_none());
+        std::fs::write(&path, br#"{"lastSequence":-1}"#).unwrap();
+        assert!(read_cursor(&path).is_none());
     }
 }

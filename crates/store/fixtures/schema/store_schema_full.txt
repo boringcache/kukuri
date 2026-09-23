@@ -165,6 +165,9 @@ table live_session_cache
 table muted_authors
   column cid=0 name=author_pubkey type=TEXT notnull=0 default=None pk=1
   column cid=1 name=muted_at type=INTEGER notnull=1 default=None pk=0
+table notification_dispatch_clock
+  column cid=0 name=singleton type=INTEGER notnull=0 default=None pk=1
+  column cid=1 name=last_seq type=INTEGER notnull=1 default=None pk=0
 table notifications
   column cid=0 name=notification_id type=TEXT notnull=0 default=None pk=1
   column cid=1 name=recipient_pubkey type=TEXT notnull=1 default=None pk=0
@@ -182,6 +185,7 @@ table notifications
   column cid=13 name=received_at type=INTEGER notnull=1 default=None pk=0
   column cid=14 name=read_at type=INTEGER notnull=0 default=None pk=0
   column cid=15 name=content_labels_json type=TEXT notnull=0 default=None pk=0
+  column cid=16 name=dispatch_seq type=INTEGER notnull=0 default=None pk=0
 table object_index_cache
   column cid=0 name=object_id type=TEXT notnull=0 default=None pk=1
   column cid=1 name=topic_id type=TEXT notnull=1 default=None pk=0
@@ -384,6 +388,9 @@ index idx_muted_authors_muted_at table=muted_authors unique=0 origin=c partial=0
   key seqno=0 cid=1 name=Some("muted_at")
   key seqno=1 cid=0 name=Some("author_pubkey")
   sql=Some("CREATE INDEX idx_muted_authors_muted_at ON muted_authors(muted_at DESC, author_pubkey ASC)")
+index idx_notifications_dispatch_seq table=notifications unique=0 origin=c partial=1
+  key seqno=0 cid=16 name=Some("dispatch_seq")
+  sql=Some("CREATE INDEX idx_notifications_dispatch_seq ON notifications(dispatch_seq) WHERE dispatch_seq IS NOT NULL")
 index idx_notifications_dm_dedupe table=notifications unique=1 origin=c partial=1
   key seqno=0 cid=1 name=Some("recipient_pubkey")
   key seqno=1 cid=2 name=Some("kind")
@@ -572,3 +579,4 @@ index sqlite_autoindex_topic_objects_1 table=topic_objects unique=1 origin=pk pa
 index sqlite_autoindex_ui_state_1 table=ui_state unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("state_key")
   sql=None
+trigger notifications_assign_dispatch_seq table=notifications sql="CREATE TRIGGER notifications_assign_dispatch_seq AFTER INSERT ON notifications BEGIN UPDATE notification_dispatch_clock SET last_seq = last_seq + 1 WHERE singleton = 1; UPDATE notifications SET dispatch_seq = (SELECT last_seq FROM notification_dispatch_clock WHERE singleton = 1) WHERE notification_id = NEW.notification_id; END"

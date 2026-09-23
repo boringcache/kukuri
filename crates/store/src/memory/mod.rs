@@ -37,7 +37,12 @@ type MemoryReactionProjectionRows = HashMap<(String, String, String), ReactionPr
 type MemoryDirectMessageRows = HashMap<(String, String), DirectMessageMessageRow>;
 type MemoryDirectMessageOutboxRows = HashMap<(String, String), DirectMessageOutboxRow>;
 type MemoryDirectMessageTombstones = HashMap<(String, String), DirectMessageTombstoneRow>;
-type MemoryNotificationRows = HashMap<String, NotificationRow>;
+#[derive(Default)]
+struct MemoryNotificationRows {
+    rows: HashMap<String, NotificationRow>,
+    by_sequence: BTreeMap<i64, String>,
+    last_sequence: i64,
+}
 type MemoryContentObservationRows =
     HashMap<(String, String, String, String), ContentObservationRow>;
 type ProjectionScope = (String, String);

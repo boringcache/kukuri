@@ -271,3 +271,37 @@ ADR 0055 §4.1の交換proofを本番nodeで利用できるようにする。対
 局所結果はtransportのbinding交換6件、desktop-runtimeの実account起動/stack再構築2件、
 移動した既存docs author test1件が成功。変更3crateのall-targets clippy、rustfmt、差分、
 ファイルサイズ検査が成功。全体・slowは同headのPR/CIへ委譲する。
+
+## P3: N16のOS通知dispatchを新規rowだけのcursorへ移す
+
+現行のTauri `poll_once`は受信eventと60秒fallbackのたびに`list_notifications`で全履歴を読み、
+最新`received_at`の全IDをcursor JSONへ保存する。2,048件が同一時刻ならcursorの件数とサイズも
+2,048件分になる。storeのSQLite queryも全rowを`fetch_all`する。これをN56/57として分離し、
+公開/非表示通知の既存対象範囲、OS設定、成人向けpreview guard、local-only inboxを維持する。
+
+- NOTIFY-1: 新規INSERTにだけ単調sequenceを割り当て、既存rowはmigration時にNULLのまま保持する。
+  重複INSERTはsequenceを増やさず、SQLite索引とmemory indexで64件ずつ読める。
+- NOTIFY-2: 初回起動・account切替・restoreはheadをbaselineにし、旧通知を一斉にtoastしない。
+  同じ時刻の新通知でも挿入順に漏れなく進み、cursorの保存サイズは履歴件数に依存しない。
+- NOTIFY-3: 1ページごとにaccount切替guardを解放し、各通知のquiet/read/self/種類設定と
+  成人向けpreview gateをOS表示より先に適用する。手動のinbox一覧は既存UI契約のまま残す。
+
+修正前のsource確認では`list_notifications().fetch_all`、`compute_cursor`の同時刻ID全列挙を確認。
+この境界のTauri回帰testを先行追加したが、Windowsローカルのtest executableは
+`STATUS_ENTRYPOINT_NOT_FOUND`で起動前に停止したためFAIL証跡には採用しない。
+同testはWSL/Linuxで実行し、storeの挿入順/移行負例と関連crateのcompileも局所で確認する。
+
+実装では新規INSERTだけを単調sequenceへ登録するSQLite triggerと、同じ順序を保つmemory indexを
+追加した。既存通知rowはNULLのままで、重複INSERTは番号を消費しない。64件のrange queryには
+`idx_notifications_dispatch_seq`を使うことをquery planで確認。Tauriはページ後にguardを解放して
+続きだけを処理し、cursorは単一整数にした。旧cursorの大きなファイルは1,024byteで読取りを止めて
+baselineへ戻す。旧OS設定・成人向けpreview・self/read判定はOS表示前のまま維持した。
+baselineの永続化に失敗した場合はbaseline_pendingを維持し、次のpollで再試行する。
+
+局所結果: storeの新規/重複/同時刻129件の3ページと再起動、旧rowを再toastしないmigrationの2件、
+既存notification backend parity、app-api通知14件、31世代のup/down/replayとschema goldenが成功。
+変更したstore/app-api/desktop-runtimeのall-targets clippy、Tauriのcheckとtest binary compileが成功。
+WindowsのTauri test executableは`STATUS_ENTRYPOINT_NOT_FOUND`で起動できなかったが、
+WSL/Linuxで当該`background_notifications` 8件が成功した。
+Tauri clippyは既存の3種類のlint（`drop_non_drop`、`collapsible_if`、`err_expect`）だけを
+明示的に除外して成功した。全体とslowはPR/CIで確認する。

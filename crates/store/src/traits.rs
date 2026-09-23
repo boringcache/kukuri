@@ -465,10 +465,19 @@ pub trait DirectMessageStore: Send + Sync {
 }
 
 /// 通知(実装: sqlite/notifications.rs)。
+pub const NOTIFICATION_DISPATCH_PAGE_SIZE: usize = 64;
+
 #[async_trait]
 pub trait NotificationStore: Send + Sync {
     async fn put_notification_if_absent(&self, row: NotificationRow) -> Result<bool>;
     async fn list_notifications(&self) -> Result<Vec<NotificationRow>>;
+    /// Only newly inserted notifications receive a dispatch sequence. Read a
+    /// fixed-size insertion-order page without scanning the existing inbox.
+    async fn list_notification_dispatch_after(
+        &self,
+        after_sequence: i64,
+    ) -> Result<Vec<(i64, NotificationRow)>>;
+    async fn notification_dispatch_head(&self) -> Result<i64>;
     async fn mark_notification_read(&self, notification_id: &str, read_at: i64) -> Result<()>;
     async fn mark_all_notifications_read(&self, read_at: i64) -> Result<()>;
     async fn count_unread_notifications(&self) -> Result<usize>;
