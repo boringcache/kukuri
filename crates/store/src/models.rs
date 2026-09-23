@@ -275,6 +275,7 @@ pub struct DirectMessageOutboxCursor {
 pub struct DirectMessageOutboxPage {
     pub items: Vec<DirectMessageOutboxRow>,
     pub next_cursor: Option<DirectMessageOutboxCursor>,
+    pub cycle_end: Option<DirectMessageOutboxCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

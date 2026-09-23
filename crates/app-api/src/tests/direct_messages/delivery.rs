@@ -58,6 +58,7 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
     }
     let hint_transport = Arc::new(TrackingHintTransport::default());
     let topic = derive_direct_message_topic(&local_keys, &Pubkey::from(peer.as_str())).unwrap();
+    let projection_store = store.clone();
     let services = ServiceHandles::new(
         store.clone(),
         store,
@@ -68,12 +69,14 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
         local_keys,
     );
     let mut cursor = None;
+    let mut cycle_end = None;
     for (page_index, expected) in [64, 64, 2].into_iter().enumerate() {
-        let (published, next) = AppService::flush_direct_message_outbox_page_for_peer(
+        let (published, next, end) = AppService::flush_direct_message_outbox_page_for_peer(
             &services,
             local.as_str(),
             peer.as_str(),
             cursor.as_ref(),
+            cycle_end.as_ref(),
         )
         .await
         .unwrap();
@@ -83,6 +86,24 @@ async fn dm_outbox_retry_reads_only_one_peer_page_per_tick() {
             [64, 128, 130][page_index]
         );
         cursor = next;
+        cycle_end = end;
+        if page_index < 2 {
+            for index in 0..64 {
+                DirectMessageStore::put_direct_message_outbox(
+                    projection_store.as_ref(),
+                    DirectMessageOutboxRow {
+                        dm_id: "dm-target".into(),
+                        message_id: format!("new-{page_index}-{index:04}"),
+                        peer_pubkey: peer.clone(),
+                        frame_blob_hash: BlobHash::new("target-hash"),
+                        created_at: 43 + page_index as i64,
+                        last_attempt_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
     }
     assert!(cursor.is_none());
     let mut fresh_hints = hint_transport.subscribe_hints(&topic).await.unwrap();

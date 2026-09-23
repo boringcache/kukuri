@@ -298,7 +298,12 @@ impl AppService {
         local_author_pubkey: &str,
         peer_pubkey: &str,
         after: Option<&kukuri_store::DirectMessageOutboxCursor>,
-    ) -> Result<(usize, Option<kukuri_store::DirectMessageOutboxCursor>)> {
+        cycle_end: Option<&kukuri_store::DirectMessageOutboxCursor>,
+    ) -> Result<(
+        usize,
+        Option<kukuri_store::DirectMessageOutboxCursor>,
+        Option<kukuri_store::DirectMessageOutboxCursor>,
+    )> {
         let projection_store = services.projection_store.as_ref();
         let transport = services.transport.as_ref();
         let keys = services.keys.as_ref();
@@ -306,7 +311,7 @@ impl AppService {
             .get_author_relationship(local_author_pubkey, peer_pubkey)
             .await?;
         if !relationship.as_ref().is_some_and(|value| value.mutual) {
-            return Ok((0, None));
+            return Ok((0, None, None));
         }
         let topic = derive_direct_message_topic(keys, &Pubkey::from(peer_pubkey))?;
         let peer_count = direct_message_topic_peer_count(transport, &topic).await?;
@@ -317,6 +322,7 @@ impl AppService {
             .list_direct_message_outbox_for_peer_page(
                 peer_pubkey,
                 after,
+                cycle_end,
                 kukuri_store::DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
             )
             .await?;
@@ -332,7 +338,12 @@ impl AppService {
                 .await?,
             );
         }
-        Ok((published, page.next_cursor))
+        let cycle_end = if page.next_cursor.is_some() {
+            page.cycle_end
+        } else {
+            None
+        };
+        Ok((published, page.next_cursor, cycle_end))
     }
 
     async fn publish_direct_message_outbox_row(

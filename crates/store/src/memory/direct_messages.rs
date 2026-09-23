@@ -211,14 +211,51 @@ impl DirectMessageStore for MemoryStore {
         &self,
         peer_pubkey: &str,
         after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
         limit: usize,
     ) -> Result<DirectMessageOutboxPage> {
         anyhow::ensure!(
             (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
             "invalid direct message outbox page limit"
         );
-        use std::ops::Bound::{Excluded, Included, Unbounded};
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing outbox cycle end"
+        );
+        use std::ops::Bound::{Excluded, Included};
         let rows = self.direct_message_outbox_rows.read().await;
+        let cycle_end = cycle_end.cloned().or_else(|| {
+            rows.by_peer
+                .range((
+                    Included((
+                        peer_pubkey.to_string(),
+                        i64::MIN,
+                        String::new(),
+                        String::new(),
+                    )),
+                    Excluded((
+                        format!("{peer_pubkey}\0"),
+                        i64::MIN,
+                        String::new(),
+                        String::new(),
+                    )),
+                ))
+                .next_back()
+                .map(
+                    |(_, created_at, message_id, dm_id)| DirectMessageOutboxCursor {
+                        created_at: *created_at,
+                        message_id: message_id.clone(),
+                        dm_id: dm_id.clone(),
+                    },
+                )
+        });
+        let Some(end) = cycle_end.as_ref() else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
         let start = after.map_or_else(
             || {
                 Included((
@@ -239,8 +276,15 @@ impl DirectMessageStore for MemoryStore {
         );
         let selected = rows
             .by_peer
-            .range((start, Unbounded))
-            .take_while(|key| key.0 == peer_pubkey)
+            .range((
+                start,
+                Included((
+                    peer_pubkey.to_string(),
+                    end.created_at,
+                    end.message_id.clone(),
+                    end.dm_id.clone(),
+                )),
+            ))
             .take(limit + 1)
             .collect::<Vec<_>>();
         let has_more = selected.len() > limit;
@@ -260,7 +304,11 @@ impl DirectMessageStore for MemoryStore {
         } else {
             None
         };
-        Ok(DirectMessageOutboxPage { items, next_cursor })
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end,
+        })
     }
 
     async fn touch_direct_message_outbox_attempt(

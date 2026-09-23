@@ -267,12 +267,42 @@ impl DirectMessageStore for SqliteStore {
         &self,
         peer_pubkey: &str,
         after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
         limit: usize,
     ) -> Result<DirectMessageOutboxPage> {
         anyhow::ensure!(
             (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
             "invalid direct message outbox page limit"
         );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing outbox cycle end"
+        );
+        let cycle_end = match cycle_end {
+            Some(end) => Some(end.clone()),
+            None => sqlx::query(
+                "SELECT created_at, message_id, dm_id FROM dm_outbox \
+                 WHERE peer_pubkey = ?1 ORDER BY created_at DESC, message_id DESC, dm_id DESC LIMIT 1",
+            )
+            .bind(peer_pubkey)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| -> Result<DirectMessageOutboxCursor> {
+                Ok(DirectMessageOutboxCursor {
+                    created_at: row.try_get("created_at")?,
+                    message_id: row.try_get("message_id")?,
+                    dm_id: row.try_get("dm_id")?,
+                })
+            })
+            .transpose()?,
+        };
+        let Some(end) = cycle_end.as_ref() else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
         let fetch_limit = (limit + 1) as i64;
         let rows = if let Some(after) = after {
             sqlx::query(
@@ -281,14 +311,18 @@ impl DirectMessageStore for SqliteStore {
                 FROM dm_outbox
                 WHERE peer_pubkey = ?1
                   AND (created_at, message_id, dm_id) > (?2, ?3, ?4)
+                  AND (created_at, message_id, dm_id) <= (?5, ?6, ?7)
                 ORDER BY created_at ASC, message_id ASC, dm_id ASC
-                LIMIT ?5
+                LIMIT ?8
                 "#,
             )
             .bind(peer_pubkey)
             .bind(after.created_at)
             .bind(after.message_id.as_str())
             .bind(after.dm_id.as_str())
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
             .bind(fetch_limit)
             .fetch_all(&self.pool)
             .await?
@@ -298,11 +332,15 @@ impl DirectMessageStore for SqliteStore {
                 SELECT dm_id, message_id, peer_pubkey, frame_blob_hash, created_at, last_attempt_at
                 FROM dm_outbox
                 WHERE peer_pubkey = ?1
+                  AND (created_at, message_id, dm_id) <= (?2, ?3, ?4)
                 ORDER BY created_at ASC, message_id ASC, dm_id ASC
-                LIMIT ?2
+                LIMIT ?5
                 "#,
             )
             .bind(peer_pubkey)
+            .bind(end.created_at)
+            .bind(end.message_id.as_str())
+            .bind(end.dm_id.as_str())
             .bind(fetch_limit)
             .fetch_all(&self.pool)
             .await?
@@ -322,7 +360,11 @@ impl DirectMessageStore for SqliteStore {
         } else {
             None
         };
-        Ok(DirectMessageOutboxPage { items, next_cursor })
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end,
+        })
     }
 
     async fn touch_direct_message_outbox_attempt(

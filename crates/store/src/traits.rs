@@ -448,6 +448,7 @@ pub trait DirectMessageStore: Send + Sync {
         &self,
         peer_pubkey: &str,
         after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
         limit: usize,
     ) -> Result<DirectMessageOutboxPage>;
     async fn touch_direct_message_outbox_attempt(

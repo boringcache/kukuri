@@ -432,16 +432,19 @@ impl AppService {
                 DIRECT_MESSAGE_RETRY_INTERVAL_MS,
             ));
             let mut outbox_cursor = None;
+            let mut outbox_cycle_end = None;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Ok((_, next_cursor)) = AppService::flush_direct_message_outbox_page_for_peer(
+                        if let Ok((_, next_cursor, cycle_end)) = AppService::flush_direct_message_outbox_page_for_peer(
                             &services,
                             local_author_pubkey.as_str(),
                             peer_for_task.as_str(),
                             outbox_cursor.as_ref(),
+                            outbox_cycle_end.as_ref(),
                         ).await {
                             outbox_cursor = next_cursor;
+                            outbox_cycle_end = cycle_end;
                         }
                     }
                     Some(event) = hint_stream.next() => {

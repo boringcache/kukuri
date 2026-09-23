@@ -156,6 +156,7 @@ async fn dm_restart_resumes_pending_outbox_and_local_delete_prevents_duplicate_r
         a_pubkey.as_str(),
         b_pubkey.as_str(),
         None,
+        None,
     )
     .await
     .expect("flush queued direct message after restart");
