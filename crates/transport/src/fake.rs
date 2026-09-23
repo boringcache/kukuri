@@ -8,7 +8,7 @@
 //! 共有 conformance suite は作らない(恒久 Out of Scope)。
 //! 再検討のトリガ: Fake と実物の挙動乖離に起因するバグが実際に発生した場合。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
@@ -27,9 +27,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::config::{ConnectMode, ConnectionPath, DiscoveryMode, DiscoverySnapshot, SeedPeer};
 use crate::diagnostics::{peer_status_detail, topic_status_detail};
 use crate::traits::{
-    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveOfferEnvelope, ReceiveOfferLease,
-    ReceiveOfferStop, ReceiveOfferSubscription, TopicPeerSnapshot, Transport,
-    next_receive_offer_lease,
+    HintEnvelope, HintStream, HintTransport, PeerSnapshot, ReceiveCandidateFence,
+    ReceiveOfferEnvelope, ReceiveOfferLease, ReceiveOfferStop, ReceiveOfferSubscription,
+    TopicPeerSnapshot, Transport, next_receive_offer_lease,
 };
 
 #[derive(Clone, Default)]
@@ -39,6 +39,13 @@ pub struct FakeNetwork {
     topic_subscribers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
     known_peers: Arc<Mutex<BTreeSet<String>>>,
     verified_receive_providers: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
+    receive_candidates: Arc<Mutex<FakeReceiveCandidates>>,
+}
+
+#[derive(Default)]
+struct FakeReceiveCandidates {
+    clear_epoch: u64,
+    by_account: HashMap<String, BTreeMap<String, Vec<EndpointAddr>>>,
 }
 
 impl FakeNetwork {
@@ -392,7 +399,64 @@ impl HintTransport for FakeTransport {
         recipient: &Pubkey,
     ) -> Result<Option<EndpointAddr>> {
         receive_route_for_account(recipient)?;
-        Ok(None)
+        let candidates = self
+            .network
+            .receive_candidates
+            .lock()
+            .await
+            .by_account
+            .get(recipient.as_str())
+            .map(|sources| sources.values().flatten().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let verified = self.network.verified_receive_providers.lock().await;
+        Ok(candidates.into_iter().find(|candidate| {
+            verified
+                .get(recipient.as_str())
+                .is_some_and(|ids| ids.contains(&candidate.id.to_string()))
+        }))
+    }
+
+    async fn receive_candidate_fence(&self) -> Result<ReceiveCandidateFence> {
+        Ok(ReceiveCandidateFence {
+            transport_instance: 0,
+            clear_epoch: self.network.receive_candidates.lock().await.clear_epoch,
+        })
+    }
+
+    async fn offer_receive_candidates(
+        &self,
+        source: &str,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+        fence: ReceiveCandidateFence,
+    ) -> Result<()> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(candidates.len() <= 8, "too many fake receive candidates");
+        let mut state = self.network.receive_candidates.lock().await;
+        anyhow::ensure!(
+            fence.transport_instance == 0 && fence.clear_epoch == state.clear_epoch,
+            "stale fake receive candidate fence"
+        );
+        state
+            .by_account
+            .entry(recipient.as_str().to_string())
+            .or_default()
+            .insert(source.to_string(), candidates);
+        Ok(())
+    }
+
+    async fn clear_receive_candidates(&self, source: Option<&str>) -> Result<()> {
+        let mut state = self.network.receive_candidates.lock().await;
+        state.clear_epoch = state.clear_epoch.wrapping_add(1);
+        match source {
+            Some(source) => {
+                for sources in state.by_account.values_mut() {
+                    sources.remove(source);
+                }
+            }
+            None => state.by_account.clear(),
+        }
+        Ok(())
     }
 
     async fn invalidate_receive_destination(

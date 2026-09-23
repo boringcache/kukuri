@@ -47,6 +47,8 @@ impl MemoryDirectMessageOutboxRows {
 
     fn insert(&mut self, row: DirectMessageOutboxRow) {
         self.remove(row.dm_id.as_str(), row.message_id.as_str());
+        self.by_created
+            .insert((row.created_at, row.message_id.clone(), row.dm_id.clone()));
         self.by_peer.insert(Self::peer_key(&row));
         self.index_attempt(&row);
         self.by_dm
@@ -61,6 +63,8 @@ impl MemoryDirectMessageOutboxRows {
         let row = self
             .rows
             .remove(&(dm_id.to_string(), message_id.to_string()))?;
+        self.by_created
+            .remove(&(row.created_at, row.message_id.clone(), row.dm_id.clone()));
         self.by_peer.remove(&Self::peer_key(&row));
         self.unindex_attempt(&row);
         if let Some(messages) = self.by_dm.get_mut(dm_id) {
@@ -78,6 +82,11 @@ impl MemoryDirectMessageOutboxRows {
         };
         for message_id in messages {
             if let Some(row) = self.rows.remove(&(dm_id.to_string(), message_id)) {
+                self.by_created.remove(&(
+                    row.created_at,
+                    row.message_id.clone(),
+                    row.dm_id.clone(),
+                ));
                 self.by_peer.remove(&Self::peer_key(&row));
                 self.unindex_attempt(&row);
             }
@@ -244,6 +253,78 @@ impl DirectMessageStore for MemoryStore {
                 .then_with(|| left.message_id.cmp(&right.message_id))
         });
         Ok(items)
+    }
+
+    async fn list_direct_message_outbox_candidate_page(
+        &self,
+        after: Option<&DirectMessageOutboxCursor>,
+        cycle_end: Option<&DirectMessageOutboxCursor>,
+        limit: usize,
+    ) -> Result<DirectMessageOutboxPage> {
+        anyhow::ensure!(
+            (1..=DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT).contains(&limit),
+            "invalid direct message outbox candidate page limit"
+        );
+        anyhow::ensure!(
+            after.is_none() || cycle_end.is_some(),
+            "missing candidate cycle end"
+        );
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let rows = self.direct_message_outbox_rows.read().await;
+        let end = cycle_end.cloned().or_else(|| {
+            rows.by_created
+                .last()
+                .map(
+                    |(created_at, message_id, dm_id)| DirectMessageOutboxCursor {
+                        created_at: *created_at,
+                        message_id: message_id.clone(),
+                        dm_id: dm_id.clone(),
+                    },
+                )
+        });
+        let Some(end) = end else {
+            return Ok(DirectMessageOutboxPage {
+                items: Vec::new(),
+                next_cursor: None,
+                cycle_end: None,
+            });
+        };
+        let start = after.map_or(Unbounded, |cursor| {
+            Excluded((
+                cursor.created_at,
+                cursor.message_id.clone(),
+                cursor.dm_id.clone(),
+            ))
+        });
+        let found = rows
+            .by_created
+            .range((
+                start,
+                Included((end.created_at, end.message_id.clone(), end.dm_id.clone())),
+            ))
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = found.len() > limit;
+        let items = found
+            .into_iter()
+            .take(limit)
+            .filter_map(|(_, message_id, dm_id)| {
+                rows.rows.get(&(dm_id.clone(), message_id.clone())).cloned()
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = has_more.then(|| {
+            let last = items.last().expect("nonempty candidate page");
+            DirectMessageOutboxCursor {
+                created_at: last.created_at,
+                message_id: last.message_id.clone(),
+                dm_id: last.dm_id.clone(),
+            }
+        });
+        Ok(DirectMessageOutboxPage {
+            items,
+            next_cursor,
+            cycle_end: Some(end),
+        })
     }
 
     async fn list_direct_message_outbox_for_peer_page(

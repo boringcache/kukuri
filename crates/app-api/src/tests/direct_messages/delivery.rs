@@ -385,6 +385,79 @@ async fn blocked_pairwise_publish_cannot_stop_other_peer_or_account_offer() {
 }
 
 #[tokio::test]
+async fn account_candidate_demand_uses_only_bounded_mutual_due_rows() {
+    use kukuri_core::BlobHash;
+    use kukuri_store::{DirectMessageOutboxRow, DirectMessageStore};
+
+    let store = Arc::new(MemoryStore::default());
+    let sender = generate_keys();
+    let peers = (0..5).map(|_| generate_keys()).collect::<Vec<_>>();
+    let local = sender.public_key_hex();
+    SocialProjectionStore::rebuild_author_relationships(
+        store.as_ref(),
+        &local,
+        [0usize, 1, 3]
+            .into_iter()
+            .map(|index| AuthorRelationshipProjectionRow {
+                local_author_pubkey: local.clone(),
+                author_pubkey: peers[index].public_key_hex(),
+                following: true,
+                followed_by: true,
+                mutual: true,
+                friend_of_friend: false,
+                friend_of_friend_via_pubkeys: Vec::new(),
+                derived_at: 1,
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+    for (index, peer) in peers.iter().enumerate() {
+        store
+            .put_direct_message_outbox(DirectMessageOutboxRow {
+                dm_id: format!("candidate-dm-{index}"),
+                message_id: format!("candidate-message-{index}"),
+                peer_pubkey: peer.public_key_hex(),
+                frame_blob_hash: BlobHash::new("aa".repeat(32)),
+                created_at: index as i64,
+                last_attempt_at: (index == 3).then_some(0),
+            })
+            .await
+            .unwrap();
+    }
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store,
+        Arc::new(StaticTransport::new(PeerSnapshot::default())),
+        Arc::new(TrackingHintTransport::default()),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        sender,
+    );
+    let actual = app
+        .pending_receive_destination_recipients(None, None)
+        .await
+        .unwrap();
+    let expected = [0usize, 1, 3]
+        .into_iter()
+        .map(|index| peers[index].public_key())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual.recipients.into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+    let next = app
+        .pending_receive_destination_recipients(
+            actual.next_cursor.as_ref(),
+            actual.cycle_end.as_ref(),
+        )
+        .await
+        .unwrap();
+    assert!(next.recipients.is_empty());
+    assert!(next.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn dm_due_owner_processes_bounded_new_and_retry_lanes() {
     use kukuri_core::BlobHash;
     use kukuri_store::DirectMessageOutboxRow;

@@ -256,6 +256,10 @@ impl DesktopRuntime {
         &self,
         base_url: &str,
     ) -> Result<()> {
+        self.iroh_stack
+            .transport
+            .clear_receive_candidates(Some(base_url))
+            .await?;
         self.community_node_rendezvous_seed_peers
             .lock()
             .await

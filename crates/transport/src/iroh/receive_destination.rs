@@ -13,11 +13,15 @@ const CANDIDATES_PER_LOOKUP: usize = 4;
 const MAX_SELECTION_STEPS: usize = 12;
 const BINDING_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CACHED_BINDING_MS: i64 = 10_000;
+const MAX_RENDEZVOUS_CANDIDATES: usize = 8;
+const MAX_RENDEZVOUS_SOURCES: usize = 8;
+const RENDEZVOUS_CANDIDATE_TTL: Duration = Duration::from_secs(45);
 
 #[derive(Default)]
 pub(super) struct DestinationWindow {
     entries: HashMap<Pubkey, DestinationEntry>,
     tick: u64,
+    pub(super) clear_epoch: u64,
 }
 
 struct DestinationEntry {
@@ -26,10 +30,19 @@ struct DestinationEntry {
     source: usize,
     cursors: [Option<String>; 3],
     verified: Option<CachedDestination>,
+    rendezvous_sources: BTreeMap<String, RendezvousSource>,
+    rendezvous_cursor: usize,
+    source_eviction_cursor: usize,
+}
+
+struct RendezvousSource {
+    candidates: Vec<EndpointAddr>,
+    expires_at: Instant,
 }
 
 struct CachedDestination {
     address: EndpointAddr,
+    source: Option<String>,
     expires_at_ms: i64,
     expires_at: Instant,
 }
@@ -57,6 +70,9 @@ impl DestinationWindow {
                 source: 0,
                 cursors: Default::default(),
                 verified: None,
+                rendezvous_sources: BTreeMap::new(),
+                rendezvous_cursor: 0,
+                source_eviction_cursor: 0,
             });
         entry.last_used = tick;
         entry
@@ -78,10 +94,30 @@ impl DestinationWindow {
         &mut self,
         recipient: &Pubkey,
         sources: [&BTreeMap<String, EndpointAddr>; 3],
-    ) -> (Vec<EndpointAddr>, u64) {
+    ) -> (Vec<(EndpointAddr, Option<String>)>, u64) {
         let entry = self.touch(recipient);
         let mut selected = Vec::with_capacity(CANDIDATES_PER_LOOKUP);
         let mut seen = BTreeSet::new();
+        entry
+            .rendezvous_sources
+            .retain(|_, source| source.expires_at > Instant::now());
+        let rendezvous_candidates = entry
+            .rendezvous_sources
+            .iter()
+            .flat_map(|(key, source)| {
+                source
+                    .candidates
+                    .iter()
+                    .cloned()
+                    .map(|address| (address, Some(key.clone())))
+            })
+            .collect::<Vec<_>>();
+        for _ in 0..rendezvous_candidates.len().min(2) {
+            let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
+            if seen.insert(candidate.0.id) {
+                selected.push(candidate);
+            }
+        }
         for _ in 0..MAX_SELECTION_STEPS {
             if selected.len() == CANDIDATES_PER_LOOKUP {
                 break;
@@ -91,10 +127,90 @@ impl DestinationWindow {
             if let Some(candidate) = next_peer(sources[source], &mut entry.cursors[source])
                 && seen.insert(candidate.id)
             {
+                selected.push((candidate, None));
+            }
+        }
+        for _ in 0..rendezvous_candidates.len().min(CANDIDATES_PER_LOOKUP) {
+            if selected.len() == CANDIDATES_PER_LOOKUP {
+                break;
+            }
+            let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
+            if seen.insert(candidate.0.id) {
                 selected.push(candidate);
             }
         }
         (selected, entry.revision)
+    }
+
+    fn observe_rendezvous(
+        &mut self,
+        source: &str,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+    ) {
+        let entry = self.touch(recipient);
+        entry
+            .rendezvous_sources
+            .retain(|_, value| value.expires_at > Instant::now());
+        if !entry.rendezvous_sources.contains_key(source)
+            && entry.rendezvous_sources.len() == MAX_RENDEZVOUS_SOURCES
+        {
+            let index = entry.source_eviction_cursor % entry.rendezvous_sources.len();
+            entry.source_eviction_cursor = entry.source_eviction_cursor.wrapping_add(1);
+            if let Some(oldest) = entry.rendezvous_sources.keys().nth(index).cloned() {
+                entry.rendezvous_sources.remove(&oldest);
+            }
+        }
+        entry.rendezvous_sources.insert(
+            source.to_string(),
+            RendezvousSource {
+                candidates,
+                expires_at: Instant::now() + RENDEZVOUS_CANDIDATE_TTL,
+            },
+        );
+    }
+
+    pub(super) fn clear_rendezvous(&mut self, source: Option<&str>) {
+        self.clear_epoch = self.clear_epoch.wrapping_add(1);
+        let mut tick = self.tick;
+        for entry in self.entries.values_mut() {
+            match source {
+                Some(source) => {
+                    entry.rendezvous_sources.remove(source);
+                    let cached_endpoint = entry
+                        .verified
+                        .as_ref()
+                        .filter(|cached| cached.source.as_deref() == Some(source))
+                        .map(|cached| cached.address.id);
+                    if let Some(endpoint_id) = cached_endpoint {
+                        let replacement =
+                            entry.rendezvous_sources.iter().find_map(|(name, other)| {
+                                other
+                                    .candidates
+                                    .iter()
+                                    .any(|candidate| candidate.id == endpoint_id)
+                                    .then(|| name.clone())
+                            });
+                        if let Some(cached) = entry.verified.as_mut() {
+                            cached.source = replacement.clone();
+                        }
+                        if replacement.is_none() {
+                            entry.verified = None;
+                        }
+                    }
+                }
+                None => {
+                    entry.rendezvous_sources.clear();
+                    entry.verified = None;
+                }
+            }
+            // The source may already have expired or been evicted while a
+            // binding probe still holds its old candidate. Fence that probe
+            // even when this account has no current entry for the source.
+            tick = tick.wrapping_add(1);
+            entry.revision = tick;
+        }
+        self.tick = tick;
     }
 
     fn store_verified(
@@ -102,6 +218,7 @@ impl DestinationWindow {
         recipient: &Pubkey,
         revision: u64,
         address: EndpointAddr,
+        source: Option<String>,
         expires_at_ms: i64,
         expires_at: Instant,
     ) -> bool {
@@ -113,6 +230,7 @@ impl DestinationWindow {
         }
         entry.verified = Some(CachedDestination {
             address,
+            source,
             expires_at_ms,
             expires_at,
         });
@@ -136,6 +254,15 @@ impl DestinationWindow {
     }
 }
 
+fn next_rendezvous_candidate(
+    entry: &mut DestinationEntry,
+    candidates: &[(EndpointAddr, Option<String>)],
+) -> (EndpointAddr, Option<String>) {
+    let index = entry.rendezvous_cursor % candidates.len();
+    entry.rendezvous_cursor = entry.rendezvous_cursor.wrapping_add(1);
+    candidates[index].clone()
+}
+
 fn next_peer(
     peers: &BTreeMap<String, EndpointAddr>,
     cursor: &mut Option<String>,
@@ -150,6 +277,40 @@ fn next_peer(
 }
 
 impl IrohGossipTransport {
+    pub(super) async fn offer_receive_candidates_impl(
+        &self,
+        source: &str,
+        recipient: &Pubkey,
+        candidates: Vec<EndpointAddr>,
+        fence: ReceiveCandidateFence,
+    ) -> Result<()> {
+        receive_route_for_account(recipient)?;
+        anyhow::ensure!(
+            candidates.len() <= MAX_RENDEZVOUS_CANDIDATES,
+            "too many account receive candidates"
+        );
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire),
+            "account receive offer transport is closed"
+        );
+        let mut unique = Vec::with_capacity(candidates.len());
+        let mut seen = BTreeSet::new();
+        for candidate in candidates {
+            if candidate.id != self.endpoint.id() && seen.insert(candidate.id) {
+                unique.push(candidate);
+            }
+        }
+        let mut window = self.receive_destinations.lock().await;
+        anyhow::ensure!(
+            !self.offer_closed.load(Ordering::Acquire)
+                && fence.transport_instance == self.receive_offer_instance
+                && fence.clear_epoch == window.clear_epoch,
+            "account receive candidate fence is stale"
+        );
+        window.observe_rendezvous(source, recipient, unique);
+        Ok(())
+    }
+
     pub(super) async fn verify_receive_provider_impl(
         &self,
         sender: &Pubkey,
@@ -222,7 +383,7 @@ impl IrohGossipTransport {
             .await
             .select(recipient, [&configured, &bootstrap, &imported]);
         drop((configured, bootstrap, imported));
-        for candidate in candidates {
+        for (candidate, source) in candidates {
             if self.offer_closed.load(Ordering::Acquire) {
                 return Ok(None);
             }
@@ -251,6 +412,7 @@ impl IrohGossipTransport {
                 recipient,
                 revision,
                 candidate.clone(),
+                source,
                 expires_at_ms,
                 Instant::now() + Duration::from_millis((expires_at_ms - now_ms) as u64),
             );
