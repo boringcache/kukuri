@@ -575,6 +575,10 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown_checked(&self) -> Result<()> {
+        if let Some(handle) = self.take_notification_event_task() {
+            handle.abort();
+            let _ = handle.await;
+        }
         if let Some(handle) = self.sync_status_observer_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;

@@ -117,3 +117,69 @@ async fn sync_status_observer_emits_only_changed_snapshot_parts_and_stops_on_shu
     runtime.shutdown().await;
     assert!(runtime.sync_status_observer_task.lock().await.is_none());
 }
+
+#[tokio::test]
+async fn notification_event_forwarder_stops_when_runtime_shuts_down() {
+    let _resource = lock_test_resource(TestResource::IdentityStorage).await;
+    let dir = tempdir().unwrap();
+    let runtime = DesktopRuntime::new_with_config_and_identity(
+        dir.path().join("notification-event.db"),
+        TransportNetworkConfig::loopback(),
+        IdentityStorageMode::FileOnly,
+    )
+    .await
+    .unwrap();
+    let notify = runtime.app_service.notification_inserted_notify();
+    let mut events = runtime.subscribe_events();
+
+    notify.notify_one();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RuntimeEvent::NotificationStatusChanged
+    ));
+    runtime.shutdown().await;
+    notify.notify_one();
+    assert!(
+        timeout(Duration::from_millis(150), events.recv())
+            .await
+            .is_err(),
+        "shutdown must stop forwarding events from the former account"
+    );
+}
+
+#[tokio::test]
+async fn notification_event_forwarder_stops_when_runtime_is_dropped() {
+    let _resource = lock_test_resource(TestResource::IdentityStorage).await;
+    let dir = tempdir().unwrap();
+    let runtime = DesktopRuntime::new_with_config_and_identity(
+        dir.path().join("notification-drop.db"),
+        TransportNetworkConfig::loopback(),
+        IdentityStorageMode::FileOnly,
+    )
+    .await
+    .unwrap();
+    let notify = runtime.app_service.notification_inserted_notify();
+    let mut events = runtime.subscribe_events();
+
+    notify.notify_one();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RuntimeEvent::NotificationStatusChanged
+    ));
+    drop(runtime);
+    tokio::task::yield_now().await;
+    notify.notify_one();
+    assert!(
+        !matches!(
+            timeout(Duration::from_millis(150), events.recv()).await,
+            Ok(Ok(RuntimeEvent::NotificationStatusChanged))
+        ),
+        "dropping an account runtime must not leave its forwarder alive"
+    );
+}
