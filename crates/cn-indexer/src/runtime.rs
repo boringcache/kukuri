@@ -213,7 +213,7 @@ async fn run(config: IndexerConfig) -> Result<()> {
             .await?;
             state.set_ingest_enabled(true);
 
-            // 常駐 ingest loop（#613 T2）。変更通知 + 定期の全件見直しで取り込み続ける。
+            // 常駐 ingest loop（#613 T2）。変更通知 + 定期のscope窓で取り込み続ける。
             let worker = IndexerWorker::new(
                 Arc::new(participant),
                 docs_sync.clone(),

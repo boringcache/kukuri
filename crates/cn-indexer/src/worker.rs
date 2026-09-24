@@ -22,7 +22,6 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use kukuri_cn_core::IndexScopeKind;
 use kukuri_docs_sync::DocsSync;
 
 use crate::participant::{IndexerParticipant, ScopeReplica};
@@ -410,7 +409,7 @@ impl IndexerWorker {
         }
     }
 
-    /// scope を取り込む（公開は現在窓、privateは従来全件、または変更object）。
+    /// scope を取り込む（現在窓、または変更object）。
     ///
     /// 変更通知駆動の取り込みも同じ backoff に従う。公開scopeの周期処理は現在窓だけを
     /// 再確認し、窓外の完全回収は行わない。
@@ -428,10 +427,7 @@ impl IndexerWorker {
             return false;
         }
         let result = match target {
-            IngestTarget::Scope if scope.kind == IndexScopeKind::PublicTopic => {
-                self.participant.ingest_recent_scope(scope).await
-            }
-            IngestTarget::Scope => self.participant.ingest_scope(scope).await,
+            IngestTarget::Scope => self.participant.ingest_recent_scope(scope).await,
             IngestTarget::Keys(keys) => self.participant.ingest_changed_keys(scope, keys).await,
         };
         match result {

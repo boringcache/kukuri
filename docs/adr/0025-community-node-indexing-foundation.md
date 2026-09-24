@@ -365,8 +365,8 @@ fail-closed indexing 本体（DB 制約 + query 境界）は #404 で実装し�
 
 ### 7.6 保存済み verdict の再利用と risk signal の集約（#1050、2026-09-15）
 
-- 公開scopeの定常passと対象不明key通知は現在timeline索引窓（最大100 ID）だけを再確認する。
-  private scopeと手動の全scope取込には旧全件経路が残る。この範囲でsubject の**内容 fingerprint**（旧形式post =
+- 公開/private scopeの定常passと対象不明key通知は現在timeline索引窓（最大100 ID）だけを再確認する。
+  手動の全scope取込には旧全件経路が残る。この範囲でsubject の**内容 fingerprint**（旧形式post =
   `objects/<id>/state` レコードの content hash、v1 bucket post = 検証済み署名ID、blob = blob hash）と **scan 構成 fingerprint**
   （`SafetyPolicy` の serde 表現 + provider の `config_fingerprint()` の sha256）が保存済み verdict
   （`cn_safety.scan_verdicts.source_fingerprint` / `scan_config_fingerprint`）と一致する限り provider を
@@ -383,22 +383,21 @@ fail-closed indexing 本体（DB 制約 + query 境界）は #404 で実装し�
   `cleared` 行があれば新規行を作らない。signed moderation event は signal が新規作成されたとき、または
   verdict の action / reason_code / critical が変わったときだけ発行する。
 - 変更通知（DocEvent）駆動の取り込みは、変更 key に対応する object（`objects/<id>/…` と
-  `withdrawals/<id>/state`）だけを処理する。対象不明keyは公開scopeでは現在索引窓、private scopeでは
-  旧全scope経路へ渡す。同じbatchの既知object IDは公開索引窓の外でも先に対象別に処理する。
-  300秒の公開定常passも現在索引窓だけを読む。窓外の既存索引を削除根拠にしない。
+  `withdrawals/<id>/state`）だけを処理する。対象不明keyは公開/privateとも現在索引窓へ渡す。
+  同じbatchの既知object IDは窓外でも先に対象別に処理する。300秒の定常passも現在索引窓だけを読む。
+  窓外の既存索引を削除根拠にしない。privateのcapability登録・失効gateは維持する。
 - 変更 key は共有 replica の key 種別表（`kukuri_docs_sync::SharedReplicaKeyFamily`、#1065）で分類する。
 
   | 種別 | prefix | 取り込み |
   | --- | --- | --- |
   | 投稿 object / 撤回 | `objects/`、`withdrawals/` | 当該 object だけ |
-  | media manifest | `manifests/media/` | 公開は現在索引窓、privateは旧全scope（参照元objectを特定しない） |
+  | media manifest | `manifests/media/` | 現在索引窓（参照元objectを特定しない） |
   | 索引・reaction・envelope・session・channel・metaverse | `indexes/timeline/`、`indexes/thread/`、`reactions/`、`envelopes/`、`sessions/`、`channels/`、`metaverse/` | 無視 |
-  | 未登録 | それ以外 | 公開は現在索引窓、privateは旧全scope |
+  | 未登録 | それ以外 | 現在索引窓 |
 
   無視できる種別は indexer が読む種別（`objects/`・`withdrawals/`・`manifests/media/`）と交わらない。
   種別の追加は cn-indexer の `key_disposition` で取り込み方の判断を強制する（ワイルドカードを置かない）。
-  privateの旧scope全体へ倒した回数と直近の理由（種別 prefix。識別子は含めない）は `/v1/status` の
-  `event_whole_scope_fallbacks` / `last_whole_scope_fallback_reason` に出す。
+  旧全scopeイベントfallbackが無くなったため、専用の診断2フィールドは削除した。
 - contract: `second_pass_with_unchanged_content_performs_no_provider_calls`、
   `held_verdict_is_never_reused`、`rescan_with_same_key_updates_signal_instead_of_inserting`、
   `cleared_signal_with_same_key_is_not_resurrected`、
@@ -450,8 +449,8 @@ fail-closed indexing 本体（DB 制約 + query 境界）は #404 で実装し�
 - cn-indexerは `scope kind + scope id + object id + source revision` のjobをschedulerで管理し、
   queued / fetching / processing / retry_wait / completed / suppressed / cancelledを観測する。
   一つのscope内では設定値（既定4）を上限として投稿を並列処理する。新revisionは旧leaseを失効させ、
-  stale completionを反映しない。再起動後はraw bytesを復元せず、authoritative replicaの全件照合から
-  jobを再構築する。公開scopeは現在索引窓から再開し、全履歴を前提にしない。
+  stale completionを反映しない。再起動後はraw bytesを復元せず、現在索引窓と対象変更通知から
+  jobを再構築する。全履歴を前提にしない。
 - schedulerの診断台帳は実行中を含め1,024件以内とし、完了等の古い記録を回収する。全枠が実行中なら
   新規jobを延期する。実行futureが所有するleaseのDropは同世代の実行中記録だけをCancelledへ移し、
   cancelによる永久占有を防ぐ。部分key/1bucketの欠落をlogical scope全体の削除とは解釈しない（#1293）。
