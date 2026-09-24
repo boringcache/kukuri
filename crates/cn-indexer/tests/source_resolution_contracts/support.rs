@@ -221,8 +221,12 @@ impl IndexEntryStore for ObservedEntries {
     ) -> Result<Vec<kukuri_cn_core::SurfaceableEntry>> {
         self.inner.filter_surfaceable(kind, candidates).await
     }
-    async fn list_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
-        self.inner.list_scopes().await
+    async fn next_scope_after(
+        &self,
+        after_kind: &str,
+        after_id: &str,
+    ) -> Result<Option<(IndexScopeKind, String)>> {
+        self.inner.next_scope_after(after_kind, after_id).await
     }
     async fn is_transmission_prevented(&self, id: &str) -> Result<bool> {
         self.inner.is_transmission_prevented(id).await

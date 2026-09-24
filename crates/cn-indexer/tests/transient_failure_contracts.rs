@@ -232,8 +232,12 @@ impl IndexEntryStore for FlakyEntries {
         self.inner.filter_surfaceable(kind, candidates).await
     }
 
-    async fn list_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
-        self.inner.list_scopes().await
+    async fn next_scope_after(
+        &self,
+        after_kind: &str,
+        after_id: &str,
+    ) -> Result<Option<(IndexScopeKind, String)>> {
+        self.inner.next_scope_after(after_kind, after_id).await
     }
 
     async fn is_transmission_prevented(&self, object_id: &str) -> Result<bool> {

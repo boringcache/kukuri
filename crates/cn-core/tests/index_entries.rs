@@ -30,6 +30,49 @@ const DEFAULT_ADMIN_DATABASE_URL: &str = "postgres://cn:cn_password@127.0.0.1:15
 const TEST_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
 #[tokio::test]
+async fn indexed_scope_seek_skips_other_posts_in_the_same_scope() -> Result<()> {
+    let Some(admin_url) = integration_test_admin_database_url() else {
+        return Ok(());
+    };
+    let database = TestDatabase::create(admin_url.as_str(), "cn_indexed_scope_seek").await?;
+    let pool = connect_postgres(database.database_url.as_str()).await?;
+    initialize_database(&pool).await?;
+    for (scope, object) in [
+        ("a", "post-a1"),
+        ("a", "post-a2"),
+        ("b", "post-b1"),
+        ("c", "post-c1"),
+    ] {
+        let allow = upsert_scan_verdict(
+            &pool,
+            SubjectKind::Post,
+            object,
+            &verdict(SafetyAction::Allow, false, ReasonCode::NoKnownMatch),
+            &VerdictPersistMeta::default(),
+        )
+        .await?;
+        upsert_index_entry(&pool, &entry(scope, object, &allow.id)).await?;
+    }
+    let store = PgIndexEntryStore::new(pool.clone());
+    assert_eq!(
+        store.next_scope_after("", "").await?,
+        Some((IndexScopeKind::PublicTopic, "a".into()))
+    );
+    assert_eq!(
+        store.next_scope_after("public_topic", "a").await?,
+        Some((IndexScopeKind::PublicTopic, "b".into()))
+    );
+    assert_eq!(
+        store.next_scope_after("public_topic", "b").await?,
+        Some((IndexScopeKind::PublicTopic, "c".into()))
+    );
+    assert_eq!(store.next_scope_after("public_topic", "c").await?, None);
+    pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn verified_withdrawal_prevents_a_later_stale_provider_upsert() -> Result<()> {
     let Some(admin_url) = integration_test_admin_database_url() else {
         return Ok(());
