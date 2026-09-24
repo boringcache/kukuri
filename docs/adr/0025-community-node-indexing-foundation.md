@@ -384,7 +384,8 @@ fail-closed indexing 本体（DB 制約 + query 境界）は #404 で実装し�
   verdict の action / reason_code / critical が変わったときだけ発行する。
 - 変更通知（DocEvent）駆動の取り込みは、変更 key に対応する object（`objects/<id>/…` と
   `withdrawals/<id>/state`）だけを処理する。対象不明keyは公開scopeでは現在索引窓、private scopeでは
-  旧全scope経路へ渡す。300秒の公開定常passも現在索引窓だけを読む。窓外の既存索引を削除根拠にしない。
+  旧全scope経路へ渡す。同じbatchの既知object IDは公開索引窓の外でも先に対象別に処理する。
+  300秒の公開定常passも現在索引窓だけを読む。窓外の既存索引を削除根拠にしない。
 - 変更 key は共有 replica の key 種別表（`kukuri_docs_sync::SharedReplicaKeyFamily`、#1065）で分類する。
 
   | 種別 | prefix | 取り込み |

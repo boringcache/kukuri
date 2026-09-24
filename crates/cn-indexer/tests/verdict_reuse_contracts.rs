@@ -105,25 +105,29 @@ fn changed_keys_classify_objects_withdrawals_and_fallback() {
     assert_eq!(
         classify_changed_keys(["objects/a/state", "manifests/media/m1/envelope"]),
         ChangedKeys::ScopeReview {
-            reason: "manifests/media".to_string()
+            reason: "manifests/media".to_string(),
+            objects: vec!["a".to_string()],
         }
     );
     assert_eq!(
         classify_changed_keys(["objects/a/state", "unknown/secret-id/state"]),
         ChangedKeys::ScopeReview {
-            reason: "unregistered:unknown".to_string()
+            reason: "unregistered:unknown".to_string(),
+            objects: vec!["a".to_string()],
         }
     );
     assert_eq!(
         classify_changed_keys(["objects//state"]),
         ChangedKeys::ScopeReview {
-            reason: "malformed:objects".to_string()
+            reason: "malformed:objects".to_string(),
+            objects: Vec::new(),
         }
     );
     assert_eq!(
         classify_changed_keys(Vec::<&str>::new()),
         ChangedKeys::ScopeReview {
-            reason: "empty".to_string()
+            reason: "empty".to_string(),
+            objects: Vec::new(),
         }
     );
 }
@@ -697,9 +701,9 @@ async fn non_indexing_change_keys_do_not_ingest() -> Result<()> {
     Ok(())
 }
 
-/// #1065 TR-4: 撤回 key と索引 key が同じ batch に入っても対象 object を de-index する。
+/// A known withdrawal still de-indexes outside the 100-ID window when a manifest arrives in the same batch.
 #[tokio::test]
-async fn withdrawal_with_index_keys_still_deindexes() -> Result<()> {
+async fn withdrawal_with_manifest_still_deindexes_outside_the_current_window() -> Result<()> {
     let docs = Arc::new(MemoryDocsSync::default());
     let projection = Arc::new(MemoryIndexProjection::new());
     let topic = TopicId::new("rust");
@@ -713,6 +717,20 @@ async fn withdrawal_with_index_keys_still_deindexes() -> Result<()> {
         .ingest_scope(IndexScopeKind::PublicTopic, "rust", &replica)
         .await?;
     assert!(entries.contains(IndexScopeKind::PublicTopic, "rust", &object_id));
+    for index in 0..101 {
+        let id = format!("newer-{index:03}");
+        docs.apply_doc_op(
+            &replica,
+            DocOp::SetBytes {
+                key: stable_key(
+                    "indexes/timeline",
+                    &format!("{:020}-{id}/{id}", envelope.created_at + 1),
+                ),
+                value: Vec::new(),
+            },
+        )
+        .await?;
+    }
 
     let withdrawal = kukuri_core::build_post_withdrawal_envelope(
         &keys,
@@ -738,6 +756,7 @@ async fn withdrawal_with_index_keys_still_deindexes() -> Result<()> {
         .cloned()
         .collect();
     batch.push(withdrawal_key);
+    batch.push(stable_key("manifests/media", "m1/envelope"));
     batch.sort();
     let summary = pipeline
         .ingest_changed_keys(IndexScopeKind::PublicTopic, "rust", &replica, &batch)
