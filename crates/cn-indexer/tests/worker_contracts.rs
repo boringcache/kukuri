@@ -756,6 +756,11 @@ async fn worker_event_ingest_processes_only_changed_object_and_records_metrics()
         whole_scope_after_startup,
         "event-driven ingest must not rescan the whole scope"
     );
+    wait_until("event ingest completion metric", || {
+        let state = state.clone();
+        async move { state.snapshot().last_event_ingest_duration_ms.is_some() }
+    })
+    .await;
     let snapshot = state.snapshot();
     assert!(snapshot.last_event_ingest_duration_ms.is_some());
     assert_eq!(
