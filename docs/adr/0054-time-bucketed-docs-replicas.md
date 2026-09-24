@@ -95,6 +95,8 @@ iroh-docsの受信前filterと同一視しない。
 署名済みrecordを既存gateへ渡す。readerはnamespaceをimport/open/start_syncせず、1対象の読取りだけを
 保持する。legacy writerが使う旧namespace同期はwriter切替まで残すが、新形式定常経路へ持ち越さない。
 private/authorのreaderと保護cache/移行は未完了であり、この公開経路だけをR5全体の達成としない。
+旧公開replicaで対象不明の変更通知が来た場合も、現在timeline索引窓の最大100 IDだけを
+対象別に再確認する。media manifestの遅着を契機に過去全件を読み直さず、窓外の既存索引を消さない。
 clientのCN検索結果についても、検証した公開bucket locatorの対象投稿だけを既存peerから読み、
 署名・scope・取り下げを既存の反映経路で確認する。検索metadataは先に返し、投稿詳細は最大100件を
 8並列・batch全体30秒以内で解決する。読めない対象は未解決のままにし、取得を理由にclientの

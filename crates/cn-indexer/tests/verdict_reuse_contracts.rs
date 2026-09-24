@@ -104,25 +104,25 @@ fn changed_keys_classify_objects_withdrawals_and_fallback() {
     );
     assert_eq!(
         classify_changed_keys(["objects/a/state", "manifests/media/m1/envelope"]),
-        ChangedKeys::WholeScope {
+        ChangedKeys::ScopeReview {
             reason: "manifests/media".to_string()
         }
     );
     assert_eq!(
         classify_changed_keys(["objects/a/state", "unknown/secret-id/state"]),
-        ChangedKeys::WholeScope {
+        ChangedKeys::ScopeReview {
             reason: "unregistered:unknown".to_string()
         }
     );
     assert_eq!(
         classify_changed_keys(["objects//state"]),
-        ChangedKeys::WholeScope {
+        ChangedKeys::ScopeReview {
             reason: "malformed:objects".to_string()
         }
     );
     assert_eq!(
         classify_changed_keys(Vec::<&str>::new()),
-        ChangedKeys::WholeScope {
+        ChangedKeys::ScopeReview {
             reason: "empty".to_string()
         }
     );
@@ -752,9 +752,9 @@ async fn withdrawal_with_index_keys_still_deindexes() -> Result<()> {
     Ok(())
 }
 
-/// #1065 TR-3: 未登録 key を含む batch は scope 全体へ倒れ、回数と理由（識別子を含まない）を記録する。
+/// Public unknown keys revisit only the current index window, without recording a whole-scope fallback.
 #[tokio::test]
-async fn unregistered_change_key_falls_back_to_whole_scope_and_is_observed() -> Result<()> {
+async fn unregistered_public_key_rechecks_only_the_current_window() -> Result<()> {
     let docs = Arc::new(MemoryDocsSync::default());
     let projection = Arc::new(MemoryIndexProjection::new());
     let topic = TopicId::new("rust");
@@ -788,16 +788,13 @@ async fn unregistered_change_key_falls_back_to_whole_scope_and_is_observed() -> 
     assert_eq!(
         (summary.scanned, summary.scans_reused),
         (2, 2),
-        "whole scope is revisited"
+        "the two posts remain in the current index window"
     );
     let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 1);
-    assert_eq!(
-        snapshot.last_whole_scope_fallback_reason.as_deref(),
-        Some("unregistered:future-feature")
-    );
+    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
+    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
 
-    // media manifest も全体見直しの契機として記録される。
+    // A media manifest also revisits only the current window.
     pipeline
         .ingest_changed_keys(
             IndexScopeKind::PublicTopic,
@@ -807,11 +804,8 @@ async fn unregistered_change_key_falls_back_to_whole_scope_and_is_observed() -> 
         )
         .await?;
     let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 2);
-    assert_eq!(
-        snapshot.last_whole_scope_fallback_reason.as_deref(),
-        Some("manifests/media")
-    );
+    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
+    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
     assert_eq!(provider.subjects().len(), 2);
     Ok(())
 }
