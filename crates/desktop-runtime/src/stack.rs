@@ -15,6 +15,7 @@ use kukuri_docs_sync::{
     IrohDocsSync, ReplicaNoticeStream,
 };
 use kukuri_iroh_node::IrohDocsNode;
+use kukuri_store::SqliteStore;
 use kukuri_transport::{
     ConnectMode, DhtDiscoveryOptions, DiscoveryMode, DiscoverySnapshot, EndpointAddr, HintStream,
     HintTransport, IrohGossipTransport, PeerSnapshot, ReceiveCandidateFence, ReceiveOfferLease,
@@ -32,6 +33,11 @@ pub(crate) struct BoundIrohStack {
     pub(crate) transport: Arc<IrohGossipTransport>,
     pub(crate) docs_sync: Arc<IrohDocsSync>,
     pub(crate) blob_service: Arc<IrohBlobService>,
+}
+
+enum StackOpen {
+    Initial(Arc<SqliteStore>),
+    Reopen(Arc<SqliteStore>),
 }
 
 /// ホットスワップ可能なサービスラッパーを 1 つ生成する。
@@ -227,6 +233,7 @@ pub(crate) struct SharedIrohStack {
     pub(crate) root: PathBuf,
     pub(crate) network_config: TransportNetworkConfig,
     pub(crate) dht_options: DhtDiscoveryOptions,
+    candidate_store: Arc<SqliteStore>,
     /// アカウントの署名鍵から導出した docs author の種(ADR 0053)。stack を作り直すたびに設定し直す。
     docs_author_seed: Mutex<Option<kukuri_core::DocsAuthorSeed>>,
     /// 再構築するendpointでも同じaccountだけを広告する。stack/account寿命に限定する。
@@ -285,8 +292,13 @@ impl SharedIrohStack {
         bootstrap_seed_peers: &[SeedPeer],
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
+        candidate_store: Option<Arc<SqliteStore>>,
     ) -> Result<Self> {
         let dht_options = effective_dht_options(&dht_options, bootstrap_seed_peers, &relay_config);
+        let candidate_store = match candidate_store {
+            Some(store) => store,
+            None => Arc::new(SqliteStore::connect_memory().await?),
+        };
         let current = BoundIrohStack::new(
             root,
             network_config.clone(),
@@ -294,7 +306,7 @@ impl SharedIrohStack {
             bootstrap_seed_peers,
             dht_options.clone(),
             relay_config,
-            false,
+            StackOpen::Initial(candidate_store.clone()),
         )
         .await?;
         let transport = Arc::new(ReloadableTransport::new(current.transport.clone()));
@@ -309,6 +321,7 @@ impl SharedIrohStack {
             root: root.to_path_buf(),
             network_config,
             dht_options,
+            candidate_store,
             docs_author_seed: Mutex::new(None),
             receive_binding_keys: Mutex::new(None),
             current_shut_down: AtomicBool::new(false),
@@ -356,16 +369,14 @@ impl SharedIrohStack {
         let relay_config = relay_config.normalized();
         let dht_options =
             effective_dht_options(&self.dht_options, bootstrap_seed_peers, &relay_config);
-        // Keep the last stack and its peer snapshots until replacement commits.
+        // Keep the last stack until replacement commits. Peer candidates remain
+        // in the account store and are read through bounded windows by the new stack.
         // A failed/cancelled bind must not leave current=None forever. Holding
         // the lock also serializes concurrent rebuild/shutdown operations.
         let mut current = self.current.lock().await;
         let previous = current
             .as_ref()
             .context("missing active iroh stack during rebuild")?;
-        let transport_peer_state = previous.transport.peer_state().await;
-        let docs_peer_state = previous.docs_sync.peer_state().await;
-        let blob_peer_state = previous.blob_service.peer_state().await;
         info!(target: "kukuri_connectivity",
             generation = self.generation.load(Ordering::Relaxed),
             relay_url_count = relay_config.iroh_relay_urls.len(),
@@ -389,13 +400,9 @@ impl SharedIrohStack {
             bootstrap_seed_peers,
             dht_options,
             relay_config,
-            true,
+            StackOpen::Reopen(self.candidate_store.clone()),
         )
         .await?;
-        next.transport
-            .restore_peer_state(transport_peer_state)
-            .await?;
-        next.docs_sync.restore_peer_state(docs_peer_state).await?;
         // 差し替える前に設定する。設定の無い stack が、端末ごとの docs author で書くことが無いようにする。
         if let Some(seed) = self.docs_author_seed.lock().await.as_ref() {
             next.docs_sync.use_account_docs_author(seed).await?;
@@ -403,9 +410,6 @@ impl SharedIrohStack {
         if let Some(keys) = self.receive_binding_keys.lock().await.as_ref() {
             next.node.install_receive_binding(keys.clone()).await?;
         }
-        next.blob_service
-            .restore_peer_state(blob_peer_state)
-            .await?;
         self.transport.replace(next.transport.clone()).await;
         self.docs_sync.replace(next.docs_sync.clone()).await;
         self.blob_service.replace(next.blob_service.clone()).await;
@@ -556,15 +560,19 @@ impl SharedIrohStack {
 }
 
 impl BoundIrohStack {
-    pub(crate) async fn new(
+    async fn new(
         root: &Path,
         network_config: TransportNetworkConfig,
         discovery_config: &DiscoveryConfig,
         bootstrap_seed_peers: &[SeedPeer],
         dht_options: DhtDiscoveryOptions,
         relay_config: TransportRelayConfig,
-        reopening: bool,
+        open: StackOpen,
     ) -> Result<Self> {
+        let (reopening, candidate_store) = match open {
+            StackOpen::Initial(store) => (false, store),
+            StackOpen::Reopen(store) => (true, store),
+        };
         let relay_config = relay_config.normalized();
         let node = if reopening {
             IrohDocsNode::reopen_with_discovery_config(
@@ -583,15 +591,24 @@ impl BoundIrohStack {
             )
             .await?
         };
-        let transport = Arc::new(IrohGossipTransport::from_shared_parts(
-            node.endpoint().clone(),
-            node.gossip().clone(),
-            node.discovery(),
-            network_config,
-            relay_config.clone(),
-        )?);
-        let docs_sync = Arc::new(IrohDocsSync::new(node.clone()));
-        let blob_service = Arc::new(IrohBlobService::new(node.clone()));
+        let transport = Arc::new(
+            IrohGossipTransport::from_shared_parts(
+                node.endpoint().clone(),
+                node.gossip().clone(),
+                node.discovery(),
+                network_config,
+                relay_config.clone(),
+            )?
+            .with_account_store(candidate_store.clone()),
+        );
+        let docs_sync = Arc::new(IrohDocsSync::with_account_store(
+            node.clone(),
+            candidate_store.clone(),
+        ));
+        let blob_service = Arc::new(IrohBlobService::with_account_store(
+            node.clone(),
+            candidate_store,
+        ));
         transport
             .configure_discovery(
                 discovery_config.mode.clone(),
