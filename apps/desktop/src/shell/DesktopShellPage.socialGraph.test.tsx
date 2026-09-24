@@ -21,7 +21,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test('post card shows friend of friend badge and author name fallback', async () => {
+test('post card shows friend of friend and audience icons and author name fallback', async () => {
   render(
     <App
       api={createDesktopMockApi({
@@ -53,7 +53,8 @@ test('post card shows friend of friend badge and author name fallback', async ()
   );
 
   expect(await screen.findByRole('button', { name: 'alice' })).toBeInTheDocument();
-  expect(screen.getByText('followed by someone you follow')).toBeInTheDocument();
+  expect(screen.getByRole('img', { name: 'connected via someone you follow' })).toBeInTheDocument();
+  expect(screen.getByRole('img', { name: 'Public' })).toBeInTheDocument();
 });
 
 test('profile social management updates follow and mute lists and muted authors disappear from content surfaces', async () => {
