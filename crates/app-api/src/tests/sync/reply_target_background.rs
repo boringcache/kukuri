@@ -416,6 +416,7 @@ async fn profile_view_recovers_the_visible_reply_target_body() {
 struct RemoteBodyBlobService {
     inner: MemoryBlobService,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
+    reject_admission: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 本文の提供元を test から復旧できる blob service。返信先の projection が `content: None` で
@@ -675,6 +676,19 @@ async fn a_visible_reply_target_with_a_missing_body_recovers_after_its_provider_
 
 #[async_trait]
 impl BlobService for RemoteBodyBlobService {
+    async fn prepare_retry_fetch<'a>(
+        &'a self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::PreparedRetryFetch<'a>> {
+        if self
+            .reject_admission
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("shared network capacity is full");
+        }
+        let hash = hash.clone();
+        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+    }
     async fn fetch_local_blob(
         &self,
         _hash: &kukuri_core::BlobHash,
@@ -802,16 +816,36 @@ async fn the_listing_does_not_wait_for_a_remote_body_of_the_reply_target() {
     assert!(page.items.iter().all(|item| item.reply_preview.is_none()));
     drop(held);
 
+    blobs
+        .reject_admission
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cursor = TimelineCursor {
+        created_at: reply.created_at + 1,
+        object_id: EnvelopeId::from("f".repeat(64).as_str()),
+    };
+    app.list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("older page while network admission is rejected");
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        app.services.missing_body_ledger.attempts(&BlobHash::new(
+            crate::service::hydration_limits::display_retry_key(
+                "reply",
+                replica.as_str(),
+                parent_header.object_id.as_str()
+            )
+        )),
+        0,
+        "rejected admission must refund the reply retry"
+    );
+    assert_eq!(blobs.fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    blobs
+        .reject_admission
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
     // 容量が戻った後の次の需要だけが、remote 本文の背景取得を開始する。
     let _ = app
-        .list_timeline(
-            topic.as_str(),
-            Some(TimelineCursor {
-                created_at: reply.created_at + 1,
-                object_id: EnvelopeId::from("f".repeat(64).as_str()),
-            }),
-            1,
-        )
+        .list_timeline(topic.as_str(), Some(cursor), 1)
         .await
         .expect("older page after capacity returns");
     timeout(Duration::from_secs(10), async {

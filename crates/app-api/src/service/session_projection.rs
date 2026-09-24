@@ -66,6 +66,8 @@ struct State {
     stopped: bool,
     entries: VecDeque<Entry>,
     pending_docs: VecDeque<(String, ReplicaId, String, Option<String>)>,
+    retry_timer: Option<tokio::task::JoinHandle<()>>,
+    retry_due_ms: Option<i64>,
 }
 impl State {
     fn admit(&mut self, topic: &str, replica: &ReplicaId, key: &str) -> Option<&mut Entry> {
@@ -343,6 +345,10 @@ impl SessionProjections {
                         };
                         (fetched, attempt)
                     } else {
+                        registry.retry_ledger.defer_key(
+                            &retry_key,
+                            Utc::now().timestamp_millis().saturating_add(5_000),
+                        );
                         (None, None)
                     };
                     let access = services.session_display_access.lock().await;
@@ -370,6 +376,15 @@ impl SessionProjections {
                                 && e.running.as_ref().is_some_and(|r| r.token == token)
                         }) {
                             entry.running = None;
+                            if !entry.observers.is_empty()
+                                && entry.hashes.contains(&task_hash)
+                                && registry
+                                    .retry_ledger
+                                    .next_attempt_at_key(&retry_key)
+                                    .is_some()
+                            {
+                                entry.requested.insert(task_hash.as_str().to_owned());
+                            }
                         }
                     }
                     drop(access);
@@ -377,6 +392,47 @@ impl SessionProjections {
                     registry.schedule(&services).await;
                 });
                 entry.running = Some(Running { token, hash, task });
+            }
+            let next_due = state
+                .entries
+                .iter()
+                .filter(|entry| !entry.observers.is_empty() && entry.running.is_none())
+                .flat_map(|entry| {
+                    entry.hashes.iter().filter_map(|hash| {
+                        entry
+                            .requested
+                            .contains(hash.as_str())
+                            .then(|| {
+                                registry
+                                    .retry_ledger
+                                    .next_attempt_at_key(&session_retry_key(entry, hash))
+                            })
+                            .flatten()
+                    })
+                })
+                .min();
+            if state.retry_due_ms != next_due {
+                if let Some(timer) = state.retry_timer.take() {
+                    timer.abort();
+                }
+                state.retry_due_ms = None;
+                if let Some(due) = next_due
+                    && (due > now_ms || registry.permits.available_permits() > 0)
+                {
+                    let registry_for_timer = registry.clone();
+                    let services_for_timer = services.clone();
+                    state.retry_timer = Some(tokio::spawn(async move {
+                        let delay = due.saturating_sub(Utc::now().timestamp_millis()) as u64;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        {
+                            let mut state = registry_for_timer.state.lock().await;
+                            state.retry_timer = None;
+                            state.retry_due_ms = None;
+                        }
+                        registry_for_timer.schedule(&services_for_timer).await;
+                    }));
+                    state.retry_due_ms = Some(due);
+                }
             }
         })
     }
@@ -393,10 +449,20 @@ impl SessionProjections {
         state
             .entries
             .retain(|entry| !replicas.contains(&entry.replica));
+        if state.entries.iter().all(|entry| entry.observers.is_empty()) {
+            if let Some(timer) = state.retry_timer.take() {
+                timer.abort();
+            }
+            state.retry_due_ms = None;
+        }
     }
     pub(crate) async fn clear(&self) {
         let mut state = self.state.lock().await;
         state.stopped = true;
+        if let Some(timer) = state.retry_timer.take() {
+            timer.abort();
+        }
+        state.retry_due_ms = None;
         for entry in &mut state.entries {
             entry.cancel().await;
         }

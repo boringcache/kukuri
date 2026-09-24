@@ -18,8 +18,7 @@ export class DisplayRetryScheduler {
   private running = 0;
   private disposed = false;
 
-  subscribe<T>(key: string, run: () => Promise<T>, receive: (value: T) => boolean,
-    initialAttemptDone = false): () => void {
+  subscribe<T>(key: string, run: () => Promise<T>, receive: (value: T) => boolean): () => void {
     if (this.disposed || new TextEncoder().encode(key).length > 256) return () => {};
     let entry = this.entries.get(key);
     if (!entry) {
@@ -29,12 +28,7 @@ export class DisplayRetryScheduler {
         if (!victim) return () => {};
         this.entries.delete(victim[0]);
       }
-      entry = {
-        subscribers: new Map(),
-        attempts: initialAttemptDone ? 1 : 0,
-        nextAt: Date.now() + (initialAttemptDone ? DISPLAY_RETRY_DELAYS_MS[0] : 0),
-        inFlight: false,
-      };
+      entry = { subscribers: new Map(), attempts: 0, nextAt: Date.now(), inFlight: false };
       this.entries.set(key, entry);
     }
     const token = Symbol(key);

@@ -79,9 +79,9 @@ async function installUnavailableMediaScenario(
   );
 }
 
-// #1207: 自動取得は 5 秒・30 秒の待ちをはさんで 3 回試みる。実時間を待たず、時計を進めて上限へ到達させる。
+// #1221 R3-B: 初回と5/30/120秒後の計4回を、実時間を待たず時計を進めて確認する。
 async function exhaustAutomaticMediaFetch(page: Page) {
-  for (const delay of [6_000, 31_000]) {
+  for (const delay of [6_000, 31_000, 121_000]) {
     await page.clock.runFor(delay);
   }
 }

@@ -76,6 +76,20 @@ impl MissingBodyAttempt {
 
     /// 失敗を記録する。何もせずに手放しても同じ結果になる。
     pub(crate) fn fail(self) {}
+
+    /// 共通network受付前の延期は試行に数えない。
+    pub(crate) fn defer(mut self) {
+        self.settled = true;
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if let Some(entry) = entries.get_mut(&self.hash) {
+            entry.in_flight = false;
+            entry.attempts = entry.attempts.saturating_sub(1);
+            entry.next_attempt_at_ms = 0;
+            if entry.attempts == 0 {
+                entries.remove(&self.hash);
+            }
+        }
+    }
 }
 
 impl Drop for MissingBodyAttempt {
@@ -199,6 +213,42 @@ impl MissingBodyLedger {
             })
     }
 
+    pub(crate) fn next_attempt_at_key(&self, key: &str) -> Option<i64> {
+        self.entries
+            .lock()
+            .expect("missing body ledger lock")
+            .get(key)
+            .filter(|entry| !entry.in_flight && entry.attempts < MISSING_BODY_MAX_ATTEMPTS)
+            .map(|entry| entry.next_attempt_at_ms)
+    }
+
+    /// 共有network受付の延期。失敗回数を増やさず、表示中の再確認期限だけを置く。
+    pub(crate) fn defer_key(&self, key: &str, until_ms: i64) {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return;
+        }
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if !entries.contains_key(key) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
+            if let Some(victim) = entries
+                .iter()
+                .find(|(_, entry)| !entry.in_flight)
+                .map(|(key, _)| key.clone())
+            {
+                entries.remove(&victim);
+            } else {
+                return;
+            }
+        }
+        let entry = entries.entry(key.to_owned()).or_insert(MissingBodyEntry {
+            attempts: 0,
+            next_attempt_at_ms: 0,
+            in_flight: false,
+        });
+        if !entry.in_flight && entry.attempts < MISSING_BODY_MAX_ATTEMPTS {
+            entry.next_attempt_at_ms = entry.next_attempt_at_ms.max(until_ms);
+        }
+    }
+
     pub(crate) fn fetch_permits(&self) -> Arc<Semaphore> {
         Arc::clone(&self.fetch_permits)
     }
@@ -237,20 +287,35 @@ pub(crate) async fn fetch_projection_blob_text_bounded(
         best_effort_blob_cache_status(blob_service, hash).await,
         BlobCacheStatus::Available | BlobCacheStatus::Pinned
     );
-    // 取得を待つ間に走査が abort されても、`attempt` の drop で失敗として記録される。
-    let attempt = if local {
-        None
-    } else {
-        Some(missing_bodies.try_begin(hash, Utc::now().timestamp_millis())?)
-    };
-    let payload = fetch_projection_blob_text(blob_service, hash).await;
-    match (payload.is_some(), attempt) {
-        (true, Some(attempt)) => attempt.succeed(),
-        (true, None) => missing_bodies.forget(hash),
-        (false, Some(attempt)) => attempt.fail(),
-        (false, None) => {}
+    if local {
+        let payload = fetch_projection_blob_text(blob_service, hash).await;
+        if payload.is_some() {
+            missing_bodies.forget(hash);
+        }
+        return payload;
     }
-    payload
+    let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
+    let fetch = tokio::time::timeout_at(deadline, blob_service.prepare_retry_fetch(hash))
+        .await
+        .ok()?
+        .ok()?;
+    // 共有network枠の受付後にだけ試行を数える。abort時はattemptのDropで失敗を記録する。
+    let attempt = missing_bodies.try_begin(hash, Utc::now().timestamp_millis())?;
+    let bytes = tokio::time::timeout_at(deadline, fetch)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+    match bytes {
+        Some(bytes) => {
+            attempt.succeed();
+            Some(String::from_utf8_lossy(&bytes).to_string())
+        }
+        None => {
+            attempt.fail();
+            None
+        }
+    }
 }
 
 /// 手元にある本文だけを読む。remote からは取得しない。
@@ -450,6 +515,25 @@ mod tests {
             "an abandoned attempt must not block later attempts"
         );
         assert_eq!(ledger.attempts(&target), 2);
+    }
+
+    #[test]
+    fn deferred_admission_does_not_spend_a_retry() {
+        let ledger = MissingBodyLedger::default();
+        let target = hash("d");
+        ledger.try_begin(&target, 0).expect("admitted").defer();
+        assert_eq!(ledger.attempts(&target), 0);
+        assert!(ledger.try_begin(&target, 0).is_some());
+    }
+
+    #[test]
+    fn deferred_network_admission_keeps_the_retry_budget() {
+        let ledger = MissingBodyLedger::default();
+        let key = "session:deferred";
+        ledger.defer_key(key, 5_000);
+        assert_eq!(ledger.attempts(&BlobHash::new(key)), 0);
+        assert!(!ledger.ready_key(key, 4_999));
+        assert!(ledger.ready_key(key, 5_000));
     }
 
     #[test]

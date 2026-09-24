@@ -1,7 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesktopApi } from '@/lib/api';
-import { DisplayRetryContext, DisplayRetryScheduler } from '@/lib/displayRetryScheduler';
 import { PendingSessionCards, SessionVisibility } from './SessionVisibility';
 
 const observers: Array<(entries: IntersectionObserverEntry[]) => void> = [];
@@ -16,7 +15,7 @@ function installObserver() {
 const intersect = async (value: boolean, index = observers.length - 1) => {
   await act(async () => observers[index]([{ isIntersecting: value, intersectionRatio: value ? 1 : 0 } as IntersectionObserverEntry]));
 };
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('session manifest visibility', () => {
   it('keeps a missing candidate separate and replaces it with the verified card after acquisition', async () => {
@@ -86,31 +85,5 @@ describe('session manifest visibility', () => {
     await act(async () => release());
     expect(setSessionDisplay).toHaveBeenLastCalledWith(expect.objectContaining({ observer: oldObserver, visible: false }));
     expect(screen.getByText('session')).toBeVisible();
-  });
-
-  it('automatically retries a visible missing session at the shared deadlines', async () => {
-    vi.useFakeTimers();
-    installObserver();
-    const scheduler = new DisplayRetryScheduler();
-    const setSessionDisplay = vi.fn().mockResolvedValue(undefined);
-    const api = { setSessionDisplay } as unknown as DesktopApi;
-    const view = render(<DisplayRetryContext.Provider value={scheduler}>
-      <ul><SessionVisibility context={{ api, topic: 'topic', scope: { kind: 'public' } }}
-        sessionId='live-one' kind='live'>session</SessionVisibility></ul>
-    </DisplayRetryContext.Provider>);
-    await intersect(true);
-    expect(setSessionDisplay).toHaveBeenCalledTimes(1);
-    await act(async () => vi.advanceTimersByTimeAsync(4_999));
-    expect(setSessionDisplay).toHaveBeenCalledTimes(1);
-    await act(async () => vi.advanceTimersByTimeAsync(1));
-    expect(setSessionDisplay).toHaveBeenCalledTimes(2);
-    await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
-    expect(setSessionDisplay).toHaveBeenCalledTimes(4);
-    await intersect(false);
-    await act(async () => vi.advanceTimersByTimeAsync(600_000));
-    expect(setSessionDisplay).toHaveBeenCalledTimes(5);
-    view.unmount();
-    scheduler.dispose();
   });
 });

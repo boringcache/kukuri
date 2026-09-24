@@ -68,6 +68,7 @@ struct RemoteManifest {
     publish_remote: std::sync::atomic::AtomicBool,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
     fail: Arc<std::sync::atomic::AtomicBool>,
+    reject_admission: std::sync::atomic::AtomicBool,
     gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     admission_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     local_gate: std::sync::Mutex<Option<LocalReadGate>>,
@@ -101,6 +102,12 @@ impl BlobService for RemoteManifest {
         &self,
         hash: &BlobHash,
     ) -> Result<kukuri_blob_service::DisplayBlobFetch> {
+        if self
+            .reject_admission
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("shared network capacity is full");
+        }
         let admission = self.admission_gate.lock().unwrap().clone();
         let permit = match admission {
             Some(gate) => Some(gate.acquire_owned().await?),
@@ -335,6 +342,51 @@ async fn missing_manifest_ignores_rerenders_and_each_explicit_retry_is_one_attem
         9,
         "hiding/reopening does not restart an exhausted automatic retry"
     );
+    f.app.shutdown().await;
+}
+
+#[tokio::test]
+async fn visible_missing_manifest_retries_after_the_shared_deadline_without_another_event() {
+    let f = SessionFixture::new("live").await;
+    f.blobs
+        .fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    f.event(&f.key).await;
+    f.display(true, false).await;
+    assert_eq!(f.fetches(), 1);
+    timeout(Duration::from_secs(8), async {
+        while f.fetches() < 2 {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("one shared timer retries the visible failed session");
+    assert_eq!(f.fetches(), 2);
+    f.display(false, false).await;
+    f.app.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_manifest_admission_retries_without_spending_a_network_attempt() {
+    let f = SessionFixture::new("live").await;
+    f.blobs
+        .reject_admission
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    f.event(&f.key).await;
+    f.display(true, false).await;
+    assert_eq!(f.fetches(), 0);
+    f.blobs
+        .reject_admission
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    timeout(Duration::from_secs(8), async {
+        while f.fetches() < 1 {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("admission returns without another display event");
+    assert_eq!(f.fetches(), 1);
+    f.display(false, false).await;
     f.app.shutdown().await;
 }
 

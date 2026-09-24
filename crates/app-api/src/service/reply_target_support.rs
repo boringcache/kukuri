@@ -146,7 +146,9 @@ impl AppService {
                     attempt,
                 ),
                 Ok(ReplyTargetReflection::Reflected(_)) => attempt.succeed(),
-                Ok(ReplyTargetReflection::Unavailable) => attempt.fail(),
+                Ok(ReplyTargetReflection::Unavailable | ReplyTargetReflection::Deferred) => {
+                    attempt.fail()
+                }
                 Err(error) => {
                     warn!(object_id = %target.as_str(), error = %error, "failed to reflect a reply target of a listed row");
                     attempt.fail();
@@ -297,16 +299,15 @@ impl AppService {
                             .services
                             .missing_body_ledger
                             .try_begin_key(&key, Utc::now().timestamp_millis())
-                        && let Ok(Some(row)) = reflect_reply_target(
+                    {
+                        let _ = attempt_reply_target_reflection(
                             &self.services,
-                            &body_id,
                             &container.source_replica_id,
                             container.topic_id.as_str(),
+                            &body_id,
+                            attempt,
                         )
-                        .await
-                        && row.content.is_some()
-                    {
-                        attempt.succeed();
+                        .await;
                     }
                 }
                 continue;
@@ -348,6 +349,41 @@ impl AppService {
     }
 }
 
+async fn attempt_reply_target_reflection(
+    services: &ServiceHandles,
+    replica_id: &ReplicaId,
+    topic_id: &str,
+    object_id: &EnvelopeId,
+    attempt: hydration_limits::MissingBodyAttempt,
+) -> Result<Option<ObjectProjectionRow>> {
+    match reflect_reply_target_with(
+        services,
+        object_id,
+        replica_id,
+        topic_id,
+        ReplyTargetBody::Remote,
+    )
+    .await
+    {
+        Ok(ReplyTargetReflection::Reflected(row)) if row.content.is_some() => {
+            attempt.succeed();
+            Ok(Some(*row))
+        }
+        Ok(ReplyTargetReflection::Deferred) => {
+            attempt.defer();
+            Ok(None)
+        }
+        Ok(_) => {
+            attempt.fail();
+            Ok(None)
+        }
+        Err(error) => {
+            attempt.fail();
+            Err(error)
+        }
+    }
+}
+
 /// 返信先の反映を背景で行う task を起こす。台帳の確認は呼び出し側が済ませる。同時実行は台帳の permit で抑える。
 fn spawn_reply_target_reflection(
     services: &ServiceHandles,
@@ -363,13 +399,16 @@ fn spawn_reply_target_reflection(
     let object_id = object_id.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        match reflect_reply_target(&services, &object_id, &replica_id, topic_id.as_str()).await {
-            Ok(Some(row)) if row.content.is_some() => attempt.succeed(),
-            Ok(_) => attempt.fail(),
-            Err(error) => {
-                warn!(object_id = %object_id.as_str(), error = %error, "failed to reflect a reply target in the background");
-                attempt.fail();
-            }
+        if let Err(error) = attempt_reply_target_reflection(
+            &services,
+            &replica_id,
+            topic_id.as_str(),
+            &object_id,
+            attempt,
+        )
+        .await
+        {
+            warn!(object_id = %object_id.as_str(), error = %error, "failed to reflect a reply target in the background");
         }
     });
 }
@@ -391,6 +430,8 @@ enum ReplyTargetReflection {
     BodyNotLocal,
     /// 手元の docs に、検証に通る投稿が無い。
     Unavailable,
+    /// 共有network受付前に容量・期限で延期された。
+    Deferred,
 }
 
 /// 返信先を、返信と同じ replica から key 指定で反映する(#1239 AC-6 の背景の反映)。docs は手元だけを読み
@@ -398,6 +439,7 @@ enum ReplyTargetReflection {
 ///
 /// 返信先も同じ replica にある投稿として、署名つき envelope と replica の scope を確かめてから反映する(#1248)。
 /// 既に projection にあれば、その行を返す。
+#[cfg(test)]
 pub(crate) async fn reflect_reply_target(
     services: &ServiceHandles,
     object_id: &EnvelopeId,
@@ -415,7 +457,9 @@ pub(crate) async fn reflect_reply_target(
         .await?
         {
             ReplyTargetReflection::Reflected(row) => Some(*row),
-            ReplyTargetReflection::BodyNotLocal | ReplyTargetReflection::Unavailable => None,
+            ReplyTargetReflection::BodyNotLocal
+            | ReplyTargetReflection::Unavailable
+            | ReplyTargetReflection::Deferred => None,
         },
     )
 }
@@ -457,7 +501,21 @@ async fn reflect_reply_target_with(
         let content = match (&post.header().payload_ref, body) {
             (PayloadRef::InlineText { text }, _) => Some(text.clone()),
             (PayloadRef::BlobText { hash, .. }, ReplyTargetBody::Remote) => {
-                fetch_projection_blob_text(services.blob_service.as_ref(), hash).await
+                let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
+                let Ok(Ok(fetch)) = tokio::time::timeout_at(
+                    deadline,
+                    services.blob_service.prepare_retry_fetch(hash),
+                )
+                .await
+                else {
+                    return Ok(ReplyTargetReflection::Deferred);
+                };
+                tokio::time::timeout_at(deadline, fetch)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
             }
             (PayloadRef::BlobText { hash, .. }, ReplyTargetBody::LocalOnly) => {
                 match hydration_limits::fetch_local_projection_blob_text(
