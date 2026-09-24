@@ -65,7 +65,7 @@ body:
     id: acceptance_criteria
     attributes:
       label: Acceptance Criteriaと対象invariant
-      description: 対象・期待結果・判定方法を持つ有限個のAC-*と、維持する合意済み挙動INVAR-*を固定してください。有界に判定できない条件は実装前に子項目へ分解します。
+      description: 対象・期待結果・判定方法を持つ有限個のAC-*と、維持する合意済み挙動INVAR-*を固定してください。部分作業も実装前に末端条件まで分解し、1末端条件に1PRを対応させます。条件の事後追加は受入条件の変更です。
       placeholder: |
         - [ ] AC-1:
         - [ ] AC-2:
@@ -103,7 +103,7 @@ body:
       label: 検証とClose条件
       description: AC / INVARごとのtest / evidenceとpath別validationを記入してください。Aは対象確認でよく、監査不要欄は省略できます。B/Cの独立監査の要否はrunbookに従います。
       placeholder: |
-        - AC-1 -> test / evidence:
+        - AC-1 -> 予定PR枠 / test / evidence:
         - INVAR-1 -> test / evidence:
         - 統合・置換・削除後の最終形:
         - 関連するローカル検証 / 全体を確認するCI:

@@ -4,15 +4,15 @@
 
 ## 対象と条件
 
-<!-- AGENTS.mdの作業原則・設計原則を適用し、手順はdocs/runbooks/issue-lifecycle.mdに従う。非該当欄は削除してよい。
+<!-- AGENTS.mdの作業原則・設計原則を適用し、手順はdocs/runbooks/issue-lifecycle.mdに従う。1PRは事前定義した1つの末端ACに対応する。非該当欄は削除してよい。
 必要な検証の未実行・失敗・例外は削除しない。詳細がrepositoryにあればリンクする。
 区分Cは自動Close文言を使わず Refs を使い、PR headの独立監査PASSと必須CIの成功後にマージする。 -->
 
 - 対象Issue（Refs / Closes）・種別（fix / feature / refactor / contract / scenario / docs / deps）:
 - リスク区分・Scope revision・基準commit:
 - 変更path・対象外:
-- AC / INVARと差分・検証証跡の対応:
-- 統合・置換・削除した処理と、完成後に残るコードの必要性:
+- 対応する1つの末端AC・予定PR枠 / 維持するINVARと差分・検証証跡の対応:
+- 統合・置換・削除した処理、残る暫定処理の撤去条件、完成後に残るコードの必要性:
 - B/C: inventoryの探索方法、変更前後、未分類件数・状態遷移:
 - C: sensitive sinkとshared helperの全caller確認:
 
@@ -50,7 +50,8 @@ CI成功だけをAC達成の証拠にしない。未依頼のエッジケース�
 ## 独立監査
 
 <!-- 必要な場合だけ残す。Cは固定条件の独立監査を行い、Bは計画時に必要性を定める。
-対象commit、Scope revision、inventoryの合計/適合/不適合/未分類、AC/INVAR evidence、validation、blocker、non-blocker、PASS/FAIL/INCONCLUSIVEを記録した監査へリンクする。監査後の変更はdeltaを再監査する。 -->
+対象commit、Scope revision、inventoryの合計/適合/不適合/未分類、AC/INVAR evidence、validation、blocker、non-blocker、PASS/FAIL/INCONCLUSIVEを記録した監査へリンクする。段階移行では旧経路・暫定選択器・台帳・無上限queueの担当条件と撤去状況、最終コード量の比較を固定した完成形と照合する。監査後の変更はdeltaを再監査する。 -->
 
 - 監査記録・対象commit・判定:
+- 完成形への到達、撤去・回収・上限と総コード量の比較（該当時）:
 - 監査後delta:
