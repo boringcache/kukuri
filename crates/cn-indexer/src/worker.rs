@@ -397,6 +397,14 @@ impl IndexerWorker {
                 true
             })
             .collect::<Vec<_>>();
+        // Reserve every attempted replica before any open: a later secret/open error may leave
+        // an earlier handle alive. The next pass must count and stop that handle before reuse.
+        for scope in &admitted {
+            active
+                .entry(scope.replica_id.as_str().to_string())
+                .or_insert_with(|| scope.clone());
+        }
+        self.state.set_opened_scopes(active.len() as u64);
         let opened = match self.participant.restore_selected_scopes(&admitted).await {
             Ok(opened) => opened,
             Err(error) => {
@@ -416,8 +424,6 @@ impl IndexerWorker {
                 subscriptions.insert(key, self.spawn_subscription(scope, event_tx.clone()));
             }
         }
-        self.state.set_opened_scopes(active.len() as u64);
-
         // 4. 各 scope の取り込み。
         let mut all_scopes_ingested = !opened.is_empty();
         for scope in &opened {
