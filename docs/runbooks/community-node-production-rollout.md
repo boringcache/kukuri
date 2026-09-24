@@ -499,10 +499,10 @@ readinessの鮮度やfail-closed判定を緩めない。remote blob取得は1件
 1. [重複集約migration](../../crates/cn-core/migrations/202609150002_risk_signal_dedupe.sql)を初めて導入する場合は、backup取得後・`cn-migrate`前に移行対象の活性重複鍵と通報から参照される行を確認する。同一鍵に参照行が2件以上ある場合、migrationは2件目以降を削除せず失効させるため、該当鍵が0件であることを確認する。0件でなければ適用を止め、既存通報への影響と実行可否を先に確定する。適用後はmigration記録、対象鍵の結果と `uq_cn_safety_risk_signals_active_key` の存在を確認する。この移行対象の事前確認を、適用済みの通常rolloutで毎回実行する全DB照合へ広げない。
 2. 対象の既存投稿を処理した際の `scans_reused` / `scans_fresh` と対象risk signalを照合し、同じ内容・構成で不要な再scanや追加行が発生しないことを確認する。
 3. 無害な新規投稿1件の到着から `indexed_at` までを、固定した待機期限で確認する。他投稿の再scanや全件passの終了を待たない。
-4. その操作の前後で `event_whole_scope_fallbacks` と対象期間のlogを比較する。scope全体へのfallbackを観測したら、件数非依存の達成とはせず未解消として記録する。
+4. 対象通知の前後で `scanned` / `last_event_ingest_duration_ms` と対象期間のlogを確認する。既知IDは対象別、対象不明keyは現在索引窓として処理され、今回選んだ投稿の結果へ到達したかを区別する。全prefix読取り0・100 ID上限の判定は変更PRのcontractで行い、rollout時のstatus値だけから全履歴非走査を推定しない。
 5. peer更新を変更した場合は、対象peerの登録後の本文/media取得を同じ投稿で確認する。対象batchの失敗時はその原因を記録し、全peer・全scopeの強制再適用で成功扱いにしない。
 
-現行の周期pass、holdの再試行、scope全体fallbackの実装が残っていることと、この有限な運用確認の成功は別である。保存された判定やcacheの再利用だけで、全件走査・保持量・失敗回数への依存が解消したと判断しない。
+手動全scope取込、全supported scopeの列挙/open、旧namespace同期は残る。この有限な運用確認の成功を、これらの総件数依存や保持量・失敗回数への依存の解消と読み替えない。
 
 ### 5.7 content advisory 付き索引と trust 不変の確認（#1054）
 
