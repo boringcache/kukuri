@@ -222,6 +222,23 @@ impl MissingBodyLedger {
             .map(|entry| entry.next_attempt_at_ms)
     }
 
+    pub(crate) fn display_retry_at_key(&self, key: &str, now_ms: i64) -> Option<i64> {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return None;
+        }
+        match self
+            .entries
+            .lock()
+            .expect("missing body ledger lock")
+            .get(key)
+        {
+            Some(entry) if entry.attempts >= MISSING_BODY_MAX_ATTEMPTS && !entry.in_flight => None,
+            Some(entry) if entry.in_flight => Some(now_ms.saturating_add(5_000)),
+            Some(entry) => Some(entry.next_attempt_at_ms.max(now_ms.saturating_add(1_000))),
+            None => Some(now_ms.saturating_add(5_000)),
+        }
+    }
+
     /// 共有network受付の延期。失敗回数を増やさず、表示中の再確認期限だけを置く。
     pub(crate) fn defer_key(&self, key: &str, until_ms: i64) {
         if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
@@ -534,6 +551,21 @@ mod tests {
         assert_eq!(ledger.attempts(&BlobHash::new(key)), 0);
         assert!(!ledger.ready_key(key, 4_999));
         assert!(ledger.ready_key(key, 5_000));
+    }
+
+    #[test]
+    fn display_deadline_follows_real_attempts_and_stops_after_four() {
+        let ledger = MissingBodyLedger::default();
+        let hash = hash("b");
+        assert_eq!(ledger.display_retry_at_key(hash.as_str(), 0), Some(5_000));
+        for _ in 0..4 {
+            ledger
+                .try_begin(&hash, i64::MAX)
+                .expect("network attempt")
+                .fail();
+        }
+        assert_eq!(ledger.attempts(&hash), 4);
+        assert_eq!(ledger.display_retry_at_key(hash.as_str(), 0), None);
     }
 
     #[test]

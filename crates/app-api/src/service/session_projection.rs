@@ -422,7 +422,7 @@ impl SessionProjections {
                     let registry_for_timer = registry.clone();
                     let services_for_timer = services.clone();
                     state.retry_timer = Some(tokio::spawn(async move {
-                        let delay = due.saturating_sub(Utc::now().timestamp_millis()) as u64;
+                        let delay = due.saturating_sub(Utc::now().timestamp_millis()).max(0) as u64;
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         {
                             let mut state = registry_for_timer.state.lock().await;

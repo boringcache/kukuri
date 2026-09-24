@@ -78,7 +78,12 @@ export class DisplayRetryScheduler {
       entry.inFlight = true;
       entry.attempts += 1;
       this.running += 1;
+      let serverRetryAt: number | null | undefined;
       void Promise.resolve().then(() => subscriber.run()).then((result) => {
+        if (result && typeof result === 'object' && 'display_retry_next_at_ms' in result) {
+          const due = result.display_retry_next_at_ms;
+          if (due === null || typeof due === 'number') serverRetryAt = due;
+        }
         let recovered = false;
         for (const listener of entry.subscribers.values()) {
           try { recovered = listener.receive(result) || recovered; } catch { /* detached view */ }
@@ -90,8 +95,13 @@ export class DisplayRetryScheduler {
         entry.inFlight = false;
         this.running -= 1;
         if (this.entries.get(key) === entry) {
-          const delay = DISPLAY_RETRY_DELAYS_MS[entry.attempts - 1];
-          if (delay !== undefined) entry.nextAt = Date.now() + delay;
+          if (serverRetryAt !== undefined) {
+            entry.attempts = serverRetryAt === null ? DISPLAY_RETRY_ATTEMPTS : 0;
+            if (serverRetryAt !== null) entry.nextAt = Math.max(Date.now() + 1_000, serverRetryAt);
+          } else {
+            const delay = DISPLAY_RETRY_DELAYS_MS[entry.attempts - 1];
+            if (delay !== undefined) entry.nextAt = Date.now() + delay;
+          }
         }
         this.arm();
       });

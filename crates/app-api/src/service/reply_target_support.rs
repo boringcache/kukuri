@@ -347,6 +347,51 @@ impl AppService {
             .await?;
         Ok(view.items.pop())
     }
+
+    /// 表示中の次回通知時刻。実取得の台帳を正本にし、IPC呼び出し自体は試行に数えない。
+    pub async fn post_display_retry_at(&self, post: &PostView) -> Result<Option<i64>> {
+        let Some(container) = self
+            .services
+            .projection_store
+            .get_object_projection(&EnvelopeId::from(post.object_id.as_str()))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let now = Utc::now().timestamp_millis();
+        let ledger = &self.services.missing_body_ledger;
+        let mut next = None;
+        if post.content_status == BlobViewStatus::Missing
+            && let PayloadRef::BlobText { hash, .. } = &container.payload_ref
+        {
+            next = ledger.display_retry_at_key(hash.as_str(), now);
+        }
+        if let Some(reply_id) = &container.reply_to_object_id
+            && post
+                .reply_preview
+                .as_ref()
+                .is_none_or(|preview| preview.content_status == BlobViewStatus::Missing)
+        {
+            let reply = self
+                .services
+                .projection_store
+                .get_object_projection(reply_id)
+                .await?;
+            let key = match reply.as_ref().map(|row| &row.payload_ref) {
+                Some(PayloadRef::BlobText { hash, .. }) => hash.as_str().to_owned(),
+                None => hydration_limits::display_retry_key(
+                    "reply",
+                    container.source_replica_id.as_str(),
+                    reply_id.as_str(),
+                ),
+                _ => return Ok(next),
+            };
+            if let Some(due) = ledger.display_retry_at_key(&key, now) {
+                next = Some(next.map_or(due, |prior: i64| prior.min(due)));
+            }
+        }
+        Ok(next)
+    }
 }
 
 async fn attempt_reply_target_reflection(

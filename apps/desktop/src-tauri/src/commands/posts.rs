@@ -138,12 +138,29 @@ pub async fn list_profile_timeline(
 pub async fn retry_post_elements(
     state: tauri::State<'_, DesktopState>,
     request: RetryPostElementsRequest,
-) -> Result<Option<kukuri_app_api::PostView>, CommandError> {
-    state
+) -> Result<Option<PostRetryView>, CommandError> {
+    let post = state
         .runtime()
         .retry_post_elements(request)
         .await
-        .map_err(map_error)
+        .map_err(map_error)?;
+    let Some(post) = post else { return Ok(None) };
+    let display_retry_next_at_ms = state
+        .runtime()
+        .post_display_retry_at(&post)
+        .await
+        .map_err(map_error)?;
+    Ok(Some(PostRetryView {
+        post,
+        display_retry_next_at_ms,
+    }))
+}
+
+#[derive(serde::Serialize)]
+pub struct PostRetryView {
+    #[serde(flatten)]
+    post: kukuri_app_api::PostView,
+    display_retry_next_at_ms: Option<i64>,
 }
 
 #[tauri::command]

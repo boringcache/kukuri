@@ -24,6 +24,24 @@ test('one visible demand gets only the initial attempt and 5/30/120 second retri
   scheduler.dispose();
 });
 
+test('capacity deferral does not exhaust the Rust network retry budget', async () => {
+  const scheduler = new DisplayRetryScheduler();
+  let exhausted = false;
+  const run = vi.fn(async () => ({ display_retry_next_at_ms: exhausted ? null : Date.now() + 5_000 }));
+  scheduler.subscribe('body:deferred', run, () => false);
+  await vi.advanceTimersByTimeAsync(0);
+  for (let index = 0; index < 4; index += 1) {
+    await vi.advanceTimersByTimeAsync(5_000);
+  }
+  expect(run).toHaveBeenCalledTimes(5);
+  exhausted = true;
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(run).toHaveBeenCalledTimes(6);
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(run).toHaveBeenCalledTimes(6);
+  scheduler.dispose();
+});
+
 test('leaving the window stops retries and returning does not reset the budget', async () => {
   const scheduler = new DisplayRetryScheduler();
   const run = vi.fn(async () => false);
