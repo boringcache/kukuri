@@ -6,11 +6,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use kukuri_blob_service::BlobService;
 use kukuri_iroh_node::remote_fetch::BlobTooLarge;
 
-use super::failure::transient;
+use super::{RECORDS_PER_EXACT_KEY, failure::transient};
 use kukuri_core::{
     AssetRef, KukuriEnvelope, KukuriMediaManifestV1, ObjectStatus, PayloadRef, ReplicaId, blob_hash,
 };
-use kukuri_docs_sync::{DocFetchPolicy, DocQuery, DocRecord, DocsSync, SharedReplicaKeyFamily};
+use kukuri_docs_sync::{DocFetchPolicy, DocRecord, DocsSync, SharedReplicaKeyFamily};
 
 /// app-api の投稿上限（10,000 Unicode scalar values）を UTF-8 bytes でも有界にする。
 const MAX_INDEXABLE_POST_BODY_CHARS: usize = 10_000;
@@ -87,9 +87,10 @@ impl<'a> SourceResolver<'a> {
         );
         let records = self
             .docs_sync
-            .query_replica_with_policy(
+            .query_replica_exact_bounded(
                 replica_id,
-                DocQuery::Exact(key),
+                &key,
+                RECORDS_PER_EXACT_KEY,
                 DocFetchPolicy::LocalThenRemote,
             )
             .await
