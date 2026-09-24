@@ -18,6 +18,17 @@ pub use kukuri_iroh_node::remote_fetch::DisplayBlobFetch;
 pub type PreparedRetryFetch<'a> =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
 
+#[derive(Debug)]
+struct DisplayFetchUnsupported;
+
+impl std::fmt::Display for DisplayFetchUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancellable display fetch is not supported")
+    }
+}
+
+impl std::error::Error for DisplayFetchUnsupported {}
+
 pub const DISPLAY_FETCH_TIMEOUT: std::time::Duration = remote_fetch::REMOTE_FETCH_TOTAL_TIMEOUT;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +51,14 @@ pub trait BlobService: Send + Sync {
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
     /// Reserve shared network capacity before the caller spends a retry attempt.
     async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
-        let hash = hash.clone();
-        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+        match self.prepare_display_fetch(hash).await {
+            Ok(fetch) => Ok(fetch),
+            Err(error) if error.is::<DisplayFetchUnsupported>() => {
+                let hash = hash.clone();
+                Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+            }
+            Err(error) => Err(error),
+        }
     }
     /// ローカルのbytesだけを読む。未対応の実装は取得不可とし、remoteへfallbackしない。
     async fn fetch_local_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
@@ -50,7 +67,7 @@ pub trait BlobService: Send + Sync {
     /// 表示要求のfutureが取得を所有する。drop後に取得を続けず、bytesを保存しない。
     /// 未対応の実装は共有fetchへfallbackしない。
     async fn prepare_display_fetch(&self, _hash: &BlobHash) -> Result<DisplayBlobFetch> {
-        anyhow::bail!("cancellable display fetch is not supported")
+        Err(DisplayFetchUnsupported.into())
     }
     /// scan 用の一時取得（#609）: remote から取得した bytes を**ローカルストアへ残さない**。
     ///

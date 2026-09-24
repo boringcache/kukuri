@@ -86,6 +86,22 @@ async fn reloadable_blob_service_keeps_ephemeral_fetch_and_local_status_non_pers
         BlobStatus::Missing,
         "ephemeral fetch through the reloadable wrapper must not persist the blob"
     );
+    let retry = receiver
+        .prepare_retry_fetch(&stored.hash)
+        .await
+        .expect("retry admission");
+    assert_eq!(
+        timeout(Duration::from_secs(20), retry)
+            .await
+            .expect("retry timeout")
+            .expect("retry fetch"),
+        Some(b"adult-display-enabled-media".to_vec())
+    );
+    assert_eq!(
+        inner.local_blob_status(&stored.hash).await.unwrap(),
+        BlobStatus::Missing,
+        "retry fetch must not persist before the app-api save guard"
+    );
 }
 
 #[test]
