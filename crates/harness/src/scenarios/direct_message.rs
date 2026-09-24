@@ -190,6 +190,7 @@ pub(crate) async fn run_pairwise_direct_message_connectivity(
             .get_blob_media_payload(GetBlobMediaRequest {
                 hash: delivered_image.attachments[0].hash.clone(),
                 mime: delivered_image.attachments[0].mime.clone(),
+                source_object_id: None,
             })
             .await
             .context("desktop b failed to load image attachment payload")?
@@ -365,6 +366,7 @@ pub(crate) async fn run_pairwise_direct_message_connectivity(
             .get_blob_media_payload(GetBlobMediaRequest {
                 hash: manifest.hash.clone(),
                 mime: manifest.mime.clone(),
+                source_object_id: None,
             })
             .await
             .context("desktop b failed to load video manifest payload")?
@@ -378,6 +380,7 @@ pub(crate) async fn run_pairwise_direct_message_connectivity(
             .get_blob_media_payload(GetBlobMediaRequest {
                 hash: poster.hash.clone(),
                 mime: poster.mime.clone(),
+                source_object_id: None,
             })
             .await
             .context("desktop b failed to load video poster payload")?
