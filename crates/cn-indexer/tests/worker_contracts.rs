@@ -19,7 +19,7 @@ use kukuri_cn_core::{
     remove_supported_topic,
 };
 use kukuri_cn_indexer::ingest::IngestPipeline;
-use kukuri_cn_indexer::participant::IndexerParticipant;
+use kukuri_cn_indexer::participant::{IndexerParticipant, ScopeReplica};
 use kukuri_cn_indexer::projection::{IndexProjection, MemoryIndexProjection};
 use kukuri_cn_indexer::state::IndexerRuntimeState;
 use kukuri_cn_indexer::worker::{IndexerWorker, WorkerConfig};
@@ -786,6 +786,7 @@ async fn periodic_public_poll_stops_at_the_current_index_window() -> Result<()> 
     let state = Arc::new(IndexerRuntimeState::default());
     let projection = Arc::new(MemoryIndexProjection::default());
     let (participant, _) = participant_with_docs(&pool, docs.clone(), &projection, &state);
+    let event_participant = participant.clone();
     let worker = IndexerWorker::new(
         participant,
         docs.clone(),
@@ -807,6 +808,23 @@ async fn periodic_public_poll_stops_at_the_current_index_window() -> Result<()> 
         docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst),
         300,
         "100 selected IDs read state, envelope, and withdrawal once each"
+    );
+    event_participant
+        .ingest_changed_keys(
+            &ScopeReplica::from_scope(IndexScopeKind::PublicTopic, "rust"),
+            &["unregistered/object/state".into()],
+        )
+        .await?;
+    assert_eq!(
+        docs.whole_scope_queries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "unknown public keys must not trigger a full objects prefix read"
+    );
+    assert_eq!(
+        docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst),
+        600,
+        "unknown keys reuse the same 100-ID index window"
     );
     handle.shutdown().await;
     Ok(())

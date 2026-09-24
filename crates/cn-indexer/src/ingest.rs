@@ -48,8 +48,8 @@ use crate::scheduler::{PostFetchJobKey, PostFetchJobState, PostFetchScheduler};
 
 mod bucket_post;
 mod failure;
-mod recent;
-pub(crate) use recent::recent_object_keys;
+mod targeted;
+pub(crate) use targeted::recent_object_keys;
 mod reference_guard;
 mod source;
 mod summary;
@@ -65,8 +65,8 @@ const RECORDS_PER_EXACT_KEY: usize = 8;
 pub enum KeyDisposition {
     /// key から対象 object を特定して、その object だけを取り込む。
     Object,
-    /// 対象 object を特定できないため scope 全体を見直す。
-    WholeScope,
+    /// 対象 object を特定できず、scope別の有界な見直しが必要。
+    ScopeReview,
     /// 索引に影響しないため取り込みの契機にしない。
     Ignore,
 }
@@ -74,14 +74,14 @@ pub enum KeyDisposition {
 /// 種別ごとの取り込み方。種別が増えたらここで判断を強制する（ワイルドカードを置かない）。
 ///
 /// `Ignore` にできるのは indexer が読まない種別だけ（[`INDEXER_READ_FAMILIES`] と交わらない）。
-/// media manifest は参照元 object を特定できないため scope 全体へ倒す（投稿 state の通知も
-/// 同時に届くが、同期の到着順が前後した場合の取り込みを定期見直しまで遅らせないため）。
+/// media manifest は参照元 object を特定できないためscope見直しへ渡す。公開scopeは現在索引窓、
+/// private scopeは旧経路を使う（投稿stateとmanifestの到着順が前後しても再確認する）。
 pub const fn key_disposition(family: SharedReplicaKeyFamily) -> KeyDisposition {
     match family {
         SharedReplicaKeyFamily::PostObject | SharedReplicaKeyFamily::PostWithdrawal => {
             KeyDisposition::Object
         }
-        SharedReplicaKeyFamily::MediaManifest => KeyDisposition::WholeScope,
+        SharedReplicaKeyFamily::MediaManifest => KeyDisposition::ScopeReview,
         SharedReplicaKeyFamily::TimelineIndex
         | SharedReplicaKeyFamily::ThreadIndex
         | SharedReplicaKeyFamily::Reaction
@@ -103,37 +103,38 @@ pub const INDEXER_READ_FAMILIES: [SharedReplicaKeyFamily; 3] = [
 ///
 /// `objects/<id>/…` と `withdrawals/<id>/state` は対象 object を特定できる。索引に影響しない
 /// 種別（`indexes/`・`reactions/` 等）は無視する。media manifest と未登録の key は対象を特定
-/// できないため scope 全体の見直しへ倒す。
+/// できないためscope別の見直しへ渡す。
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChangedKeys {
     /// 特定できた object id の集合（重複なし・安定順）。
     Objects(Vec<String>),
     /// 索引に影響する key を含まない。
     Ignored,
-    /// 対象を特定できない鍵を含むため scope 全体を見直す。`reason` は key の種別 prefix
-    /// （未登録なら先頭 segment）で、object id などの識別子は含めない。
-    WholeScope { reason: String },
+    /// 対象を特定できない鍵を含むためscope別に見直す。同じbatchの既知object IDは保持する。
+    /// `reason` は key の種別 prefix（未登録なら先頭 segment）で、識別子は含めない。
+    ScopeReview {
+        reason: String,
+        objects: Vec<String>,
+    },
 }
 
 /// 変更通知の鍵を取り込み対象へ分類する純関数。
 pub fn classify_changed_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> ChangedKeys {
     let mut ids: Vec<String> = Vec::new();
+    let mut review = None;
     let mut any = false;
     for key in keys {
         any = true;
         let Some((family, rest)) = SharedReplicaKeyFamily::parse(key) else {
             let segment = key.split('/').next().unwrap_or_default();
-            return ChangedKeys::WholeScope {
-                reason: format!("unregistered:{segment}"),
-            };
+            review.get_or_insert_with(|| format!("unregistered:{segment}"));
+            continue;
         };
         let prefix = family.prefix().trim_end_matches('/');
         match key_disposition(family) {
             KeyDisposition::Ignore => {}
-            KeyDisposition::WholeScope => {
-                return ChangedKeys::WholeScope {
-                    reason: prefix.to_string(),
-                };
+            KeyDisposition::ScopeReview => {
+                review.get_or_insert_with(|| prefix.to_string());
             }
             KeyDisposition::Object => match rest.split('/').next().filter(|id| !id.is_empty()) {
                 Some(id) => {
@@ -142,16 +143,21 @@ pub fn classify_changed_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> Cha
                     }
                 }
                 None => {
-                    return ChangedKeys::WholeScope {
-                        reason: format!("malformed:{prefix}"),
-                    };
+                    review.get_or_insert_with(|| format!("malformed:{prefix}"));
                 }
             },
         }
     }
     if !any {
-        return ChangedKeys::WholeScope {
+        return ChangedKeys::ScopeReview {
             reason: "empty".to_string(),
+            objects: ids,
+        };
+    }
+    if let Some(reason) = review {
+        return ChangedKeys::ScopeReview {
+            reason,
+            objects: ids,
         };
     }
     if ids.is_empty() {
@@ -338,9 +344,8 @@ impl IngestPipeline {
     ///
     /// `objects/<id>/…` と `withdrawals/<id>/state` は対象 object を特定できるため、その object の
     /// `objects/<id>/` prefix（state + envelope）と撤回だけを読み、scope 全体の prefix 走査を
-    /// 行わない。対象を特定できない鍵（media manifest / 未登録 key）が混ざる場合は `ingest_scope`
-    /// へ倒し、その回数と理由を観測状態へ記録する。索引に影響しない鍵だけなら何もしない（#1065）。
-    /// 公開scopeの周期処理は現在索引窓を読む。対象不明keyのfallbackとprivateの全件読取りは残る。
+    /// 行わない。対象を特定できない鍵（media manifest / 未登録 key）が混ざる場合、公開scopeは
+    /// 現在索引窓、private scopeは旧`ingest_scope`へ渡す。索引に影響しない鍵だけなら何もしない（#1065）。
     pub async fn ingest_changed_keys(
         &self,
         scope_kind: IndexScopeKind,
@@ -349,64 +354,53 @@ impl IngestPipeline {
         keys: &[String],
     ) -> Result<IngestSummary> {
         crate::replica_plan::validate_scope_replica(scope_kind, scope_id, replica_id)?;
-        let object_ids = match classify_changed_keys(keys.iter().map(String::as_str)) {
-            ChangedKeys::Objects(ids) => ids,
+        match classify_changed_keys(keys.iter().map(String::as_str)) {
+            ChangedKeys::Objects(ids) => {
+                self.ingest_object_ids(scope_kind, scope_id, replica_id, &ids)
+                    .await
+            }
             ChangedKeys::Ignored => {
                 debug!(
                     replica_id = %replica_id.as_str(),
                     keys = keys.len(),
                     "changed keys do not affect the index; skipping"
                 );
-                return Ok(IngestSummary::default());
+                Ok(IngestSummary::default())
             }
-            ChangedKeys::WholeScope { reason } => {
+            ChangedKeys::ScopeReview { reason, objects } => {
+                if scope_kind == IndexScopeKind::PublicTopic {
+                    debug!(
+                        replica_id = %replica_id.as_str(),
+                        keys = keys.len(),
+                        reason = %reason,
+                        "changed keys are not object-scoped; checking the current public index window"
+                    );
+                    let mut summary = if objects.is_empty() {
+                        IngestSummary::default()
+                    } else {
+                        self.ingest_object_ids(scope_kind, scope_id, replica_id, &objects)
+                            .await?
+                    };
+                    summary.merge(
+                        Box::pin(self.ingest_recent_scope_excluding(
+                            scope_kind, scope_id, replica_id, &objects,
+                        ))
+                        .await?,
+                    );
+                    return Ok(summary);
+                }
                 debug!(
                     replica_id = %replica_id.as_str(),
                     keys = keys.len(),
                     reason = %reason,
-                    "changed keys are not object-scoped; falling back to the whole scope"
+                    "private changed keys are not object-scoped; falling back to the whole scope"
                 );
                 if let Some(metrics) = &self.metrics {
                     metrics.record_whole_scope_fallback(&reason);
                 }
-                return self.ingest_scope(scope_kind, scope_id, replica_id).await;
-            }
-        };
-        if !self.retain_supported_scope(scope_kind, scope_id).await? {
-            return Ok(IngestSummary::default());
-        }
-        self.docs_sync.open_replica(replica_id).await?;
-
-        let mut records: Vec<DocRecord> = Vec::new();
-        for object_id in &object_ids {
-            for suffix in ["state", "envelope"] {
-                let key = format!(
-                    "{}{object_id}/{suffix}",
-                    SharedReplicaKeyFamily::PostObject.prefix()
-                );
-                records.extend(
-                    self.docs_sync
-                        .query_replica_exact_bounded(
-                            replica_id,
-                            &key,
-                            RECORDS_PER_EXACT_KEY,
-                            DocFetchPolicy::LocalThenRemote,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed to query object `{object_id}` in replica {}",
-                                replica_id.as_str()
-                            )
-                        })?,
-                );
+                self.ingest_scope(scope_kind, scope_id, replica_id).await
             }
         }
-        let (state_records, context) = self
-            .scope_context(replica_id, records, Some(&object_ids))
-            .await?;
-        self.ingest_records(scope_kind, scope_id, replica_id, &state_records, &context)
-            .await
     }
 
     /// prefix 走査結果を state record と共有文脈（envelope map + 検証済み撤回集合）に分ける。
