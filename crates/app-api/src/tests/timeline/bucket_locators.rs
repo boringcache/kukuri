@@ -1,10 +1,11 @@
 use super::super::*;
-use kukuri_core::BlobHash;
+use kukuri_core::{BlobHash, build_post_envelope};
 use kukuri_docs_sync::{BucketReplica, BucketScope, TimeBucket};
 
 #[derive(Default)]
 struct LocalReadDocs {
     inner: MemoryDocsSync,
+    remote: std::sync::Mutex<Option<Arc<MemoryDocsSync>>>,
     reads: std::sync::atomic::AtomicUsize,
     forbidden: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -47,6 +48,16 @@ impl BlobService for LocalReadBlobs {
 
 #[async_trait]
 impl DocsSync for LocalReadDocs {
+    async fn public_bucket_readers(&self, _: &ReplicaId) -> Result<Vec<Arc<dyn DocsSync>>> {
+        Ok(self
+            .remote
+            .lock()
+            .expect("remote source poisoned")
+            .iter()
+            .cloned()
+            .map(|source| source as Arc<dyn DocsSync>)
+            .collect())
+    }
     async fn query_local_source(
         &self,
         replica: &ReplicaId,
@@ -402,6 +413,92 @@ async fn community_index_resolves_the_signed_post_in_the_supplied_bucket() {
 }
 
 #[tokio::test]
+async fn community_index_fetches_a_public_bucket_post_from_a_remote_provider() {
+    let (app, docs) = observed_app();
+    let remote = Arc::new(MemoryDocsSync::default());
+    let topic = TopicId::new("remote-topic");
+    let keys = generate_keys();
+    let envelope = build_post_envelope(&keys, &topic, "remote body", None).expect("signed post");
+    let replica = BucketReplica::new(
+        BucketScope::Topic {
+            topic_id: topic.as_str().to_string(),
+        },
+        TimeBucket::from_unix_seconds(envelope.created_at).expect("time"),
+    )
+    .expect("bucket")
+    .replica_id();
+    persist_post_object(
+        remote.as_ref(),
+        &replica,
+        envelope.to_post_object().expect("header").expect("post"),
+        envelope.clone(),
+    )
+    .await
+    .expect("remote post");
+    let withdrawn =
+        build_post_envelope(&keys, &topic, "withdrawn body", None).expect("second signed post");
+    persist_post_object(
+        remote.as_ref(),
+        &replica,
+        withdrawn.to_post_object().expect("header").expect("post"),
+        withdrawn.clone(),
+    )
+    .await
+    .expect("second remote post");
+    let withdrawal = build_post_withdrawal_envelope(
+        &keys,
+        &withdrawn,
+        1,
+        None,
+        WithdrawalReasonVisibility::Public,
+        Some(PostWithdrawalReason::AuthorRequest),
+    )
+    .expect("signed withdrawal");
+    remote
+        .apply_doc_op(
+            &replica,
+            DocOp::SetJson {
+                key: format!("withdrawals/{}/state", withdrawn.id.as_str()),
+                value: serde_json::to_value(withdrawal).expect("json"),
+            },
+        )
+        .await
+        .expect("remote withdrawal");
+    *docs.remote.lock().expect("remote source poisoned") = Some(remote);
+    let response = app
+        .resolve_community_index_posts(
+            [
+                (&envelope, "remote-result"),
+                (&withdrawn, "withdrawn-result"),
+            ]
+            .into_iter()
+            .map(|(post, key)| CommunityIndexPostResolveInput {
+                key: key.into(),
+                topic: topic.as_str().into(),
+                object_id: post.id.as_str().into(),
+                author_pubkey: post.pubkey.as_str().into(),
+                channel_ref: ChannelRef::Public,
+                source_replica_id: Some(replica.as_str().into()),
+            })
+            .collect(),
+        )
+        .await
+        .expect("resolve");
+    assert_eq!(
+        response.entries[0]
+            .post
+            .as_ref()
+            .map(|post| post.content.as_str()),
+        Some("remote body")
+    );
+    let tombstone = response.entries[1].post.as_ref().expect("withdrawn post");
+    assert!(tombstone.withdrawal.is_some());
+    assert!(tombstone.content.is_empty());
+    assert_eq!(docs.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(docs.forbidden.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn invalid_index_locators_do_not_read_docs_or_start_sync() {
     let (app, docs) = observed_app();
     for source in [
@@ -547,6 +644,74 @@ async fn stale_available_or_pinned_body_status_never_allows_remote_fallback() {
             BlobViewStatus::Missing
         );
     }
+}
+
+#[cfg(feature = "iroh-integration-tests")]
+#[tokio::test]
+async fn real_iroh_client_reads_a_public_bucket_without_importing_it() -> Result<()> {
+    let publisher_node = kukuri_iroh_node::IrohDocsNode::memory().await?;
+    let client_node = kukuri_iroh_node::IrohDocsNode::memory().await?;
+    let publisher = kukuri_docs_sync::IrohDocsSync::new(publisher_node.clone());
+    let client = Arc::new(kukuri_docs_sync::IrohDocsSync::new(client_node.clone()));
+    let topic = TopicId::new("real-remote-topic");
+    let envelope = build_post_envelope(&generate_keys(), &topic, "real remote body", None)?;
+    let replica = BucketReplica::new(
+        BucketScope::Topic {
+            topic_id: topic.as_str().to_owned(),
+        },
+        TimeBucket::from_unix_seconds(envelope.created_at)?,
+    )?
+    .replica_id();
+    persist_post_object(
+        &publisher,
+        &replica,
+        envelope.to_post_object()?.expect("post"),
+        envelope.clone(),
+    )
+    .await?;
+    let socket = publisher_node
+        .endpoint()
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .expect("publisher socket");
+    client
+        .import_peer_ticket(&format!("{}@{socket}", publisher_node.endpoint().addr().id))
+        .await?;
+    let store = Arc::new(MemoryStore::default());
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store,
+        Arc::new(StaticTransport::new(PeerSnapshot::default())),
+        Arc::new(NoopHintTransport),
+        client.clone(),
+        Arc::new(MemoryBlobService::default()),
+        generate_keys(),
+    );
+    let response = app
+        .resolve_community_index_posts(vec![CommunityIndexPostResolveInput {
+            key: "remote".into(),
+            topic: topic.as_str().into(),
+            object_id: envelope.id.as_str().into(),
+            author_pubkey: envelope.pubkey.as_str().into(),
+            channel_ref: ChannelRef::Public,
+            source_replica_id: Some(replica.as_str().into()),
+        }])
+        .await?;
+    assert_eq!(
+        response.entries[0]
+            .post
+            .as_ref()
+            .map(|post| post.content.as_str()),
+        Some("real remote body")
+    );
+    assert_eq!(client_node.docs().list().await?.count().await, 0);
+    app.shutdown().await;
+    client.shutdown().await;
+    publisher.shutdown().await;
+    client_node.shutdown().await?;
+    publisher_node.shutdown().await?;
+    Ok(())
 }
 
 #[cfg(feature = "iroh-integration-tests")]

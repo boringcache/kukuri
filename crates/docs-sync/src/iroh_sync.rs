@@ -740,6 +740,10 @@ impl DocsSync for IrohDocsSync {
     async fn assist_peer_ids(&self) -> Result<Vec<String>> {
         Ok(self.available_sync_peer_ids().await)
     }
+
+    async fn public_bucket_readers(&self, replica: &ReplicaId) -> Result<Vec<Arc<dyn DocsSync>>> {
+        self.public_bucket_readers_owned(replica).await
+    }
 }
 
 async fn doc_start_sync(doc: &Doc, peers: Vec<EndpointAddr>) -> Result<()> {
