@@ -156,6 +156,17 @@ impl DocsSync for FaultInjectingDocsSync {
             .await
     }
 
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        if self.fail_queries.load(Ordering::SeqCst) {
+            anyhow::bail!("injected replica query failure for {}", replica_id.as_str());
+        }
+        self.inner.query_replica_keys(replica_id, query).await
+    }
+
     async fn subscribe_replica(&self, replica_id: &ReplicaId) -> Result<DocEventStream> {
         self.inner.subscribe_replica(replica_id).await
     }

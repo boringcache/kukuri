@@ -436,6 +436,17 @@ impl DocsSync for FailingScopeDocsSync {
             .await
     }
 
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> anyhow::Result<kukuri_docs_sync::DocKeyPage> {
+        if replica_id.as_str() == self.failing_replica {
+            anyhow::bail!("simulated replica query failure");
+        }
+        self.inner.query_replica_keys(replica_id, query).await
+    }
+
     async fn subscribe_replica(
         &self,
         replica_id: &ReplicaId,
@@ -597,6 +608,7 @@ async fn worker_restart_restores_supported_scopes() -> Result<()> {
 struct CountingDocsSync {
     inner: Arc<MemoryDocsSync>,
     whole_scope_queries: std::sync::atomic::AtomicUsize,
+    exact_queries: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -619,9 +631,21 @@ impl DocsSync for CountingDocsSync {
             self.whole_scope_queries
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        if matches!(&query, DocQuery::Exact(_)) {
+            self.exact_queries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.inner
             .query_replica_with_policy(replica_id, query, policy)
             .await
+    }
+
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> anyhow::Result<kukuri_docs_sync::DocKeyPage> {
+        self.inner.query_replica_keys(replica_id, query).await
     }
 
     async fn subscribe_replica(
@@ -654,6 +678,7 @@ async fn worker_event_ingest_processes_only_changed_object_and_records_metrics()
     let docs = Arc::new(CountingDocsSync {
         inner: inner.clone(),
         whole_scope_queries: std::sync::atomic::AtomicUsize::new(0),
+        exact_queries: std::sync::atomic::AtomicUsize::new(0),
     });
 
     let state = Arc::new(IndexerRuntimeState::default());
@@ -681,9 +706,9 @@ async fn worker_event_ingest_processes_only_changed_object_and_records_metrics()
     let whole_scope_after_startup = docs
         .whole_scope_queries
         .load(std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        whole_scope_after_startup >= 1,
-        "startup pass scans the whole scope"
+    assert_eq!(
+        whole_scope_after_startup, 0,
+        "startup must use a bounded index page"
     );
     let snapshot = state.snapshot();
     assert!(snapshot.last_pass_duration_ms.is_some());
@@ -722,6 +747,67 @@ async fn worker_event_ingest_processes_only_changed_object_and_records_metrics()
     assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
     assert_eq!(snapshot.scans_reused, 0);
 
+    handle.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn periodic_public_poll_stops_at_the_current_index_window() -> Result<()> {
+    let Some(admin_url) = integration_test_admin_database_url() else {
+        eprintln!("skipping worker contract test; set KUKURI_CN_RUN_INTEGRATION_TESTS=1");
+        return Ok(());
+    };
+    let database = TestDatabase::create(admin_url.as_str(), "cn_worker_bounded_window").await?;
+    let pool = connect_postgres(database.database_url.as_str()).await?;
+    initialize_database(&pool).await?;
+    add_supported_topic(&pool, IndexScopeKind::PublicTopic, "rust").await?;
+
+    let replica = kukuri_docs_sync::topic_replica_id("rust");
+    let inner = Arc::new(MemoryDocsSync::default());
+    inner.open_replica(&replica).await?;
+    let created_at = chrono::Utc::now().timestamp();
+    for index in 0..1_001 {
+        let id = format!("object-{index:04}");
+        inner
+            .apply_doc_op(
+                &replica,
+                DocOp::SetBytes {
+                    key: stable_key("indexes/timeline", &format!("{created_at:020}-{id}/{id}")),
+                    value: Vec::new(),
+                },
+            )
+            .await?;
+    }
+    let docs = Arc::new(CountingDocsSync {
+        inner,
+        whole_scope_queries: std::sync::atomic::AtomicUsize::new(0),
+        exact_queries: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let state = Arc::new(IndexerRuntimeState::default());
+    let projection = Arc::new(MemoryIndexProjection::default());
+    let (participant, _) = participant_with_docs(&pool, docs.clone(), &projection, &state);
+    let worker = IndexerWorker::new(
+        participant,
+        docs.clone(),
+        Arc::clone(&state),
+        fast_config(Duration::from_secs(120)),
+    );
+    let handle = worker.spawn();
+    wait_until("bounded public poll", || {
+        let state = Arc::clone(&state);
+        async move { state.snapshot().last_pass_duration_ms.is_some() }
+    })
+    .await;
+    assert_eq!(
+        docs.whole_scope_queries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst),
+        300,
+        "100 selected IDs read state, envelope, and withdrawal once each"
+    );
     handle.shutdown().await;
     Ok(())
 }

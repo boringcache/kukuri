@@ -48,6 +48,7 @@ use crate::scheduler::{PostFetchJobKey, PostFetchJobState, PostFetchScheduler};
 
 mod bucket_post;
 mod failure;
+mod recent;
 mod reference_guard;
 mod source;
 use failure::{is_transient, transient};
@@ -347,7 +348,7 @@ impl IngestPipeline {
     /// `objects/<id>/` prefix（state + envelope）と撤回だけを読み、scope 全体の prefix 走査を
     /// 行わない。対象を特定できない鍵（media manifest / 未登録 key）が混ざる場合は `ingest_scope`
     /// へ倒し、その回数と理由を観測状態へ記録する。索引に影響しない鍵だけなら何もしない（#1065）。
-    /// 全件見直し（`ingest_scope`）は引き続き定期的に走り、取りこぼしを回収する。
+    /// 公開scopeの周期処理は現在索引窓を読む。対象不明keyのfallbackとprivateの全件読取りは残る。
     pub async fn ingest_changed_keys(
         &self,
         scope_kind: IndexScopeKind,

@@ -55,6 +55,13 @@ impl DocsSync for ObservedDocs {
             .push((replica.clone(), result.len()));
         Ok(result)
     }
+    async fn query_replica_keys(
+        &self,
+        replica: &kukuri_core::ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        self.inner.query_replica_keys(replica, query).await
+    }
     async fn subscribe_replica(
         &self,
         replica: &kukuri_core::ReplicaId,

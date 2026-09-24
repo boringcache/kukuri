@@ -1,7 +1,7 @@
 //! 常駐取り込みワーカー（#613 T2）。
 //!
 //! 起動時に scope 管理 state から復元し、以後は「レプリカの変更通知（少し待ってまとめる）+
-//! 一定間隔の全件見直し」で supported scope を取り込み続ける。全件見直しは何度実行しても同じ
+//! 一定間隔のscope見直し」で supported scope を取り込み続ける。見直しは何度実行しても同じ
 //! 結果に収束する（冪等）ため、サポート対象・チャンネル秘密鍵の更新や通知の取りこぼしを
 //! ここで回収する。
 //!
@@ -22,6 +22,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use kukuri_cn_core::IndexScopeKind;
 use kukuri_docs_sync::DocsSync;
 
 use crate::participant::{IndexerParticipant, ScopeReplica};
@@ -30,7 +31,7 @@ use crate::state::IndexerRuntimeState;
 /// ワーカーの動作設定。テストから各間隔を注入して短縮できる。
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
-    /// 全件見直しの間隔。
+    /// scope見直しの間隔。
     pub poll_interval: Duration,
     /// 変更通知を受けてから取り込むまでの待ち（連続する通知をまとめる）。
     pub event_debounce: Duration,
@@ -54,7 +55,7 @@ impl Default for WorkerConfig {
 /// 購読タスクから run loop へ流す変更通知（replica id, 変更された key）。
 type ReplicaEvent = (String, String);
 
-/// 取り込み対象（全件 or 変更 key に対応する object だけ）。
+/// 取り込み対象（周期のscope窓 or 変更 key に対応する object だけ）。
 #[derive(Clone, Copy, Debug)]
 enum IngestTarget<'a> {
     Scope,
@@ -133,19 +134,19 @@ impl IndexerWorker {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ReplicaEvent>();
         // replica id → 購読タスク。
         let mut subscriptions: HashMap<String, JoinHandle<()>> = HashMap::new();
-        // replica id → 取り込み対象 scope（直近の全件見直し時点）。
+        // replica id → 取り込み対象 scope（直近のscope見直し時点）。
         let mut active: HashMap<String, ScopeReplica> = HashMap::new();
         // replica id → 再試行状態。
         let mut backoff: HashMap<String, BackoffEntry> = HashMap::new();
 
         'main: loop {
             let pass_started = tokio::time::Instant::now();
-            self.full_pass(&mut active, &mut subscriptions, &event_tx, &mut backoff)
+            self.refresh_pass(&mut active, &mut subscriptions, &event_tx, &mut backoff)
                 .await;
             self.state
                 .record_pass_duration(pass_started.elapsed().as_millis() as u64);
 
-            // 次の全件見直しまで、変更通知を処理しながら待つ。
+            // 次のscope見直しまで、変更通知を処理しながら待つ。
             let next_pass = tokio::time::Instant::now() + self.config.poll_interval;
             loop {
                 tokio::select! {
@@ -222,12 +223,12 @@ impl IndexerWorker {
         info!("indexer worker stopped");
     }
 
-    /// 全件見直し 1 巡（冪等）:
+    /// scope見直し 1 巡（冪等）:
     /// 1. いま対象であるべき scope を求める。
     /// 2. 索引に実在するが対象でなくなった scope を索引解除する（秘密鍵失効を含む）。
     /// 3. 秘密鍵の登録とレプリカ open（`restore_scopes`）、購読の起動。
     /// 4. 各 scope を取り込む（再試行間隔中の scope は飛ばす）。
-    async fn full_pass(
+    async fn refresh_pass(
         &self,
         active: &mut HashMap<String, ScopeReplica>,
         subscriptions: &mut HashMap<String, JoinHandle<()>>,
@@ -352,10 +353,10 @@ impl IndexerWorker {
         }
     }
 
-    /// scope を取り込む（全件、または変更された key の object だけ）。再試行間隔中なら何もしない。
+    /// scope を取り込む（公開は現在窓、privateは従来全件、または変更object）。
     ///
-    /// 変更通知駆動の取り込みも同じ backoff に従う。間隔中に届いた通知の取りこぼしは、次の
-    /// 全件見直し（冪等）が回収する。
+    /// 変更通知駆動の取り込みも同じ backoff に従う。公開scopeの周期処理は現在窓だけを
+    /// 再確認し、窓外の完全回収は行わない。
     async fn ingest_with_backoff(
         &self,
         scope: &ScopeReplica,
@@ -370,6 +371,9 @@ impl IndexerWorker {
             return false;
         }
         let result = match target {
+            IngestTarget::Scope if scope.kind == IndexScopeKind::PublicTopic => {
+                self.participant.ingest_recent_scope(scope).await
+            }
             IngestTarget::Scope => self.participant.ingest_scope(scope).await,
             IngestTarget::Keys(keys) => self.participant.ingest_changed_keys(scope, keys).await,
         };
@@ -441,7 +445,7 @@ impl IndexerWorker {
                     debug!(replica_id = %replica_id.as_str(), "replica event stream ended");
                 }
                 Err(error) => {
-                    // 購読に失敗しても定期の全件見直しが取り込みを続ける（次の見直しで再購読）。
+                    // 購読に失敗しても定期のscope見直しが取り込みを続ける（次回再購読）。
                     warn!(
                         replica_id = %replica_id.as_str(),
                         error = %format!("{error:#}"),
