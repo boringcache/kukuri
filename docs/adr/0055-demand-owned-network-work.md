@@ -80,6 +80,11 @@ UIには保存済み内容と取得待ち/取得不能を返し、空の結果�
 
 ## 3. 差分・停止・回復（D6・D7・D9）
 
+#1221 G3-3の2026-09-24決定により、下記の低水準namespace同期案は新bucketのreaderへは採用しない。
+公開CN readerは対象key/件数/bytesを指定したQUIC読取りへ移し、private/authorの認可とcache回収を
+同じB案で後続接続する。旧`start_sync`はlegacy writerとの移行期間に限る。既存の停止所有権と
+LocalOnlyの禁止I/O境界は方式変更後も維持する。
+
 - `peer -> 使用中lease` と `scope -> resource` の逆引きを持つ。peerの追加・削除・アドレス変更は
   そのpeerを利用する有界な対象だけへ適用し、全登録topic/replicaを再走査しない。
 - gossipの追加は現行 `join_peers` を利用する。削除APIがない場合は**影響するtopicだけ**を

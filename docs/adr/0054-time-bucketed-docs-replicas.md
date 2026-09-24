@@ -5,6 +5,9 @@
 Proposed（旧#1243、実装計画承認済み。現在は#1221 P2〜P4へ集約。
 各段階の実装・監査後に採用状態を更新する）
 
+2026-09-24の#1221 G3-3で有界ページ/対象ID取得（B）を採用した。以下の旧「常時同期」記述は
+識別・移行時の履歴であり、新bucket readerの完成形ではない。公開CN readerから順に切り替える。
+
 ## Context
 
 [ADR 0052 §7](0052-scale-independent-timeline-sync.md) の残る問題は、iroh-docs の同期が namespace の
@@ -87,6 +90,11 @@ iroh-docsの受信前filterと同一視しない。
   restore等で本人storeが部分的な状態なら、部分rosterで保存済みの署名済みrosterを無条件に上書きしない。
 
 ### 4. lifecycle と #1224 の接点
+
+#1221の新しい公開bucket readerは、稼働中providerのローカルkey索引をQUICで件数/bytes/期限付きで読み、
+署名済みrecordを既存gateへ渡す。readerはnamespaceをimport/open/start_syncせず、1対象の読取りだけを
+保持する。legacy writerが使う旧namespace同期はwriter切替まで残すが、新形式定常経路へ持ち越さない。
+private/authorのreaderと保護cache/移行は未完了であり、この公開経路だけをR5全体の達成としない。
 
 - `LocalOnly`の読み取りはnamespaceをネットワークへ参加させない。ローカルopenとsync開始を別操作にする。
   secretの登録だけでもsyncを開始しない。remote要求はaudience/同意/成人向け取得guardを通してからownerへ渡す。

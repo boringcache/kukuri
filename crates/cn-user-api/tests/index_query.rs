@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use kukuri_cn_core::{
     ChannelSecretCipher, IndexEntryStore, IndexScopeKind, JwtConfig, MemoryIndexEntryStore,
-    NewIndexEntry, TestDatabase, connect_postgres, register_channel_secret,
+    NewIndexEntry, TestDatabase, add_supported_topic, connect_postgres, register_channel_secret,
 };
 use kukuri_cn_indexer::projection::{IndexProjection, IndexedEntry, MemoryIndexProjection};
 use kukuri_cn_indexer::query::FailClosedIndexQuery;
@@ -390,12 +390,48 @@ async fn index_query_requires_auth_and_consent() -> Result<()> {
     .await?;
     let client = Client::new();
 
+    let pool = connect_postgres(&server.database.database_url).await?;
+    add_supported_topic(&pool, IndexScopeKind::PublicTopic, "rust").await?;
+
     let unauthenticated = client
-        .get(format!("{}/v1/index/search?q=hello", server.base_url))
+        .get(format!(
+            "{}/v1/index/search?scope_kind=public_topic&scope_id=rust&q=hello",
+            server.base_url
+        ))
         .send()
         .await?;
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let demand: Option<String> = sqlx::query_scalar(
+        "SELECT last_index_demand_at::text FROM cn_index.supported_topics WHERE kind='public_topic' AND id='rust'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        demand.is_none(),
+        "unauthenticated query must not prioritize a scope"
+    );
 
+    let token = authenticate_and_consent(&client, &server.base_url, &generate_keys()).await?;
+    let authorized = client
+        .get(format!(
+            "{}/v1/index/discovery?scope_kind=public_topic&scope_id=rust",
+            server.base_url
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let demand: Option<String> = sqlx::query_scalar(
+        "SELECT last_index_demand_at::text FROM cn_index.supported_topics WHERE kind='public_topic' AND id='rust'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        demand.is_some(),
+        "authorized scoped demand must be selected first"
+    );
+
+    pool.close().await;
     server.shutdown().await
 }
 

@@ -27,6 +27,8 @@ use crate::types::{
 mod lifecycle;
 #[path = "iroh_local_source.rs"]
 mod local_source;
+#[path = "iroh_remote_source.rs"]
+mod remote_source;
 use kukuri_iroh_node::{IrohDocsNode, remote_fetch};
 
 struct ReplicaHandle {
@@ -207,7 +209,7 @@ impl IrohDocsSync {
         Ok(())
     }
 
-    async fn replica_secret(&self, replica_id: &ReplicaId) -> Result<NamespaceSecret> {
+    pub(crate) async fn replica_secret(&self, replica_id: &ReplicaId) -> Result<NamespaceSecret> {
         if replica_id.as_str().starts_with("bucket::") {
             crate::BucketReplica::parse(replica_id)?;
         }

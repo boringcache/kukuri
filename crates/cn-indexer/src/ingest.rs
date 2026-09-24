@@ -49,6 +49,7 @@ use crate::scheduler::{PostFetchJobKey, PostFetchJobState, PostFetchScheduler};
 mod bucket_post;
 mod failure;
 mod recent;
+pub(crate) use recent::recent_object_keys;
 mod reference_guard;
 mod source;
 use failure::{is_transient, transient};
@@ -72,6 +73,17 @@ pub struct IngestSummary {
     pub scans_fresh: usize,
     /// 保存済みsubject判定または共通内容判定を再利用してproviderを呼ばなかったscan数。
     pub scans_reused: usize,
+}
+
+impl IngestSummary {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.scanned += other.scanned;
+        self.indexed += other.indexed;
+        self.skipped_non_allow += other.skipped_non_allow;
+        self.deindexed += other.deindexed;
+        self.scans_fresh += other.scans_fresh;
+        self.scans_reused += other.scans_reused;
+    }
 }
 
 /// 変更通知の key 種別ごとの取り込み方（#1050 / #1065）。
@@ -199,6 +211,7 @@ struct ScanStats {
 /// safety scan は `SafetyScanService`（#406）経由で行い、scan と同時に moderation artifact
 /// （signed moderation event / risk signal）が署名・永続化される。verdict gate（allow のみ投影）
 /// は従来どおり本 pipeline が担う。
+#[derive(Clone)]
 pub struct IngestPipeline {
     docs_sync: Arc<dyn DocsSync>,
     safety: Arc<SafetyScanService>,
@@ -229,6 +242,11 @@ impl IngestPipeline {
             post_scheduler: Arc::new(PostFetchScheduler::new(4)),
             max_concurrent_posts: 4,
         }
+    }
+
+    pub fn with_docs_source(mut self, source: Arc<dyn DocsSync>) -> Self {
+        self.docs_sync = source;
+        self
     }
 
     /// `BlobText` 本文の一時取得境界を接続する。

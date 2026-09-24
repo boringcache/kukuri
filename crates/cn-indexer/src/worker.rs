@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -26,6 +26,7 @@ use kukuri_cn_core::IndexScopeKind;
 use kukuri_docs_sync::DocsSync;
 
 use crate::participant::{IndexerParticipant, ScopeReplica};
+use crate::public_bucket_reader::PublicBucketReader;
 use crate::state::IndexerRuntimeState;
 
 /// ワーカーの動作設定。テストから各間隔を注入して短縮できる。
@@ -75,13 +76,24 @@ pub struct IndexerWorker {
     docs_sync: Arc<dyn DocsSync>,
     state: Arc<IndexerRuntimeState>,
     config: WorkerConfig,
+    public_bucket_reader: Option<Arc<PublicBucketReader>>,
 }
 
 /// ワーカーの停止用の持ち手。
 pub struct WorkerHandle {
     stop_tx: watch::Sender<bool>,
     join: JoinHandle<()>,
+    remote_join: Option<JoinHandle<()>>,
     state: Arc<IndexerRuntimeState>,
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        self.join.abort();
+        if let Some(remote_join) = &self.remote_join {
+            remote_join.abort();
+        }
+    }
 }
 
 impl WorkerHandle {
@@ -91,9 +103,15 @@ impl WorkerHandle {
     }
 
     /// ワーカーを止め、終了を待つ。購読タスクも含めて止まる。
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         let _ = self.stop_tx.send(true);
-        if let Err(error) = tokio::time::timeout(Duration::from_secs(10), self.join).await {
+        if let Some(remote_join) = self.remote_join.take() {
+            remote_join.abort();
+            let _ = remote_join.await;
+        }
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(10), &mut self.join).await {
+            self.join.abort();
+            let _ = (&mut self.join).await;
             warn!(%error, "indexer worker did not stop within 10s");
         }
     }
@@ -111,22 +129,60 @@ impl IndexerWorker {
             docs_sync,
             state,
             config,
+            public_bucket_reader: None,
         }
+    }
+
+    pub fn with_public_bucket_reader(mut self, reader: Arc<PublicBucketReader>) -> Self {
+        self.public_bucket_reader = Some(reader);
+        self
     }
 
     /// ワーカーを起動する。返った持ち手の `shutdown` で止める。
     pub fn spawn(self) -> WorkerHandle {
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (initial_pass_tx, initial_pass_rx) = oneshot::channel();
         let state = Arc::clone(&self.state);
-        let join = tokio::spawn(self.run(stop_rx));
+        let remote_join = self.public_bucket_reader.as_ref().map(|reader| {
+            let reader = Arc::clone(reader);
+            let state = Arc::clone(&state);
+            let interval = self.config.poll_interval;
+            let mut remote_stop = stop_rx.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    result = initial_pass_rx => { if result.is_err() { return; } },
+                    _ = remote_stop.changed() => return,
+                }
+                loop {
+                    if *remote_stop.borrow() {
+                        break;
+                    }
+                    match reader.poll_once(chrono::Utc::now().timestamp()).await {
+                        Ok(summary) => {
+                            state.record_ingest_success(chrono::Utc::now().timestamp(), &summary)
+                        }
+                        Err(error) => {
+                            warn!(error = %format!("{error:#}"), "public bucket reader failed");
+                            state.record_error(None, &format!("{error:#}"));
+                        }
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {},
+                        _ = remote_stop.changed() => {},
+                    }
+                }
+            })
+        });
+        let join = tokio::spawn(self.run(stop_rx, initial_pass_tx));
         WorkerHandle {
             stop_tx,
             join,
+            remote_join,
             state,
         }
     }
 
-    async fn run(self, mut stop_rx: watch::Receiver<bool>) {
+    async fn run(self, mut stop_rx: watch::Receiver<bool>, initial_pass_tx: oneshot::Sender<()>) {
         self.state.set_worker_running(true);
         info!("indexer worker started");
 
@@ -139,10 +195,14 @@ impl IndexerWorker {
         // replica id → 再試行状態。
         let mut backoff: HashMap<String, BackoffEntry> = HashMap::new();
 
+        let mut initial_pass_tx = Some(initial_pass_tx);
         'main: loop {
             let pass_started = tokio::time::Instant::now();
             self.refresh_pass(&mut active, &mut subscriptions, &event_tx, &mut backoff)
                 .await;
+            if let Some(tx) = initial_pass_tx.take() {
+                let _ = tx.send(());
+            }
             self.state
                 .record_pass_duration(pass_started.elapsed().as_millis() as u64);
 

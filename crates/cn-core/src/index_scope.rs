@@ -204,6 +204,19 @@ pub async fn list_supported_topics(pool: &PgPool) -> Result<Vec<SupportedTopic>>
     rows.iter().map(supported_topic_from_row).collect()
 }
 
+/// Authenticated public search/discovery marks a scope as recently needed at most once a minute.
+pub async fn mark_public_index_demand(pool: &PgPool, topic_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE cn_index.supported_topics SET last_index_demand_at = NOW()
+         WHERE kind = 'public_topic' AND id = $1
+           AND (last_index_demand_at IS NULL OR last_index_demand_at < NOW() - INTERVAL '1 minute')",
+    )
+    .bind(topic_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// scope が supported set に含まれるか（scope ゲートの単一判定点）。
 pub async fn is_topic_supported(pool: &PgPool, kind: IndexScopeKind, id: &str) -> Result<bool> {
     let exists = sqlx::query_scalar::<_, bool>(
