@@ -727,6 +727,7 @@ async fn private_channel_reads_are_limited_to_members_with_secret_proof() -> Res
         // サーバと同じ鍵 material から cipher を組み、所属者の申請済み capability を再現する。
         let pool = connect_postgres(server.database.database_url.as_str()).await?;
         let cipher = ChannelSecretCipher::from_key_material(key_material)?;
+        add_supported_topic(&pool, IndexScopeKind::PrivateChannel, "secret-room").await?;
         register_channel_secret(&pool, &cipher, "secret-room", namespace_secret.as_str()).await?;
     }
     let client = Client::new();
@@ -782,6 +783,17 @@ async fn private_channel_reads_are_limited_to_members_with_secret_proof() -> Res
         let body = response.json::<serde_json::Value>().await?;
         assert_eq!(body["code"], "CHANNEL_MEMBERSHIP_REQUIRED");
     }
+    let pool = connect_postgres(server.database.database_url.as_str()).await?;
+    let denied_demand: Option<String> = sqlx::query_scalar(
+        "SELECT last_index_demand_at::text FROM cn_index.supported_topics
+         WHERE kind = 'private_channel' AND id = 'secret-room'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        denied_demand.is_none(),
+        "denied private reads cannot raise priority"
+    );
 
     // 正しい secret を提示した所属者は従来どおり範囲指定で読める。
     for path in [scoped_search.as_str(), scoped_discovery.as_str()] {
@@ -795,6 +807,17 @@ async fn private_channel_reads_are_limited_to_members_with_secret_proof() -> Res
         let body = response.json::<serde_json::Value>().await?;
         assert_eq!(entry_ids(&body), vec!["post-private".to_string()], "{path}");
     }
+    let authorized_demand: Option<String> = sqlx::query_scalar(
+        "SELECT last_index_demand_at::text FROM cn_index.supported_topics
+         WHERE kind = 'private_channel' AND id = 'secret-room'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        authorized_demand.is_some(),
+        "authorized private reads raise priority"
+    );
+    pool.close().await;
 
     server.shutdown().await
 }

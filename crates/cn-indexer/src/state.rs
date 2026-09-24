@@ -22,7 +22,7 @@ pub struct IndexerStateSnapshot {
     pub worker_running: bool,
     /// 取り込みが有効か（安全性プロバイダ未設定なら false のまま常駐する）。
     pub ingest_enabled: bool,
-    /// 開いているスコープ数。
+    /// 旧workerがopen枠を予約したスコープ数。途中失敗でopen状態が不明な枠も含む。
     pub opened_scopes: u64,
     /// 最後にscope窓の1巡（restore → 対象別取り込み）が成功した時刻（unix 秒）。
     pub last_sync_at: Option<i64>,

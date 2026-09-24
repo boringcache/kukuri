@@ -9,17 +9,18 @@
 //! 同じ制御ロジックを駆動できる。実際の docs node 生成（`IrohDocsNode` / relay 設定）は起動側
 //! （`runtime` / `main`）が行い、本モジュールへ `DocsSync` として注入する。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
-use sqlx::postgres::PgPool;
+use sqlx::{Row, postgres::PgPool};
 use tracing::{info, warn};
 
 use kukuri_blob_service::BlobService;
 use kukuri_cn_core::{
     ChannelSecretCipher, IndexEntryStore, IndexScopeKind, NewTransmissionPrevention,
-    TransmissionPreventionMutation, apply_transmission_prevention, list_channel_secrets,
-    list_supported_topics, load_bootstrap_seed_peers, release_transmission_prevention,
+    TransmissionPreventionMutation, apply_transmission_prevention, get_channel_secret,
+    load_bootstrap_seed_peers, mark_index_demand, release_transmission_prevention,
 };
 use kukuri_core::ReplicaId;
 use kukuri_docs_sync::{DocsSync, private_channel_replica_id, topic_replica_id};
@@ -28,6 +29,28 @@ use kukuri_transport::SeedPeer;
 use crate::ingest::{IngestPipeline, IngestSummary};
 use crate::projection::IndexProjection;
 use crate::replica_plan::PublicReplicaReadMode;
+
+const LEGACY_SCOPE_LIMIT: usize = 32;
+const PRIORITY_SCOPES: i64 = 8;
+
+fn admit_scopes(
+    mode: PublicReplicaReadMode,
+    now: i64,
+    kind: IndexScopeKind,
+    id: String,
+    selected: &mut Vec<ScopeReplica>,
+    seen: &mut HashSet<(IndexScopeKind, String)>,
+) -> Result<()> {
+    if selected.len() >= LEGACY_SCOPE_LIMIT || seen.contains(&(kind, id.clone())) {
+        return Ok(());
+    }
+    let scopes = mode.scopes(kind, &id, now)?;
+    if selected.len() + scopes.len() <= LEGACY_SCOPE_LIMIT {
+        seen.insert((kind, id));
+        selected.extend(scopes);
+    }
+    Ok(())
+}
 
 async fn apply_seed_peers(
     docs_sync: &dyn DocsSync,
@@ -161,28 +184,108 @@ impl IndexerParticipant {
     }
 
     pub async fn desired_scopes_at(&self, now: i64) -> Result<Vec<ScopeReplica>> {
-        let secrets = list_channel_secrets(&self.pool, &self.channel_secret_cipher).await?;
+        let rows = sqlx::query(
+            "SELECT s.kind, s.id FROM cn_index.supported_topics s
+             LEFT JOIN cn_index.channel_secrets c
+               ON s.kind = 'private_channel' AND c.channel_id = s.id
+             WHERE s.kind = 'public_topic' OR c.channel_id IS NOT NULL
+             ORDER BY s.kind, s.id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let mut scopes = Vec::new();
-        for supported in list_supported_topics(&self.pool).await? {
-            if supported.kind == IndexScopeKind::PrivateChannel
-                && !secrets
-                    .iter()
-                    .any(|secret| secret.channel_id == supported.id)
-            {
-                continue;
-            }
-            scopes.extend(self.public_replica_mode.scopes(
-                supported.kind,
-                supported.id.as_str(),
-                now,
-            )?);
+        for row in rows {
+            let kind = IndexScopeKind::parse(&row.try_get::<String, _>("kind")?)?;
+            let id: String = row.try_get("id")?;
+            scopes.extend(self.public_replica_mode.scopes(kind, id.as_str(), now)?);
         }
         Ok(scopes)
+    }
+
+    /// Select at most 32 physical legacy replicas. Recent authorized demand leads; a durable
+    /// cursor gives every other eligible scope a finite turn without reading the supported set.
+    pub async fn selected_scopes_at(&self, now: i64) -> Result<Vec<ScopeReplica>> {
+        let eligible = "FROM cn_index.supported_topics s
+            LEFT JOIN cn_index.channel_secrets c
+              ON s.kind = 'private_channel' AND c.channel_id = s.id
+            WHERE (s.kind = 'public_topic' OR c.channel_id IS NOT NULL)";
+        let priority = sqlx::query(&format!(
+            "SELECT s.kind, s.id {eligible}
+             AND s.last_index_demand_at >= NOW() - INTERVAL '10 minutes'
+             ORDER BY s.last_index_demand_at DESC, s.kind, s.id LIMIT {PRIORITY_SCOPES}"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for row in priority {
+            admit_scopes(
+                self.public_replica_mode,
+                now,
+                IndexScopeKind::parse(&row.try_get::<String, _>("kind")?)?,
+                row.try_get("id")?,
+                &mut selected,
+                &mut seen,
+            )?;
+        }
+        let cursor = sqlx::query(
+            "SELECT last_kind, last_scope_id FROM cn_index.legacy_scope_cursor WHERE id = TRUE",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let mut last_kind: String = cursor.try_get("last_kind")?;
+        let mut last_id: String = cursor.try_get("last_scope_id")?;
+        for (after_kind, after_id) in [
+            (last_kind.clone(), last_id.clone()),
+            (String::new(), String::new()),
+        ] {
+            if selected.len() >= LEGACY_SCOPE_LIMIT {
+                break;
+            }
+            let page = sqlx::query(&format!(
+                "SELECT s.kind, s.id {eligible} AND (s.kind, s.id) > ($1, $2)
+                 ORDER BY s.kind, s.id LIMIT 64"
+            ))
+            .bind(after_kind)
+            .bind(after_id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in page {
+                let kind: String = row.try_get("kind")?;
+                let id: String = row.try_get("id")?;
+                last_kind.clone_from(&kind);
+                last_id.clone_from(&id);
+                admit_scopes(
+                    self.public_replica_mode,
+                    now,
+                    IndexScopeKind::parse(&kind)?,
+                    id,
+                    &mut selected,
+                    &mut seen,
+                )?;
+                if selected.len() >= LEGACY_SCOPE_LIMIT {
+                    break;
+                }
+            }
+        }
+        sqlx::query(
+            "UPDATE cn_index.legacy_scope_cursor
+             SET last_kind = $1, last_scope_id = $2 WHERE id = TRUE",
+        )
+        .bind(last_kind)
+        .bind(last_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(selected)
     }
 
     /// 索引の真実源にいま entry が存在する scope の一覧（#613 T2）。
     pub async fn indexed_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
         self.entries.list_scopes().await
+    }
+
+    pub async fn mark_scope_demand(&self, scope: &ScopeReplica) -> Result<()> {
+        mark_index_demand(&self.pool, scope.kind, &scope.id).await
     }
 
     /// 起動時 / 再起動時に scope 管理 state から replica を open して sync 復元する（E13）。
@@ -195,51 +298,52 @@ impl IndexerParticipant {
     }
 
     pub async fn restore_scopes_at(&self, now: i64) -> Result<Vec<ScopeReplica>> {
+        let scopes = self.desired_scopes_at(now).await?;
+        self.restore_selected_scopes(&scopes).await
+    }
+
+    pub async fn restore_selected_scopes(
+        &self,
+        scopes: &[ScopeReplica],
+    ) -> Result<Vec<ScopeReplica>> {
         self.refresh_seed_peers().await?;
-
-        // private channel の capability を先に docs へ登録する。
-        let secrets = list_channel_secrets(&self.pool, &self.channel_secret_cipher).await?;
-        for secret in &secrets {
-            let replica_id = private_channel_replica_id(secret.channel_id.as_str());
-            self.docs_sync
-                .register_private_replica_secret(&replica_id, secret.namespace_secret_hex.as_str())
-                .await?;
-        }
-
         let mut opened = Vec::new();
-        for supported in list_supported_topics(&self.pool).await? {
-            let scopes =
-                self.public_replica_mode
-                    .scopes(supported.kind, supported.id.as_str(), now)?;
-            for scope in scopes {
-                // private channel は capability が登録されていなければ open しない。
-                if scope.kind == IndexScopeKind::PrivateChannel
-                    && !secrets.iter().any(|secret| secret.channel_id == scope.id)
-                {
+        for scope in scopes {
+            if scope.kind == IndexScopeKind::PrivateChannel {
+                let Some(secret) =
+                    get_channel_secret(&self.pool, &self.channel_secret_cipher, scope.id.as_str())
+                        .await?
+                else {
                     warn!(
                         channel_id = %scope.id,
                         "private channel is supported but has no registered capability; skipping (no secret, no index)"
                     );
                     continue;
+                };
+                self.docs_sync
+                    .register_private_replica_secret(
+                        &scope.replica_id,
+                        secret.namespace_secret_hex.as_str(),
+                    )
+                    .await?;
+            }
+            match self.docs_sync.open_replica(&scope.replica_id).await {
+                Ok(()) => {
+                    info!(
+                        kind = scope.kind.as_str(),
+                        scope_id = %scope.id,
+                        replica_id = %scope.replica_id.as_str(),
+                        "opened supported replica for sync"
+                    );
+                    opened.push(scope.clone());
                 }
-                match self.docs_sync.open_replica(&scope.replica_id).await {
-                    Ok(()) => {
-                        info!(
-                            kind = scope.kind.as_str(),
-                            scope_id = %scope.id,
-                            replica_id = %scope.replica_id.as_str(),
-                            "opened supported replica for sync"
-                        );
-                        opened.push(scope);
-                    }
-                    Err(error) => {
-                        warn!(
-                            kind = scope.kind.as_str(),
-                            scope_id = %scope.id,
-                            error = %error,
-                            "failed to open supported replica; skipping"
-                        );
-                    }
+                Err(error) => {
+                    warn!(
+                        kind = scope.kind.as_str(),
+                        scope_id = %scope.id,
+                        error = %error,
+                        "failed to open supported replica; skipping"
+                    );
                 }
             }
         }
@@ -453,6 +557,25 @@ mod tests {
     fn private_channel_scope_maps_to_channel_replica() {
         let scope = ScopeReplica::from_scope(IndexScopeKind::PrivateChannel, "secret-room");
         assert_eq!(scope.replica_id.as_str(), "channel::secret-room");
+    }
+
+    #[test]
+    fn transition_admission_counts_physical_replicas() {
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for index in 0..80 {
+            admit_scopes(
+                PublicReplicaReadMode::Transition,
+                10 * 86_400,
+                IndexScopeKind::PublicTopic,
+                format!("topic-{index:02}"),
+                &mut selected,
+                &mut seen,
+            )
+            .unwrap();
+        }
+        assert_eq!(selected.len(), 30);
+        assert_eq!(seen.len(), 10);
     }
 
     #[test]

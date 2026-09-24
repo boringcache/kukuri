@@ -386,6 +386,11 @@ fail-closed indexing 本体（DB 制約 + query 境界）は #404 で実装し�
   `withdrawals/<id>/state`）だけを処理する。対象不明keyは公開/privateとも現在索引窓へ渡す。
   同じbatchの既知object IDは窓外でも先に対象別に処理する。300秒の定常passも現在索引窓だけを読む。
   窓外の既存索引を削除根拠にしない。privateのcapability登録・失効gateは維持する。
+- 旧workerがopen/購読する物理replicaは最大32。新公開bucket readerの最大32scopeと合わせて
+  受付対象を64以内にする。認証・同意済みscope別検索/発見と検証済み新規投稿の需要を優先し、
+  残りは永続cursorで巡回する。privateは登録済みcapabilityがある場合だけ選ぶ。選外になった
+  scopeは同期を止めるが、supportedのままなら既存索引を削除しない。全supported/全indexed scopeの
+  DB列挙、手動全scope取込、旧namespace同期は残り、総処理量の上限達成とは扱わない。
 - 変更 key は共有 replica の key 種別表（`kukuri_docs_sync::SharedReplicaKeyFamily`、#1065）で分類する。
 
   | 種別 | prefix | 取り込み |

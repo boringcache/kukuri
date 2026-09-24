@@ -302,7 +302,15 @@ impl IndexerWorker {
                 return;
             }
         };
-        let desired_keys: HashSet<&str> = desired
+        let selected = match self.participant.selected_scopes_at(now).await {
+            Ok(selected) => selected,
+            Err(error) => {
+                warn!(%error, "failed to select bounded CN scopes; will retry");
+                self.state.record_error(None, &format!("{error:#}"));
+                return;
+            }
+        };
+        let selected_keys: HashSet<&str> = selected
             .iter()
             .map(|scope| scope.replica_id.as_str())
             .collect();
@@ -352,7 +360,7 @@ impl IndexerWorker {
         // 購読が残っている「対象外」scope（索引が空で差分に出ないもの）も止める。
         let stale: Vec<String> = active
             .keys()
-            .filter(|key| !desired_keys.contains(key.as_str()))
+            .filter(|key| !selected_keys.contains(key.as_str()))
             .cloned()
             .collect();
         for key in stale {
@@ -375,7 +383,29 @@ impl IndexerWorker {
         }
 
         // 3. 秘密鍵の登録とレプリカ open。open できたものだけを active / 購読対象にする。
-        let opened = match self.participant.restore_scopes_at(now).await {
+        let mut remaining = 32usize.saturating_sub(active.len());
+        let admitted = selected
+            .into_iter()
+            .filter(|scope| {
+                if active.contains_key(scope.replica_id.as_str()) {
+                    return true;
+                }
+                if remaining == 0 {
+                    return false;
+                }
+                remaining -= 1;
+                true
+            })
+            .collect::<Vec<_>>();
+        // Reserve every attempted replica before any open: a later secret/open error may leave
+        // an earlier handle alive. The next pass must count and stop that handle before reuse.
+        for scope in &admitted {
+            active
+                .entry(scope.replica_id.as_str().to_string())
+                .or_insert_with(|| scope.clone());
+        }
+        self.state.set_opened_scopes(active.len() as u64);
+        let opened = match self.participant.restore_selected_scopes(&admitted).await {
             Ok(opened) => opened,
             Err(error) => {
                 warn!(error = %format!("{error:#}"), "failed to restore scopes; will retry");
@@ -394,8 +424,6 @@ impl IndexerWorker {
                 subscriptions.insert(key, self.spawn_subscription(scope, event_tx.clone()));
             }
         }
-        self.state.set_opened_scopes(opened.len() as u64);
-
         // 4. 各 scope の取り込み。
         let mut all_scopes_ingested = !opened.is_empty();
         for scope in &opened {
@@ -432,6 +460,12 @@ impl IndexerWorker {
         };
         match result {
             Ok(summary) => {
+                if matches!(target, IngestTarget::Keys(_))
+                    && summary.indexed > 0
+                    && let Err(error) = self.participant.mark_scope_demand(scope).await
+                {
+                    warn!(replica_id = %key, %error, "failed to mark verified new-content demand");
+                }
                 backoff.remove(key);
                 self.state
                     .record_ingest_success(chrono::Utc::now().timestamp(), &summary);

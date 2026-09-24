@@ -5,7 +5,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use kukuri_cn_core::{
     ChannelSecretCipher, IndexScopeKind, MemoryIndexEntryStore, TestDatabase, add_supported_topic,
-    connect_postgres, initialize_database, mark_public_index_demand,
+    connect_postgres, initialize_database, mark_index_demand,
 };
 use kukuri_cn_indexer::ingest::IngestPipeline;
 use kukuri_cn_indexer::participant::IndexerParticipant;
@@ -87,7 +87,7 @@ async fn two_clients_feed_one_cn_through_bounded_bucket_reader() -> Result<()> {
     let pool = connect_postgres(&database.database_url).await?;
     initialize_database(&pool).await?;
     add_supported_topic(&pool, IndexScopeKind::PublicTopic, "rust").await?;
-    mark_public_index_demand(&pool, "rust").await?;
+    mark_index_demand(&pool, IndexScopeKind::PublicTopic, "rust").await?;
 
     let node_a = IrohDocsNode::memory().await?;
     let node_b = IrohDocsNode::memory().await?;
