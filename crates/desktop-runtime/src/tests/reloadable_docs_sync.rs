@@ -95,3 +95,37 @@ async fn reloadable_docs_sync_forwards_bounded_key_queries() {
     docs.current().await.shutdown().await;
     node.shutdown().await.expect("shutdown node");
 }
+
+#[tokio::test]
+async fn reloadable_docs_sync_forwards_public_bucket_readers() {
+    let provider = IrohDocsNode::memory().await.expect("provider");
+    let client = IrohDocsNode::memory().await.expect("client");
+    let docs = ReloadableDocsSync::new(Arc::new(IrohDocsSync::new(client.clone())));
+    let socket = provider
+        .endpoint()
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .expect("provider socket");
+    docs.import_peer_ticket(&format!("{}@{socket}", provider.endpoint().addr().id))
+        .await
+        .expect("import provider");
+    let replica = kukuri_docs_sync::BucketReplica::new(
+        kukuri_docs_sync::BucketScope::Topic {
+            topic_id: "reloadable-public".into(),
+        },
+        kukuri_docs_sync::TimeBucket::from_index(1).expect("bucket"),
+    )
+    .expect("replica")
+    .replica_id();
+    assert_eq!(
+        docs.public_bucket_readers(&replica)
+            .await
+            .expect("public readers")
+            .len(),
+        1,
+    );
+    docs.current().await.shutdown().await;
+    client.shutdown().await.expect("client shutdown");
+    provider.shutdown().await.expect("provider shutdown");
+}

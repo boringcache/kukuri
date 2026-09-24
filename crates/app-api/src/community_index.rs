@@ -74,6 +74,10 @@ impl AppService {
                     .is_ok();
             if scope_ready && let Some(source) = source.as_deref() {
                 let topic_ref = topic.as_str();
+                let mut unverified = entries
+                    .iter()
+                    .map(|input| input.key.clone())
+                    .collect::<HashSet<_>>();
                 let mut reads = futures_util::stream::iter(entries.iter().map(|input| {
                     let key = input.key.clone();
                     let object_id = input.object_id.clone();
@@ -89,11 +93,13 @@ impl AppService {
                 while let Ok(Some((key, resolved))) =
                     timeout_at(remote_deadline, reads.next()).await
                 {
+                    unverified.remove(&key);
                     if resolved.is_err() {
                         // A bad locator does not hide another result from the same bucket.
                         failed_entries.insert(key);
                     }
                 }
+                failed_entries.extend(unverified);
             } else if scope_ready {
                 for input in &entries {
                     if self
