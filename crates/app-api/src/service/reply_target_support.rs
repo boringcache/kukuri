@@ -87,7 +87,11 @@ impl AppService {
                 Ok(None) => {}
                 Ok(Some(_)) | Err(_) => continue,
             }
-            let ledger_key = format!("{}\n{}", source.source_replica_id.as_str(), target.as_str());
+            let ledger_key = hydration_limits::display_retry_key(
+                "reply",
+                source.source_replica_id.as_str(),
+                target.as_str(),
+            );
             let Ok(existing) = self
                 .services
                 .projection_store
@@ -111,19 +115,19 @@ impl AppService {
             }
             let Ok(permit) = self
                 .services
-                .reply_target_checks
-                .permits()
+                .missing_body_ledger
+                .fetch_permits()
                 .try_acquire_owned()
             else {
                 continue;
             };
-            if !self
+            let Some(attempt) = self
                 .services
-                .reply_target_checks
-                .try_begin(ledger_key.as_str(), Utc::now().timestamp_millis())
-            {
+                .missing_body_ledger
+                .try_begin_key(ledger_key.as_str(), Utc::now().timestamp_millis())
+            else {
                 continue;
-            }
+            };
             match reflect_reply_target_with(
                 &self.services,
                 target,
@@ -139,13 +143,14 @@ impl AppService {
                     source.topic_id.as_str(),
                     target,
                     permit,
+                    attempt,
                 ),
-                Ok(_) => {}
-                Err(error) => warn!(
-                    object_id = %target.as_str(),
-                    error = %error,
-                    "failed to reflect a reply target of a listed row"
-                ),
+                Ok(ReplyTargetReflection::Reflected(_)) => attempt.succeed(),
+                Ok(ReplyTargetReflection::Unavailable) => attempt.fail(),
+                Err(error) => {
+                    warn!(object_id = %target.as_str(), error = %error, "failed to reflect a reply target of a listed row");
+                    attempt.fail();
+                }
             }
         }
         if !missing_body_targets.is_empty() {
@@ -188,21 +193,29 @@ impl AppService {
     ) {
         let Ok(permit) = self
             .services
-            .reply_target_checks
-            .permits()
+            .missing_body_ledger
+            .fetch_permits()
             .try_acquire_owned()
         else {
             return;
         };
-        let ledger_key = format!("{}\n{}", replica_id.as_str(), object_id.as_str());
-        if !self
+        let ledger_key =
+            hydration_limits::display_retry_key("reply", replica_id.as_str(), object_id.as_str());
+        let Some(attempt) = self
             .services
-            .reply_target_checks
-            .try_begin(ledger_key.as_str(), Utc::now().timestamp_millis())
-        {
+            .missing_body_ledger
+            .try_begin_key(ledger_key.as_str(), Utc::now().timestamp_millis())
+        else {
             return;
-        }
-        spawn_reply_target_reflection(&self.services, replica_id, topic_id, object_id, permit);
+        };
+        spawn_reply_target_reflection(
+            &self.services,
+            replica_id,
+            topic_id,
+            object_id,
+            permit,
+            attempt,
+        );
     }
 
     /// #1284: 投稿カードの明示再読み込み。対象投稿自身か直前の返信先にある欠損本文だけを
@@ -310,6 +323,7 @@ fn spawn_reply_target_reflection(
     topic_id: &str,
     object_id: &EnvelopeId,
     permit: tokio::sync::OwnedSemaphorePermit,
+    attempt: hydration_limits::MissingBodyAttempt,
 ) {
     let services = services.clone();
     let replica_id = replica_id.clone();
@@ -317,14 +331,13 @@ fn spawn_reply_target_reflection(
     let object_id = object_id.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        if let Err(error) =
-            reflect_reply_target(&services, &object_id, &replica_id, topic_id.as_str()).await
-        {
-            warn!(
-                object_id = %object_id.as_str(),
-                error = %error,
-                "failed to reflect a reply target in the background"
-            );
+        match reflect_reply_target(&services, &object_id, &replica_id, topic_id.as_str()).await {
+            Ok(Some(row)) if row.content.is_some() => attempt.succeed(),
+            Ok(_) => attempt.fail(),
+            Err(error) => {
+                warn!(object_id = %object_id.as_str(), error = %error, "failed to reflect a reply target in the background");
+                attempt.fail();
+            }
         }
     });
 }

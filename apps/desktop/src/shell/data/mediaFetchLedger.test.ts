@@ -95,3 +95,14 @@ test('the ledger stays bounded and keeps entries in flight', () => {
   expect(ledger.size).toBeLessThanOrEqual(MEDIA_FETCH_LEDGER_LIMIT);
   expect(ledger.isInFlight('in-flight')).toBe(true);
 });
+
+test('a full active ledger defers another hash and rejects oversized keys', () => {
+  const ledger = new MediaFetchLedger();
+  for (let index = 0; index < MEDIA_FETCH_LEDGER_LIMIT; index += 1) {
+    expect(ledger.decide(`hash-${index}`, 'Missing', 0).kind).toBe('fetch');
+  }
+  expect(ledger.decide('new-hash', 'Missing', 0)).toEqual({ kind: 'skip' });
+  expect(ledger.requestManualRetry('new-hash')).toBe(false);
+  expect(ledger.size).toBe(MEDIA_FETCH_LEDGER_LIMIT);
+  expect(ledger.decide('あ'.repeat(100), 'Missing', 0)).toEqual({ kind: 'skip' });
+});

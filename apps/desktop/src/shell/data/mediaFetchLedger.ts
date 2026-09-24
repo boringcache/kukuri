@@ -5,18 +5,27 @@
 /// リセットするのは、利用者の明示再試行、attachment の status が `Available` へ変わったとき、
 /// 成人向け gate の切替、api の差し替え(=別の backend)だけとする。
 
-/// 自動取得の最大試行数(初回 + 再試行 2 回)。
-export const MEDIA_FETCH_MAX_AUTO_ATTEMPTS = 3;
+/// 自動取得の最大試行数(初回 + 再試行 3 回)。
+export const MEDIA_FETCH_MAX_AUTO_ATTEMPTS = 4;
 /// n 回目の失敗から次の試行までの待ち時間。
-export const MEDIA_FETCH_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000];
+export const MEDIA_FETCH_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000];
 /// 実際に参照する待ち時間。表示の結合 test が実時間を待たずに上限到達を再現するためだけに差し替える。
 export const mediaFetchRetryPolicy: { retryDelaysMs: readonly number[] } = {
   retryDelaysMs: MEDIA_FETCH_RETRY_DELAYS_MS,
 };
 /// 利用者の明示再試行は 1 回だけ試し、結果をすぐ返す。
 export const MEDIA_FETCH_MANUAL_ATTEMPTS = 1;
-/// 台帳の上限。超えた分は、取得中でない古い項目から捨てる。
-export const MEDIA_FETCH_LEDGER_LIMIT = 2_000;
+/// 台帳の上限。満杯なら取得中でない古い項目を一つ捨て、全件取得中なら新規を延期する。
+export const MEDIA_FETCH_LEDGER_LIMIT = 1_024;
+export const MEDIA_FETCH_FAILURE_KEY_MAX_BYTES = 256;
+const encoder = new TextEncoder();
+
+function validKey(hash: string): boolean {
+  return (
+    hash.length <= MEDIA_FETCH_FAILURE_KEY_MAX_BYTES &&
+    encoder.encode(hash).length <= MEDIA_FETCH_FAILURE_KEY_MAX_BYTES
+  );
+}
 
 type LedgerEntry = {
   attempts: number;
@@ -41,6 +50,9 @@ export class MediaFetchLedger {
 
   /// この hash を今取得してよいかを決める。`fetch` を返したときは試行を 1 回消費し、取得中にする。
   decide(hash: string, status: string | null, now: number): MediaFetchDecision {
+    if (!validKey(hash)) {
+      return { kind: 'skip' };
+    }
     let entry = this.entries.get(hash);
     if (entry && !entry.inFlight && status === 'Available' && entry.lastStatus !== 'Available') {
       // backend がローカルに揃ったと報告した。失敗の記録を引き継がずに取り直す。
@@ -48,6 +60,9 @@ export class MediaFetchLedger {
       entry = undefined;
     }
     if (!entry) {
+      if (!this.makeRoom()) {
+        return { kind: 'skip' };
+      }
       entry = {
         attempts: 0,
         maxAttempts: MEDIA_FETCH_MAX_AUTO_ATTEMPTS,
@@ -57,7 +72,6 @@ export class MediaFetchLedger {
         lastStatus: status,
       };
       this.entries.set(hash, entry);
-      this.prune();
     }
     entry.lastStatus = status;
     if (entry.inFlight || entry.exhausted) {
@@ -98,8 +112,14 @@ export class MediaFetchLedger {
 
   /// 利用者の明示再試行。取得中なら何もしない(重複実行を防ぐ)。
   requestManualRetry(hash: string): boolean {
+    if (!validKey(hash)) {
+      return false;
+    }
     const entry = this.entries.get(hash);
     if (entry?.inFlight) {
+      return false;
+    }
+    if (!entry && !this.makeRoom()) {
       return false;
     }
     this.entries.set(hash, {
@@ -134,17 +154,16 @@ export class MediaFetchLedger {
     return this.entries.size;
   }
 
-  private prune(): void {
-    if (this.entries.size <= MEDIA_FETCH_LEDGER_LIMIT) {
-      return;
+  private makeRoom(): boolean {
+    if (this.entries.size < MEDIA_FETCH_LEDGER_LIMIT) {
+      return true;
     }
     for (const [hash, entry] of this.entries) {
-      if (this.entries.size <= MEDIA_FETCH_LEDGER_LIMIT) {
-        return;
-      }
       if (!entry.inFlight) {
         this.entries.delete(hash);
+        return true;
       }
     }
+    return false;
   }
 }

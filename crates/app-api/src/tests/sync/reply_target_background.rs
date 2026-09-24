@@ -40,7 +40,7 @@ async fn a_missing_reply_target_is_reflected_in_the_background_without_docs_read
     let source = Some((&replica, topic.as_str()));
 
     // 背景の反映が走り出す前に、view の生成が docs を読まないことを確かめる(permit を取らせない)。
-    let permits = app.services.reply_target_checks.permits();
+    let permits = app.services.missing_body_ledger.fetch_permits();
     let held = permits
         .acquire_many(crate::service::hydration_limits::BACKGROUND_CHECK_MAX_CONCURRENT as u32)
         .await
@@ -126,7 +126,7 @@ async fn background_reflection_of_a_reply_target_is_spaced_per_target() {
         .filter(|(_, query)| *query == DocQuery::Exact(envelope_key.clone()))
         .count();
     assert_eq!(reads, 1, "one background read per target and interval");
-    assert_eq!(app.services.reply_target_checks.len(), 1);
+    assert_eq!(app.services.missing_body_ledger.len(), 1);
 }
 
 // 取得側の反映(#1277): 遡ったページの行でも、返信先が手元の docs にあれば、その取得で preview が出る
@@ -704,7 +704,7 @@ async fn the_listing_does_not_wait_for_a_remote_body_of_the_reply_target() {
     super::range_reconcile::project(store.as_ref(), &reply, &replica).await;
 
     // 背景の反映を止めておき、取得の経路の blob の取得を数える。
-    let permits = app.services.reply_target_checks.permits();
+    let permits = app.services.missing_body_ledger.fetch_permits();
     let held = permits
         .acquire_many(crate::service::hydration_limits::BACKGROUND_CHECK_MAX_CONCURRENT as u32)
         .await
