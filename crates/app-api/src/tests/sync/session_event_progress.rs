@@ -312,7 +312,7 @@ async fn manifest_fetch_requires_display_and_success_projects_only_that_session(
 }
 
 #[tokio::test]
-async fn missing_manifest_does_not_retry_on_events_or_rerenders_and_manual_retry_is_bounded() {
+async fn missing_manifest_ignores_rerenders_and_each_explicit_retry_is_one_attempt() {
     let f = SessionFixture::new("live").await;
     f.blobs
         .fail
@@ -327,13 +327,13 @@ async fn missing_manifest_does_not_retry_on_events_or_rerenders_and_manual_retry
     for _ in 0..8 {
         f.display(true, true).await;
     }
-    assert_eq!(f.fetches(), 3);
+    assert_eq!(f.fetches(), 9);
     f.display(false, false).await;
     f.display(true, false).await;
     assert_eq!(
         f.fetches(),
-        3,
-        "hiding/reopening does not reset the manifest budget"
+        9,
+        "hiding/reopening does not restart an exhausted automatic retry"
     );
     f.app.shutdown().await;
 }
@@ -518,8 +518,17 @@ async fn queued_cancellation_does_not_spend_budget_and_fetch_concurrency_is_two(
     registry.wait_idle().await;
     assert_eq!(
         f.fetches(),
-        4,
-        "inner admission cancellation must not exhaust the remaining budget"
+        3,
+        "a cancelled admission does not bypass the shared retry cooldown"
+    );
+    let key = crate::service::hydration_limits::display_retry_key(
+        "session",
+        &format!("{}:{}", f.topic, f.replica.as_str()),
+        &format!("{}:{}", third, "hash-2"),
+    );
+    assert!(
+        f.app.services.missing_body_ledger.ready_key(&key, i64::MAX),
+        "cancelled admission leaves a later retry available"
     );
     f.app.shutdown().await;
     assert!(
@@ -532,7 +541,7 @@ async fn queued_cancellation_does_not_spend_budget_and_fetch_concurrency_is_two(
 }
 
 #[tokio::test]
-async fn duplicate_candidate_sets_keep_per_hash_budgets_and_candidate_memory_is_bounded() {
+async fn duplicate_candidate_sets_keep_shared_retry_history_and_candidate_memory_bounded() {
     let f = SessionFixture::new("live").await;
     f.blobs
         .fail
@@ -563,7 +572,7 @@ async fn duplicate_candidate_sets_keep_per_hash_budgets_and_candidate_memory_is_
         registry.schedule(&f.app.services).await;
         registry.wait_idle().await;
     }
-    assert_eq!(f.fetches(), 6);
+    assert_eq!(f.fetches(), 18);
     for count in [1000, 10_000, 100_000] {
         for index in 0..count {
             registry
@@ -583,7 +592,7 @@ async fn duplicate_candidate_sets_keep_per_hash_budgets_and_candidate_memory_is_
                 .len(),
             64
         );
-        assert_eq!(f.fetches(), 6, "nonvisible candidates do not fetch");
+        assert_eq!(f.fetches(), 18, "nonvisible candidates do not fetch");
     }
     f.app.shutdown().await;
 }

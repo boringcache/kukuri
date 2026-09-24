@@ -129,6 +129,80 @@ async fn background_reflection_of_a_reply_target_is_spaced_per_target() {
     assert_eq!(app.services.missing_body_ledger.len(), 1);
 }
 
+#[tokio::test]
+async fn manual_card_retry_reopens_an_exhausted_missing_reply_target() {
+    let docs_sync = Arc::new(CountingDocsSync::default());
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let keys = generate_keys();
+    let topic = TopicId::new("kukuri:topic:reply-manual-retry");
+    let replica = topic_replica_id(topic.as_str());
+    let parent = signed_post(&keys, &topic, "the parent", ObjectVisibility::Public, None);
+    let reply = super::range_reconcile::put_post_at(
+        docs_sync.as_ref(),
+        &replica,
+        &keys,
+        &topic,
+        parent.created_at + 1,
+        "the reply",
+        Some(&parent),
+    )
+    .await;
+    super::range_reconcile::project(store.as_ref(), &reply, &replica).await;
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store,
+        transport.clone(),
+        transport,
+        docs_sync.clone(),
+        Arc::new(MemoryBlobService::default()),
+        keys,
+    );
+    let key = crate::service::hydration_limits::display_retry_key(
+        "reply",
+        replica.as_str(),
+        parent.id.as_str(),
+    );
+    let pending = app
+        .retry_post_elements(reply.object_id.as_str(), Some(parent.id.as_str()), false)
+        .await
+        .expect("automatic retry")
+        .expect("reply card");
+    assert!(pending.reply_preview.is_none());
+    assert!(
+        app.services
+            .missing_body_ledger
+            .try_begin_key(&key, Utc::now().timestamp_millis())
+            .is_none(),
+        "an absent parent observes the shared cooldown"
+    );
+    for _ in 0..3 {
+        app.services
+            .missing_body_ledger
+            .try_begin_key(&key, i64::MAX)
+            .expect("retry slot")
+            .fail();
+    }
+    write_object_entries(
+        docs_sync.as_ref(),
+        &replica,
+        Some(&parent),
+        &honest_header(&parent),
+    )
+    .await;
+    let view = app
+        .retry_post_elements(reply.object_id.as_str(), Some(parent.id.as_str()), true)
+        .await
+        .expect("manual retry")
+        .expect("reply card");
+    assert_eq!(
+        view.reply_preview
+            .as_ref()
+            .map(|preview| preview.content.as_str()),
+        Some("the parent")
+    );
+}
+
 // 取得側の反映(#1277): 遡ったページの行でも、返信先が手元の docs にあれば、その取得で preview が出る
 // (view の生成は docs を読まず、取得が view の生成の前に key 指定で反映する)。
 #[tokio::test]

@@ -424,9 +424,14 @@ impl ServiceHandles {
         blob_service: Arc<dyn BlobService>,
         keys: KukuriKeys,
     ) -> Self {
+        let missing_body_ledger = Arc::default();
         Self {
             store,
-            session_projections: Arc::default(),
+            session_projections: Arc::new(
+                session_projection::SessionProjections::with_retry_ledger(Arc::clone(
+                    &missing_body_ledger,
+                )),
+            ),
             session_display_access: Arc::default(),
             projection_store,
             transport,
@@ -438,7 +443,7 @@ impl ServiceHandles {
             game_room_projections: Arc::default(),
             live_session_projections: Arc::default(),
             dome_mutations: Arc::default(),
-            missing_body_ledger: Arc::default(),
+            missing_body_ledger,
             withdrawal_checks: Arc::default(),
             range_checks: Arc::default(),
         }

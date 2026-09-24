@@ -1,3 +1,5 @@
+import { DISPLAY_RETRY_ATTEMPTS, DISPLAY_RETRY_DELAYS_MS, DISPLAY_RETRY_LIMIT } from '@/lib/displayRetryPolicy';
+
 /// #1207: メディア取得の試行台帳。hash 単位で自動取得の回数と間隔を管理する。
 ///
 /// 1 試行 = `getBlobMediaPayload` 1 回(Rust 側では peer 走査 1 系列)。台帳は shell の data 層に
@@ -6,9 +8,9 @@
 /// 成人向け gate の切替、api の差し替え(=別の backend)だけとする。
 
 /// 自動取得の最大試行数(初回 + 再試行 3 回)。
-export const MEDIA_FETCH_MAX_AUTO_ATTEMPTS = 4;
+export const MEDIA_FETCH_MAX_AUTO_ATTEMPTS = DISPLAY_RETRY_ATTEMPTS;
 /// n 回目の失敗から次の試行までの待ち時間。
-export const MEDIA_FETCH_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000];
+export const MEDIA_FETCH_RETRY_DELAYS_MS: readonly number[] = DISPLAY_RETRY_DELAYS_MS;
 /// 実際に参照する待ち時間。表示の結合 test が実時間を待たずに上限到達を再現するためだけに差し替える。
 export const mediaFetchRetryPolicy: { retryDelaysMs: readonly number[] } = {
   retryDelaysMs: MEDIA_FETCH_RETRY_DELAYS_MS,
@@ -16,7 +18,7 @@ export const mediaFetchRetryPolicy: { retryDelaysMs: readonly number[] } = {
 /// 利用者の明示再試行は 1 回だけ試し、結果をすぐ返す。
 export const MEDIA_FETCH_MANUAL_ATTEMPTS = 1;
 /// 台帳の上限。満杯なら取得中でない古い項目を一つ捨て、全件取得中なら新規を延期する。
-export const MEDIA_FETCH_LEDGER_LIMIT = 1_024;
+export const MEDIA_FETCH_LEDGER_LIMIT = DISPLAY_RETRY_LIMIT;
 export const MEDIA_FETCH_FAILURE_KEY_MAX_BYTES = 256;
 const encoder = new TextEncoder();
 

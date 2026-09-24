@@ -1,6 +1,6 @@
 //! #1225: 欠損した本文 blob の取り直しを有限にするための状態。
 //!
-//! - `MissingBodyLedger`: 取得できない本文 blob の試行を hash 単位で数え、間隔と回数に上限を置く。
+//! - `MissingBodyLedger`: 取得できない本文・返信先・session の試行を対象key単位で数え、間隔と回数に上限を置く。
 //!
 //! replica の全件走査と、その指紋の cache(`ReplicaScanCache`)は #1239 で削除した。
 
@@ -184,13 +184,19 @@ impl MissingBodyLedger {
         }
     }
 
-    pub(crate) fn next_attempt_at_key(&self, key: &str) -> Option<i64> {
+    pub(crate) fn ready_key(&self, key: &str, now_ms: i64) -> bool {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return false;
+        }
         self.entries
             .lock()
             .expect("missing body ledger lock")
             .get(key)
-            .filter(|entry| !entry.in_flight && entry.attempts < MISSING_BODY_MAX_ATTEMPTS)
-            .map(|entry| entry.next_attempt_at_ms)
+            .is_none_or(|entry| {
+                !entry.in_flight
+                    && entry.attempts < MISSING_BODY_MAX_ATTEMPTS
+                    && entry.next_attempt_at_ms <= now_ms
+            })
     }
 
     pub(crate) fn fetch_permits(&self) -> Arc<Semaphore> {
@@ -270,11 +276,8 @@ pub(crate) const BACKGROUND_CHECK_LEDGER_LIMIT: usize = 4_096;
 /// 背景で同時に行う確認の上限(台帳ごと)。
 pub(crate) const BACKGROUND_CHECK_MAX_CONCURRENT: usize = 4;
 
-/// view の生成から背景へ出した確認を、確認先(replica と object id の組)ごとに間隔を空けて行うための台帳(#1239)。
-///
-/// view の生成中に docs を読まないため、表示した投稿の取り下げの確認と、projection に無い返信先の反映は背景へ出す。
-/// 用途ごとに別の台帳を持つ。同じ object を表示し続けても、確認は間隔ごとに 1 回で、key を指定した読み出しだけを行う
-/// (replica は走査しない)。
+/// view の生成から背景へ出した取り下げ確認を、確認先(replica と object id の組)ごとに間隔を空ける台帳(#1239)。
+/// 同じ object を表示し続けても確認は間隔ごとに 1 回で、replica は走査しない。
 pub(crate) struct BackgroundCheckLedger {
     next_check_at_ms: Mutex<HashMap<String, i64>>,
     permits: Arc<Semaphore>,

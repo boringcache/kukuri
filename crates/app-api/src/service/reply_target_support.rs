@@ -277,6 +277,38 @@ impl AppService {
                 .get_object_projection(&body_id)
                 .await?
             else {
+                if container.reply_to_object_id.as_ref() == Some(&body_id) {
+                    let key = hydration_limits::display_retry_key(
+                        "reply",
+                        container.source_replica_id.as_str(),
+                        body_id.as_str(),
+                    );
+                    if let Ok(_permit) = self
+                        .services
+                        .missing_body_ledger
+                        .fetch_permits()
+                        .try_acquire_owned()
+                        && (!manual
+                            || self
+                                .services
+                                .missing_body_ledger
+                                .request_manual_retry_key(&key))
+                        && let Some(attempt) = self
+                            .services
+                            .missing_body_ledger
+                            .try_begin_key(&key, Utc::now().timestamp_millis())
+                        && let Ok(Some(row)) = reflect_reply_target(
+                            &self.services,
+                            &body_id,
+                            &container.source_replica_id,
+                            container.topic_id.as_str(),
+                        )
+                        .await
+                        && row.content.is_some()
+                    {
+                        attempt.succeed();
+                    }
+                }
                 continue;
             };
             if row.topic_id != container.topic_id || row.channel_id != container.channel_id {

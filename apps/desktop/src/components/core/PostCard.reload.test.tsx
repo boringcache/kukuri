@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 
 import type { PostView } from '@/lib/api';
+import { DisplayRetryContext, DisplayRetryScheduler } from '@/lib/displayRetryScheduler';
 
 import { PostCard } from './PostCard';
 import { createView } from './PostCard.testHelpers';
@@ -137,14 +138,15 @@ test('visible missing reply preview follows the bounded automatic recovery sched
   const reload = vi.fn()
     .mockResolvedValueOnce(view.post)
     .mockResolvedValueOnce(recovered);
+  const scheduler = new DisplayRetryScheduler();
   const { unmount } = render(
-    <PostReloadContext.Provider value={reload}>
-      {card(view)}
-    </PostReloadContext.Provider>
+    <DisplayRetryContext.Provider value={scheduler}>
+      <PostReloadContext.Provider value={reload}>{card(view)}</PostReloadContext.Provider>
+    </DisplayRetryContext.Provider>
   );
 
-  await act(async () => undefined);
-  expect(reload).toHaveBeenCalledWith(view.post, view.post.reply_preview!.object_id, false);
+  await act(async () => vi.advanceTimersByTimeAsync(0));
+  expect(reload).toHaveBeenCalledWith(view.post, null, false);
   expect(reload).toHaveBeenCalledTimes(1);
   await act(async () => vi.advanceTimersByTimeAsync(4_999));
   expect(reload).toHaveBeenCalledTimes(1);
@@ -153,25 +155,70 @@ test('visible missing reply preview follows the bounded automatic recovery sched
   expect(screen.getByText('automatically recovered parent')).toBeInTheDocument();
 
   unmount();
+  scheduler.dispose();
   await act(async () => vi.advanceTimersByTimeAsync(600_000));
   expect(reload).toHaveBeenCalledTimes(2);
 });
 
-test('unrecovered reply preview stops after eight automatic attempts', async () => {
+test('unrecovered reply preview stops after four automatic attempts', async () => {
   vi.useFakeTimers();
   stubVisibleIntersectionObserver();
   const view = replyView('Missing');
   const reload = vi.fn(async () => view.post);
+  const scheduler = new DisplayRetryScheduler();
   const { unmount } = render(
-    <PostReloadContext.Provider value={reload}>{card(view)}</PostReloadContext.Provider>
+    <DisplayRetryContext.Provider value={scheduler}>
+      <PostReloadContext.Provider value={reload}>{card(view)}</PostReloadContext.Provider>
+    </DisplayRetryContext.Provider>
   );
 
-  await act(async () => undefined);
+  await act(async () => vi.advanceTimersByTimeAsync(0));
   await act(async () => vi.advanceTimersByTimeAsync(3_000_000));
-  expect(reload).toHaveBeenCalledTimes(8);
+  expect(reload).toHaveBeenCalledTimes(4);
   await act(async () => vi.advanceTimersByTimeAsync(3_000_000));
-  expect(reload).toHaveBeenCalledTimes(8);
+  expect(reload).toHaveBeenCalledTimes(4);
   unmount();
+  scheduler.dispose();
+});
+
+test('visible missing post body retries through the same scheduler', async () => {
+  vi.useFakeTimers();
+  stubVisibleIntersectionObserver();
+  const view = createView();
+  const missing = { ...view.post, content: '[blob pending]', content_status: 'Missing' as const };
+  const reload = vi.fn(async () => ({ ...missing, content: 'recovered body', content_status: 'Available' as const }));
+  const scheduler = new DisplayRetryScheduler();
+  const { unmount } = render(
+    <DisplayRetryContext.Provider value={scheduler}>
+      <PostReloadContext.Provider value={reload}>{card(createView({ post: missing }))}</PostReloadContext.Provider>
+    </DisplayRetryContext.Provider>
+  );
+  await act(async () => vi.advanceTimersByTimeAsync(0));
+  expect(reload).toHaveBeenCalledWith(missing, null, false);
+  expect(screen.getByText('recovered body')).toBeInTheDocument();
+  unmount();
+  scheduler.dispose();
+});
+
+test('two visible cards for one missing parent share a request and both update', async () => {
+  vi.useFakeTimers();
+  stubVisibleIntersectionObserver();
+  const view = replyView('Missing');
+  const recovered = { ...view.post, reply_preview: {
+    ...view.post.reply_preview!, content: 'shared parent', content_status: 'Available' as const,
+  } };
+  const reload = vi.fn(async () => recovered);
+  const scheduler = new DisplayRetryScheduler();
+  const { unmount } = render(
+    <DisplayRetryContext.Provider value={scheduler}>
+      <PostReloadContext.Provider value={reload}>{card(view)}{card(view)}</PostReloadContext.Provider>
+    </DisplayRetryContext.Provider>
+  );
+  await act(async () => vi.advanceTimersByTimeAsync(0));
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(screen.getAllByText('shared parent')).toHaveLength(2);
+  unmount();
+  scheduler.dispose();
 });
 
 test('post reload is the rightmost action and reloads the whole card', async () => {

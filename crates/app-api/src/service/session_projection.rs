@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const SESSION_TARGET_LIMIT: usize = 64;
 const FETCH_CONCURRENCY: usize = 2;
-const FETCH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -15,10 +14,6 @@ pub struct SessionCandidateView {
     pub kind: String,
 }
 
-struct Budget {
-    hash: BlobHash,
-    attempts: usize,
-}
 struct Running {
     token: u64,
     hash: BlobHash,
@@ -30,7 +25,6 @@ struct Entry {
     key: String,
     hashes: Vec<BlobHash>,
     observers: HashSet<String>,
-    budgets: VecDeque<Budget>,
     requested: HashSet<String>,
     running: Option<Running>,
 }
@@ -58,31 +52,14 @@ impl Entry {
             let _ = running.task.await;
         }
     }
-    fn budget(&self, hash: &BlobHash) -> usize {
-        self.budgets
-            .iter()
-            .find(|b| b.hash == *hash)
-            .map_or(0, |b| b.attempts)
-    }
-    fn spend(&mut self, hash: &BlobHash) {
-        if let Some(budget) = self.budgets.iter_mut().find(|b| b.hash == *hash) {
-            budget.attempts += 1;
-        } else {
-            // 現在候補の予算は捨てない。履歴も64以内、record候補はexact read上限以内。
-            if self.budgets.len() == SESSION_TARGET_LIMIT
-                && let Some(index) = self
-                    .budgets
-                    .iter()
-                    .position(|b| !self.hashes.contains(&b.hash))
-            {
-                self.budgets.remove(index);
-            }
-            self.budgets.push_back(Budget {
-                hash: hash.clone(),
-                attempts: 1,
-            });
-        }
-    }
+}
+
+fn session_retry_key(entry: &Entry, hash: &BlobHash) -> String {
+    super::hydration_limits::display_retry_key(
+        "session",
+        &format!("{}:{}", entry.topic, entry.replica.as_str()),
+        &format!("{}:{}", entry.key, hash.as_str()),
+    )
 }
 #[derive(Default)]
 struct State {
@@ -115,7 +92,6 @@ impl State {
             key: key.to_owned(),
             hashes: Vec::new(),
             observers: HashSet::new(),
-            budgets: VecDeque::new(),
             requested: HashSet::new(),
             running: None,
         });
@@ -127,18 +103,25 @@ pub(crate) struct SessionProjections {
     state: Mutex<State>,
     permits: Arc<tokio::sync::Semaphore>,
     tokens: AtomicU64,
+    retry_ledger: Arc<super::hydration_limits::MissingBodyLedger>,
 }
 impl Default for SessionProjections {
     fn default() -> Self {
+        Self::with_retry_ledger(Arc::default())
+    }
+}
+impl SessionProjections {
+    pub(crate) fn with_retry_ledger(
+        retry_ledger: Arc<super::hydration_limits::MissingBodyLedger>,
+    ) -> Self {
         Self {
             last_change: Arc::default(),
             state: Mutex::default(),
             permits: Arc::new(tokio::sync::Semaphore::new(FETCH_CONCURRENCY)),
             tokens: AtomicU64::new(0),
+            retry_ledger,
         }
     }
-}
-impl SessionProjections {
     pub(crate) async fn defer_entry(
         &self,
         topic: &str,
@@ -207,7 +190,7 @@ impl SessionProjections {
             .requested
             .retain(|h| hashes.iter().any(|hash| hash.as_str() == h));
         for hash in &hashes {
-            if !entry.hashes.contains(hash) && entry.budget(hash) < FETCH_ATTEMPTS {
+            if !entry.hashes.contains(hash) {
                 entry.requested.insert(hash.as_str().to_owned());
             }
         }
@@ -267,15 +250,20 @@ impl SessionProjections {
             entry.observers.len() < SESSION_TARGET_LIMIT || entry.observers.contains(observer),
             "session observer capacity reached"
         );
-        if entry.observers.insert(observer.to_owned()) || retry {
-            entry
-                .requested
-                .extend(entry.hashes.iter().map(|h| h.as_str().to_owned()));
+        entry.observers.insert(observer.to_owned());
+        if retry {
+            for hash in &entry.hashes {
+                self.retry_ledger
+                    .request_manual_retry_key(&session_retry_key(entry, hash));
+            }
         }
+        entry
+            .requested
+            .extend(entry.hashes.iter().map(|h| h.as_str().to_owned()));
         Ok(())
     }
 
-    /// 待機taskは1 keyに1つ(全体64)、実取得は2つ。完了で次候補へ進むが失敗hashは再要求しない。
+    /// 待機taskは1 keyに1つ(全体64)、実取得は2つ。失敗hashは表示中の期限通知でだけ再要求する。
     pub(crate) fn schedule(
         self: &Arc<Self>,
         services: &ServiceHandles,
@@ -284,6 +272,7 @@ impl SessionProjections {
         let services = services.clone();
         Box::pin(async move {
             let mut state = registry.state.lock().await;
+            let now_ms = Utc::now().timestamp_millis();
             for entry in &mut state.entries {
                 if entry.observers.is_empty() || entry.running.is_some() {
                     continue;
@@ -292,7 +281,10 @@ impl SessionProjections {
                     .hashes
                     .iter()
                     .find(|h| {
-                        entry.requested.contains(h.as_str()) && entry.budget(h) < FETCH_ATTEMPTS
+                        entry.requested.contains(h.as_str())
+                            && registry
+                                .retry_ledger
+                                .ready_key(&session_retry_key(entry, h), now_ms)
                     })
                     .cloned()
                 else {
@@ -303,6 +295,7 @@ impl SessionProjections {
                 };
                 entry.requested.remove(hash.as_str());
                 let token = registry.tokens.fetch_add(1, Ordering::Relaxed);
+                let retry_key = session_retry_key(entry, &hash);
                 let (topic, replica, key) = (
                     entry.topic.clone(),
                     entry.replica.clone(),
@@ -320,11 +313,11 @@ impl SessionProjections {
                         services.blob_service.prepare_display_fetch(&task_hash),
                     )
                     .await;
-                    let fetched = if let Ok(Ok(fetch)) = prepared {
-                        let allowed = {
+                    let (fetched, mut attempt) = if let Ok(Ok(fetch)) = prepared {
+                        let attempt = {
                             let _access = services.session_display_access.lock().await;
                             let mut state = registry.state.lock().await;
-                            if let Some(entry) = state.entries.iter_mut().find(|e| {
+                            if state.entries.iter_mut().any(|e| {
                                 e.replica == replica
                                     && e.key == key
                                     && e.running.as_ref().is_some_and(|r| r.token == token)
@@ -332,13 +325,14 @@ impl SessionProjections {
                                     && tokio::time::Instant::now() < deadline
                             }) {
                                 // 内側の共通walk枠も取得済み。待機取消には予算を使わない。
-                                entry.spend(&task_hash);
-                                true
+                                registry
+                                    .retry_ledger
+                                    .try_begin_key(&retry_key, Utc::now().timestamp_millis())
                             } else {
-                                false
+                                None
                             }
                         };
-                        if allowed {
+                        let fetched = if attempt.is_some() {
                             tokio::time::timeout_at(deadline, fetch)
                                 .await
                                 .ok()
@@ -346,19 +340,28 @@ impl SessionProjections {
                                 .flatten()
                         } else {
                             None
-                        }
+                        };
+                        (fetched, attempt)
                     } else {
-                        None
+                        (None, None)
                     };
                     let access = services.session_display_access.lock().await;
-                    if let Some(bytes) = fetched
-                        && let Err(error) = cache_and_project_displayed_manifest(
+                    if let Some(bytes) = fetched {
+                        match cache_and_project_displayed_manifest(
                             &services, &topic, &replica, &key, &task_hash, bytes, token,
                         )
                         .await
-                    {
-                        warn!(%error, "failed to project a displayed session");
+                        {
+                            Ok(projected) if projected > 0 => {
+                                if let Some(attempt) = attempt.take() {
+                                    attempt.succeed();
+                                }
+                            }
+                            Err(error) => warn!(%error, "failed to project a displayed session"),
+                            _ => {}
+                        }
                     }
+                    drop(attempt);
                     {
                         let mut state = registry.state.lock().await;
                         if let Some(entry) = state.entries.iter_mut().find(|e| {
