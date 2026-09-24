@@ -5,10 +5,9 @@
 //! 結果に収束する（冪等）ため、サポート対象・チャンネル秘密鍵の更新や通知の取りこぼしを
 //! ここで回収する。
 //!
-//! - 索引解除の判定は「索引の真実源に実在する scope − いま対象であるべき scope」の差分で行う
-//!   （`IndexerParticipant::indexed_scopes` / `desired_scopes`）。open の成否に依存しないため、
-//!   一時的な失敗で誤って索引解除しない。ワーカー停止中に外れた scope も再起動後の見直しで
-//!   索引解除される。
+//! - 索引解除は真実源の論理scopeを永続cursorで最大32件ずつ点照合する。supportやprivate
+//!   capabilityが無いときだけ解除し、openの成否や作業窓からの離脱を削除根拠にしない。
+//!   停止中の解除も再起動後に有限巡回で処理する。
 //! - scope 単位の連続失敗は再試行間隔を指数的に広げる（上限つき）。1 つの scope / entry の
 //!   失敗でワーカー全体を止めない。
 //! - 停止は [`WorkerHandle::shutdown`]。ループと購読タスクを止め、終了を待つ。
@@ -280,8 +279,8 @@ impl IndexerWorker {
     }
 
     /// scope見直し 1 巡（冪等）:
-    /// 1. いま対象であるべき scope を求める。
-    /// 2. 索引に実在するが対象でなくなった scope を索引解除する（秘密鍵失効を含む）。
+    /// 1. 今回openするscopeを選ぶ。
+    /// 2. 索引済みscopeの最大32件を点照合し、support/秘密鍵失効だけを索引解除する。
     /// 3. 秘密鍵の登録とレプリカ open（`restore_scopes`）、購読の起動。
     /// 4. 各 scope を取り込む（再試行間隔中の scope は飛ばす）。
     async fn refresh_pass(
@@ -294,14 +293,6 @@ impl IndexerWorker {
         // 1. 対象であるべき scope。
         // 日付境界をまたいでも、このpassの選択とopenは同じ時刻の窓を使う。
         let now = chrono::Utc::now().timestamp();
-        let desired = match self.participant.desired_scopes_at(now).await {
-            Ok(desired) => desired,
-            Err(error) => {
-                warn!(error = %format!("{error:#}"), "failed to list desired scopes; will retry");
-                self.state.record_error(None, &format!("{error:#}"));
-                return;
-            }
-        };
         let selected = match self.participant.selected_scopes_at(now).await {
             Ok(selected) => selected,
             Err(error) => {
@@ -314,17 +305,24 @@ impl IndexerWorker {
             .iter()
             .map(|scope| scope.replica_id.as_str())
             .collect();
-        let desired_logical: HashSet<_> = desired
-            .iter()
-            .map(|scope| (scope.kind, scope.id.as_str()))
-            .collect();
-
-        // 2. 対象でなくなった scope の索引解除（索引の実在 scope との差分。再起動をまたいでも効く）。
-        match self.participant.indexed_scopes().await {
+        // 2. Check one finite truth-store page. An unselected supported scope keeps its index.
+        match self.participant.indexed_scope_page().await {
             Ok(indexed) => {
                 for (kind, id) in indexed {
                     let scope = ScopeReplica::from_scope(kind, id.as_str());
-                    if desired_logical.contains(&(kind, id.as_str())) {
+                    let authorized = match self.participant.is_scope_authorized(kind, &id).await {
+                        Ok(authorized) => authorized,
+                        Err(error) => {
+                            warn!(kind = kind.as_str(), scope_id = %id, %error,
+                                "failed to check indexed scope authority; will revisit");
+                            self.state.record_error(
+                                Some(scope.replica_id.as_str()),
+                                &format!("{error:#}"),
+                            );
+                            continue;
+                        }
+                    };
+                    if authorized {
                         continue;
                     }
                     match self.participant.stop_and_deindex_scope(kind, &id).await {
@@ -352,7 +350,7 @@ impl IndexerWorker {
                 }
             }
             Err(error) => {
-                warn!(error = %format!("{error:#}"), "failed to list indexed scopes; will retry");
+                warn!(error = %format!("{error:#}"), "failed to page indexed scopes; will retry");
                 self.state.record_error(None, &format!("{error:#}"));
             }
         }

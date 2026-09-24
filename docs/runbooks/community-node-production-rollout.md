@@ -503,8 +503,9 @@ readinessの鮮度やfail-closed判定を緩めない。remote blob取得は1件
 5. peer更新を変更した場合は、対象peerの登録後の本文/media取得を同じ投稿で確認する。対象batchの失敗時はその原因を記録し、全peer・全scopeの強制再適用で成功扱いにしない。
 
 旧workerのopen/購読は最大32物理replica、新公開readerの受付は最大32scopeであり、`opened_scopes`は
-全support件数ではなくその時点の旧workerの予約枠（途中失敗でopen状態が不明な枠を含む）を表す。手動全scope取込、全supported/全indexed scopeの
-DB列挙、旧namespace同期は残る。この有限な運用確認の成功を、残る総件数依存や保持量・失敗回数への依存の解消と読み替えない。
+全support件数ではなくその時点の旧workerの予約枠（途中失敗でopen状態が不明な枠を含む）を表す。
+定常の失効scope照合は最大32件の永続cursorで進む。手動全scope取込と旧namespace同期は残るため、
+この有限な運用確認の成功を、保持量・失敗回数への依存を含む#1221全体の解消と読み替えない。
 
 ### 5.7 content advisory 付き索引と trust 不変の確認（#1054）
 

@@ -260,3 +260,102 @@ async fn partial_open_error_keeps_reservations_within_the_legacy_limit() -> Resu
     handle.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn unsupported_indexed_scopes_are_deindexed_in_bounded_pages() -> Result<()> {
+    let Some(admin_url) = integration_test_admin_database_url() else {
+        return Ok(());
+    };
+    let database = TestDatabase::create(admin_url.as_str(), "cn_indexed_scope_cursor").await?;
+    let pool = connect_postgres(database.database_url.as_str()).await?;
+    initialize_database(&pool).await?;
+    let docs = Arc::new(MemoryDocsSync::default());
+    let state = Arc::new(IndexerRuntimeState::default());
+    let projection = Arc::new(MemoryIndexProjection::default());
+    let (participant, entries) = participant_with_docs(&pool, docs.clone(), &projection, &state);
+    let mut posts = Vec::new();
+    for index in 0..80 {
+        let topic = format!("topic-{index:02}");
+        add_supported_topic(&pool, IndexScopeKind::PublicTopic, &topic).await?;
+        let replica = kukuri_docs_sync::topic_replica_id(&topic);
+        let post = persist_post(docs.as_ref(), &replica, &TopicId::new(&topic), "indexed").await;
+        posts.push((topic.clone(), post));
+        participant
+            .ingest_scope(&ScopeReplica::from_scope(
+                IndexScopeKind::PublicTopic,
+                &topic,
+            ))
+            .await?;
+    }
+    assert!(posts.iter().all(|(topic, post)| entries.contains(
+        IndexScopeKind::PublicTopic,
+        topic,
+        post
+    )));
+    let posts = Arc::new(posts);
+    for index in 1..80 {
+        remove_supported_topic(
+            &pool,
+            IndexScopeKind::PublicTopic,
+            &format!("topic-{index:02}"),
+        )
+        .await?;
+    }
+    let handle = IndexerWorker::new(
+        participant.clone(),
+        docs.clone(),
+        state.clone(),
+        fast_config(Duration::from_secs(120)),
+    )
+    .spawn();
+    wait_until("first removal pass", || {
+        let state = state.clone();
+        async move { state.snapshot().last_pass_duration_ms.is_some() }
+    })
+    .await;
+    assert!(
+        state.snapshot().deindexed <= 32,
+        "one pass must not load and de-index every historical scope"
+    );
+    let first_cursor: String = sqlx::query_scalar(
+        "SELECT last_scope_id FROM cn_index.indexed_scope_cursor WHERE id = TRUE",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(first_cursor, "topic-31");
+    handle.shutdown().await;
+
+    let resumed = Arc::new(IndexerRuntimeState::default());
+    let resumed_handle = IndexerWorker::new(
+        participant,
+        docs,
+        resumed.clone(),
+        fast_config(Duration::from_millis(250)),
+    )
+    .spawn();
+    wait_until("first resumed removal pass", || {
+        let resumed = resumed.clone();
+        async move { resumed.snapshot().last_pass_duration_ms.is_some() }
+    })
+    .await;
+    let resumed_cursor: String = sqlx::query_scalar(
+        "SELECT last_scope_id FROM cn_index.indexed_scope_cursor WHERE id = TRUE",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed_cursor, "topic-63");
+    wait_until("remaining removals", || {
+        let entries = entries.clone();
+        let posts = posts.clone();
+        async move {
+            posts
+                .iter()
+                .skip(1)
+                .all(|(topic, post)| !entries.contains(IndexScopeKind::PublicTopic, topic, post))
+        }
+    })
+    .await;
+    assert!(entries.contains(IndexScopeKind::PublicTopic, "topic-00", &posts[0].1));
+    resumed_handle.shutdown().await;
+    Ok(())
+}

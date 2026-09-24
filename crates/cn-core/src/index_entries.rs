@@ -301,11 +301,12 @@ pub trait IndexEntryStore: Send + Sync {
         candidates: &[(String, String)],
     ) -> Result<Vec<SurfaceableEntry>>;
 
-    /// 真実源にいま entry が存在する scope の一覧（#613 T2）。
-    ///
-    /// 常駐ワーカーが「サポート対象から外れたのに索引が残っている scope」を再起動をまたいで
-    /// 検知し、索引解除するために使う。
-    async fn list_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>>;
+    /// Composite-key seek to the next distinct indexed logical scope.
+    async fn next_scope_after(
+        &self,
+        after_kind: &str,
+        after_id: &str,
+    ) -> Result<Option<(IndexScopeKind, String)>>;
 
     /// Active legal decisions are checked before any body or media fetch.
     async fn is_transmission_prevented(&self, object_id: &str) -> Result<bool>;
@@ -399,18 +400,27 @@ impl IndexEntryStore for PgIndexEntryStore {
         filter_surfaceable_objects(&self.pool, scope_kind, candidates).await
     }
 
-    async fn list_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
-        let rows = sqlx::query("SELECT DISTINCT scope_kind, scope_id FROM cn_index.index_entries")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter()
-            .map(|row| {
-                Ok((
-                    IndexScopeKind::parse(&row.try_get::<String, _>("scope_kind")?)?,
-                    row.try_get::<String, _>("scope_id")?,
-                ))
-            })
-            .collect()
+    async fn next_scope_after(
+        &self,
+        after_kind: &str,
+        after_id: &str,
+    ) -> Result<Option<(IndexScopeKind, String)>> {
+        let row = sqlx::query(
+            "SELECT scope_kind, scope_id FROM cn_index.index_entries
+             WHERE (scope_kind, scope_id) > ($1, $2)
+             ORDER BY scope_kind, scope_id, object_id LIMIT 1",
+        )
+        .bind(after_kind)
+        .bind(after_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                IndexScopeKind::parse(&row.try_get::<String, _>("scope_kind")?)?,
+                row.try_get("scope_id")?,
+            ))
+        })
+        .transpose()
     }
 
     async fn is_transmission_prevented(&self, object_id: &str) -> Result<bool> {
@@ -643,17 +653,21 @@ impl IndexEntryStore for MemoryIndexEntryStore {
             .collect())
     }
 
-    async fn list_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
+    async fn next_scope_after(
+        &self,
+        after_kind: &str,
+        after_id: &str,
+    ) -> Result<Option<(IndexScopeKind, String)>> {
         let entries = self.entries.lock().expect("entries mutex poisoned");
-        let mut scopes: Vec<(IndexScopeKind, String)> = Vec::new();
-        for (kind, scope_id, _) in entries.keys() {
-            if !scopes.iter().any(|(existing_kind, existing_id)| {
-                existing_kind == kind && existing_id == scope_id
-            }) {
-                scopes.push((*kind, scope_id.clone()));
-            }
-        }
-        Ok(scopes)
+        Ok(entries
+            .keys()
+            .filter(|(kind, scope_id, _)| {
+                (kind.as_str(), scope_id.as_str()) > (after_kind, after_id)
+            })
+            .min_by(|(kind_a, id_a, _), (kind_b, id_b, _)| {
+                (kind_a.as_str(), id_a.as_str()).cmp(&(kind_b.as_str(), id_b.as_str()))
+            })
+            .map(|(kind, scope_id, _)| (*kind, scope_id.clone())))
     }
 
     async fn is_transmission_prevented(&self, object_id: &str) -> Result<bool> {

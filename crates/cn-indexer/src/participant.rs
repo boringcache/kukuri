@@ -20,7 +20,8 @@ use kukuri_blob_service::BlobService;
 use kukuri_cn_core::{
     ChannelSecretCipher, IndexEntryStore, IndexScopeKind, NewTransmissionPrevention,
     TransmissionPreventionMutation, apply_transmission_prevention, get_channel_secret,
-    load_bootstrap_seed_peers, mark_index_demand, release_transmission_prevention,
+    is_topic_supported, load_bootstrap_seed_peers, mark_index_demand,
+    release_transmission_prevention,
 };
 use kukuri_core::ReplicaId;
 use kukuri_docs_sync::{DocsSync, private_channel_replica_id, topic_replica_id};
@@ -32,6 +33,7 @@ use crate::replica_plan::PublicReplicaReadMode;
 
 const LEGACY_SCOPE_LIMIT: usize = 32;
 const PRIORITY_SCOPES: i64 = 8;
+const INDEXED_SCOPE_PAGE: usize = 32;
 
 fn admit_scopes(
     mode: PublicReplicaReadMode,
@@ -175,10 +177,8 @@ impl IndexerParticipant {
 
     /// いま index 対象であるべき scope を返す（#613 T2。読み取りのみ、副作用なし）。
     ///
-    /// サポート対象一覧のうち、private channel は秘密鍵（capability）が登録済みのものだけを
-    /// 含める（鍵が無ければ索引しない）。常駐ワーカーはこの結果と索引の実在スコープ
-    /// （[`Self::indexed_scopes`]）の差分から索引解除を決める。open の成否に依存しないため、
-    /// 一時的な open 失敗で誤って索引解除することがない。
+    /// 手動の全scope取込に使う。private channel は登録済みcapabilityがあるものだけを含める。
+    /// 定常workerはこの全件列挙を使わず、選択・失効照合をそれぞれ有限ページで行う。
     pub async fn desired_scopes(&self) -> Result<Vec<ScopeReplica>> {
         self.desired_scopes_at(chrono::Utc::now().timestamp()).await
     }
@@ -279,9 +279,63 @@ impl IndexerParticipant {
         Ok(selected)
     }
 
-    /// 索引の真実源にいま entry が存在する scope の一覧（#613 T2）。
-    pub async fn indexed_scopes(&self) -> Result<Vec<(IndexScopeKind, String)>> {
-        self.entries.list_scopes().await
+    /// Seek at most 32 distinct truth-store scopes and retain the next position across restarts.
+    pub async fn indexed_scope_page(&self) -> Result<Vec<(IndexScopeKind, String)>> {
+        let cursor = sqlx::query(
+            "SELECT last_kind, last_scope_id FROM cn_index.indexed_scope_cursor WHERE id = TRUE",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let mut after_kind: String = cursor.try_get("last_kind")?;
+        let mut after_id: String = cursor.try_get("last_scope_id")?;
+        let mut scopes = Vec::new();
+        let mut seen = HashSet::new();
+        for pass in 0..2 {
+            if pass == 1 {
+                after_kind.clear();
+                after_id.clear();
+            }
+            while scopes.len() < INDEXED_SCOPE_PAGE {
+                let Some((kind, id)) = self
+                    .entries
+                    .next_scope_after(&after_kind, &after_id)
+                    .await?
+                else {
+                    break;
+                };
+                if !seen.insert((kind, id.clone())) {
+                    break;
+                }
+                after_kind = kind.as_str().to_string();
+                after_id = id.clone();
+                scopes.push((kind, id));
+            }
+        }
+        if let Some((kind, id)) = scopes.last() {
+            sqlx::query(
+                "UPDATE cn_index.indexed_scope_cursor
+                 SET last_kind = $1, last_scope_id = $2 WHERE id = TRUE",
+            )
+            .bind(kind.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(scopes)
+    }
+
+    pub async fn is_scope_authorized(&self, kind: IndexScopeKind, id: &str) -> Result<bool> {
+        if !is_topic_supported(&self.pool, kind, id).await? {
+            return Ok(false);
+        }
+        if kind == IndexScopeKind::PrivateChannel {
+            return Ok(
+                get_channel_secret(&self.pool, &self.channel_secret_cipher, id)
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(true)
     }
 
     pub async fn mark_scope_demand(&self, scope: &ScopeReplica) -> Result<()> {
