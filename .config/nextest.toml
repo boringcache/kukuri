@@ -18,5 +18,10 @@ test-group = "iroh-integration-serial"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.default.overrides]]
+# 3 daemon を起動するこのtestは他のRust testと並走させない。待機期限は延ばさない。
+filter = "package(kukuri-cli) & test(three_real_daemons_exchange_content_and_preserve_private_boundaries)"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
 filter = "package(kukuri-app-api) | package(kukuri-desktop-runtime) | package(kukuri-cli)"
 test-group = "iroh-integration-serial"

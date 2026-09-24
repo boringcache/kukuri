@@ -38,6 +38,7 @@ struct FaultyDocs {
     target: fn(&DocQuery, DocFetchPolicy) -> bool,
     fault: Fault,
     seen: AtomicUsize,
+    bounded_withdrawal_reads: AtomicUsize,
     fail_from: AtomicUsize,
 }
 
@@ -52,6 +53,7 @@ impl FaultyDocs {
             target,
             fault,
             seen: AtomicUsize::new(0),
+            bounded_withdrawal_reads: AtomicUsize::new(0),
             fail_from: AtomicUsize::new(usize::MAX),
         })
     }
@@ -65,6 +67,10 @@ impl FaultyDocs {
 
     fn seen(&self) -> usize {
         self.seen.load(Ordering::SeqCst)
+    }
+
+    fn bounded_withdrawal_reads(&self) -> usize {
+        self.bounded_withdrawal_reads.load(Ordering::SeqCst)
     }
 }
 
@@ -107,6 +113,26 @@ impl DocsSync for FaultyDocs {
         Ok(records)
     }
 
+    async fn query_replica_exact_bounded(
+        &self,
+        replica_id: &ReplicaId,
+        key: &str,
+        limit: usize,
+        policy: DocFetchPolicy,
+    ) -> Result<Vec<DocRecord>> {
+        if key.starts_with("withdrawals/") || key.starts_with("objects/") {
+            assert!(limit <= 8);
+            if key.starts_with("withdrawals/") {
+                self.bounded_withdrawal_reads.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let mut records = self
+            .query_replica_with_policy(replica_id, DocQuery::Exact(key.to_string()), policy)
+            .await?;
+        records.truncate(limit);
+        Ok(records)
+    }
+
     async fn subscribe_replica(
         &self,
         replica_id: &ReplicaId,
@@ -127,6 +153,10 @@ fn guard_queries(_: &DocQuery, policy: DocFetchPolicy) -> bool {
 /// media manifest の照会（取り込み本体と参照再確認の両方）。
 fn manifest_queries(query: &DocQuery, _: DocFetchPolicy) -> bool {
     matches!(query, DocQuery::Exact(key) if key.starts_with("manifests/media/"))
+}
+
+fn whole_object_or_withdrawal_queries(query: &DocQuery, _: DocFetchPolicy) -> bool {
+    matches!(query, DocQuery::Prefix(prefix) if prefix.starts_with("objects/") || prefix == "withdrawals/")
 }
 
 /// n 回目以降の読み取りだけ失敗する真実源。
@@ -240,6 +270,34 @@ impl Fixture {
         );
         Ok(truth)
     }
+}
+
+#[tokio::test]
+async fn changed_object_reads_only_bounded_exact_keys() -> Result<()> {
+    let docs = Arc::new(MemoryDocsSync::default());
+    let observed = FaultyDocs::new(
+        docs.clone(),
+        whole_object_or_withdrawal_queries,
+        Fault::QueryError,
+    );
+    let fixture = Fixture::new(Some(observed.clone()), docs);
+    let object_id = persist_post(&fixture.docs, &fixture.replica, &fixture.topic, "new post").await;
+
+    observed.arm(Some(0));
+    let summary = fixture
+        .pipeline
+        .ingest_changed_keys(
+            IndexScopeKind::PublicTopic,
+            "rust",
+            &fixture.replica,
+            &[format!("objects/{object_id}/state")],
+        )
+        .await?;
+    assert_eq!((summary.scanned, summary.indexed), (1, 1));
+    assert_eq!(observed.seen(), 0);
+    assert!(observed.bounded_withdrawal_reads() >= 2);
+    assert!(fixture.is_indexed(&object_id).await?);
+    Ok(())
 }
 
 /// 索引済み投稿の再走査で、n 回目以降の参照再確認の照会が失敗しても entry を保持する。

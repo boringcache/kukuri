@@ -53,6 +53,8 @@ mod source;
 use failure::{is_transient, transient};
 use source::{PostObjectView, SourceResolver};
 
+const RECORDS_PER_EXACT_KEY: usize = 8;
+
 /// 単一 scope（topic / channel）を ingest した結果のサマリ（監査 / テスト用）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IngestSummary {
@@ -334,7 +336,7 @@ impl IngestPipeline {
             )
             .await
             .with_context(|| format!("failed to query replica {}", replica_id.as_str()))?;
-        let (state_records, context) = self.scope_context(replica_id, records).await?;
+        let (state_records, context) = self.scope_context(replica_id, records, None).await?;
         self.ingest_records(scope_kind, scope_id, replica_id, &state_records, &context)
             .await
     }
@@ -384,26 +386,32 @@ impl IngestPipeline {
 
         let mut records: Vec<DocRecord> = Vec::new();
         for object_id in &object_ids {
-            let mut object_records = self
-                .docs_sync
-                .query_replica_with_policy(
-                    replica_id,
-                    DocQuery::Prefix(format!(
-                        "{}{object_id}/",
-                        SharedReplicaKeyFamily::PostObject.prefix()
-                    )),
-                    DocFetchPolicy::LocalThenRemote,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to query object `{object_id}` in replica {}",
-                        replica_id.as_str()
-                    )
-                })?;
-            records.append(&mut object_records);
+            for suffix in ["state", "envelope"] {
+                let key = format!(
+                    "{}{object_id}/{suffix}",
+                    SharedReplicaKeyFamily::PostObject.prefix()
+                );
+                records.extend(
+                    self.docs_sync
+                        .query_replica_exact_bounded(
+                            replica_id,
+                            &key,
+                            RECORDS_PER_EXACT_KEY,
+                            DocFetchPolicy::LocalThenRemote,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to query object `{object_id}` in replica {}",
+                                replica_id.as_str()
+                            )
+                        })?,
+                );
+            }
         }
-        let (state_records, context) = self.scope_context(replica_id, records).await?;
+        let (state_records, context) = self
+            .scope_context(replica_id, records, Some(&object_ids))
+            .await?;
         self.ingest_records(scope_kind, scope_id, replica_id, &state_records, &context)
             .await
     }
@@ -416,6 +424,7 @@ impl IngestPipeline {
         &self,
         replica_id: &ReplicaId,
         records: Vec<DocRecord>,
+        changed_object_ids: Option<&[String]>,
     ) -> Result<(Vec<DocRecord>, ScopeContext)> {
         // 同一 prefix scan の envelope entry を object_id -> envelope record で index 化し、
         // blob text の本文取得で追加クエリ（N+1）を発生させないようにする。
@@ -438,15 +447,38 @@ impl IngestPipeline {
             }
         }
 
-        let withdrawal_records = self
-            .docs_sync
-            .query_replica_with_policy(
-                replica_id,
-                DocQuery::Prefix(SharedReplicaKeyFamily::PostWithdrawal.prefix().to_string()),
-                DocFetchPolicy::LocalThenRemote,
-            )
-            .await
-            .with_context(|| format!("failed to query withdrawals in {}", replica_id.as_str()))?;
+        let withdrawal_records = if let Some(object_ids) = changed_object_ids {
+            let mut records = Vec::new();
+            for object_id in object_ids {
+                let key = format!(
+                    "{}{object_id}/state",
+                    SharedReplicaKeyFamily::PostWithdrawal.prefix()
+                );
+                records.extend(
+                    self.docs_sync
+                        .query_replica_exact_bounded(
+                            replica_id,
+                            &key,
+                            RECORDS_PER_EXACT_KEY,
+                            DocFetchPolicy::LocalThenRemote,
+                        )
+                        .await
+                        .with_context(|| format!("failed to query withdrawal for {object_id}"))?,
+                );
+            }
+            records
+        } else {
+            self.docs_sync
+                .query_replica_with_policy(
+                    replica_id,
+                    DocQuery::Prefix(SharedReplicaKeyFamily::PostWithdrawal.prefix().to_string()),
+                    DocFetchPolicy::LocalThenRemote,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to query withdrawals in {}", replica_id.as_str())
+                })?
+        };
         let mut withdrawn_object_ids = HashSet::new();
         for record in withdrawal_records {
             if !record.key.ends_with("/state") {

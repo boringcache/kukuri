@@ -1,5 +1,6 @@
 use super::{
-    DocFetchPolicy, DocQuery, DocRecord, IndexScopeKind, IngestPipeline, KukuriEnvelope, ReplicaId,
+    DocFetchPolicy, DocRecord, IndexScopeKind, IngestPipeline, KukuriEnvelope,
+    RECORDS_PER_EXACT_KEY, ReplicaId,
     failure::{is_transient, transient},
     source::{MediaScanTarget, PostObjectView, SourceResolver},
     verify_post_withdrawal,
@@ -82,9 +83,10 @@ impl ReferenceGuard<'_> {
             let state = self
                 .pipeline
                 .docs_sync
-                .query_replica_with_policy(
+                .query_replica_exact_bounded(
                     self.replica,
-                    DocQuery::Exact(self.record.key.clone()),
+                    &self.record.key,
+                    RECORDS_PER_EXACT_KEY,
                     DocFetchPolicy::LocalOnly,
                 )
                 .await
@@ -156,9 +158,10 @@ impl ReferenceGuard<'_> {
             } else {
                 self.pipeline
                     .docs_sync
-                    .query_replica_with_policy(
+                    .query_replica_exact_bounded(
                         self.replica,
-                        DocQuery::Exact(original.key.clone()),
+                        &original.key,
+                        RECORDS_PER_EXACT_KEY,
                         DocFetchPolicy::LocalOnly,
                     )
                     .await
@@ -181,9 +184,10 @@ impl ReferenceGuard<'_> {
             let withdrawals = self
                 .pipeline
                 .docs_sync
-                .query_replica_with_policy(
+                .query_replica_exact_bounded(
                     self.replica,
-                    DocQuery::Exact(format!("withdrawals/{}/state", self.object.object_id)),
+                    &format!("withdrawals/{}/state", self.object.object_id),
+                    RECORDS_PER_EXACT_KEY,
                     DocFetchPolicy::LocalOnly,
                 )
                 .await
