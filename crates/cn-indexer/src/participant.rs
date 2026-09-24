@@ -253,6 +253,13 @@ impl IndexerParticipant {
             .await
     }
 
+    /// Periodic public refresh reads the bounded current window, never all `objects/` entries.
+    pub async fn ingest_recent_scope(&self, scope: &ScopeReplica) -> Result<IngestSummary> {
+        self.pipeline
+            .ingest_recent_scope(scope.kind, scope.id.as_str(), &scope.replica_id)
+            .await
+    }
+
     /// 変更通知で届いた key に対応する object だけを ingest する（#1050）。
     pub async fn ingest_changed_keys(
         &self,

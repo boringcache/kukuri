@@ -439,6 +439,7 @@ async fn post(
     )?;
     let object = envelope.to_post_object()?.expect("post");
     let id = object.object_id.as_str().to_string();
+    let sort_key = kukuri_core::timeline_sort_key(object.created_at, &object.object_id);
     for (suffix, value) in [
         ("state", serde_json::to_value(object)?),
         ("envelope", serde_json::to_value(envelope)?),
@@ -452,6 +453,14 @@ async fn post(
         )
         .await?;
     }
+    docs.apply_doc_op(
+        replica,
+        DocOp::SetJson {
+            key: format!("indexes/timeline/{sort_key}/{id}"),
+            value: serde_json::json!({ "object_id": id }),
+        },
+    )
+    .await?;
     Ok(id)
 }
 

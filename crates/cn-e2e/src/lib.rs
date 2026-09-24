@@ -44,9 +44,10 @@ use kukuri_cn_operator::READINESS_CHECK_IDS;
 use kukuri_cn_safety::provider::MediaFetcher;
 use kukuri_cn_user_api::{UserApiConfig, app_router, build_state};
 use kukuri_core::{
-    AssetRef, AssetRole, BlobHash, KukuriKeys, KukuriMediaManifestV1, MediaManifestItem,
-    ObjectVisibility, PayloadRef, ReplicaId, TopicId, build_media_manifest_envelope,
-    build_post_envelope_with_payload, generate_keys,
+    AssetRef, AssetRole, BlobHash, KukuriKeys, KukuriMediaManifestV1, KukuriPostObjectV1,
+    MediaManifestItem, ObjectVisibility, PayloadRef, ReplicaId, TopicId,
+    build_media_manifest_envelope, build_post_envelope_with_payload, generate_keys,
+    timeline_sort_key,
 };
 use kukuri_docs_sync::{
     DocEventStream, DocFetchPolicy, DocOp, DocQuery, DocRecord, DocsSync, IrohDocsSync, stable_key,
@@ -61,6 +62,23 @@ use crate::scan_stack::{SyntheticBasicAuth, build_participant};
 
 const DEFAULT_ADMIN_DATABASE_URL: &str = "postgres://cn:cn_password@127.0.0.1:15432/cn";
 const DEFAULT_RENDEZVOUS_REDIS_URL: &str = "redis://127.0.0.1:16379/";
+
+async fn persist_timeline_index(
+    docs: &dyn DocsSync,
+    replica: &ReplicaId,
+    object: &KukuriPostObjectV1,
+) -> Result<()> {
+    let object_id = object.object_id.as_str();
+    let sort_key = timeline_sort_key(object.created_at, &object.object_id);
+    docs.apply_doc_op(
+        replica,
+        DocOp::SetJson {
+            key: stable_key("indexes/timeline", &format!("{sort_key}/{object_id}")),
+            value: serde_json::json!({ "object_id": object_id }),
+        },
+    )
+    .await
+}
 
 /// E2E の発火判定。`KUKURI_CN_RUN_E2E_TESTS=1` のときだけ管理用 DB URL を返す。
 pub fn e2e_admin_database_url() -> Option<String> {
@@ -154,6 +172,17 @@ impl DocsSync for FaultInjectingDocsSync {
         self.inner
             .query_replica_with_policy(replica_id, query, policy)
             .await
+    }
+
+    async fn query_replica_keys(
+        &self,
+        replica_id: &ReplicaId,
+        query: kukuri_docs_sync::DocKeyQuery,
+    ) -> Result<kukuri_docs_sync::DocKeyPage> {
+        if self.fail_queries.load(Ordering::SeqCst) {
+            anyhow::bail!("injected replica query failure for {}", replica_id.as_str());
+        }
+        self.inner.query_replica_keys(replica_id, query).await
     }
 
     async fn subscribe_replica(&self, replica_id: &ReplicaId) -> Result<DocEventStream> {
@@ -604,6 +633,7 @@ impl E2eStack {
             docs.apply_doc_op(&replica, DocOp::SetJson { key, value })
                 .await?;
         }
+        persist_timeline_index(docs.as_ref(), &replica, &object).await?;
         Ok((object_id, thumbnail.hash.as_str().to_string()))
     }
 
@@ -665,6 +695,7 @@ impl E2eStack {
             },
         )
         .await?;
+        persist_timeline_index(docs.as_ref(), &replica, &object).await?;
         Ok(object_id)
     }
 
