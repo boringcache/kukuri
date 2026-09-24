@@ -78,17 +78,19 @@ impl AppService {
                     .iter()
                     .map(|input| input.key.clone())
                     .collect::<HashSet<_>>();
-                let mut reads = futures_util::stream::iter(entries.iter().map(|input| {
-                    let key = input.key.clone();
-                    let object_id = input.object_id.clone();
-                    async move {
+                let requests = entries
+                    .iter()
+                    .map(|input| (input.key.clone(), input.object_id.clone()))
+                    .collect::<Vec<_>>();
+                let mut reads = futures_util::stream::iter(requests.into_iter().map(
+                    |(key, object_id)| async move {
                         (
                             key,
                             self.resolve_public_index_source(topic_ref, source, &object_id)
                                 .await,
                         )
-                    }
-                }))
+                    },
+                ))
                 .buffer_unordered(8);
                 while let Ok(Some((key, resolved))) =
                     timeout_at(remote_deadline, reads.next()).await
