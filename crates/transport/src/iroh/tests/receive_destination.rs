@@ -10,6 +10,26 @@ struct StalledDestinationBinding {
     closed: Arc<Notify>,
 }
 
+fn attempt_all(
+    window: &mut DestinationWindow,
+    recipient: &Pubkey,
+    candidates: Vec<DestinationCandidate>,
+) -> Vec<EndpointId> {
+    candidates
+        .into_iter()
+        .map(|(candidate, _, rendezvous_cursor, known_cursor)| {
+            window.attempted_candidate(
+                recipient,
+                candidate.id,
+                &[None, None, None],
+                rendezvous_cursor,
+                known_cursor,
+            );
+            candidate.id
+        })
+        .collect()
+}
+
 impl ProtocolHandler for StalledDestinationBinding {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let (_send, mut recv) = connection.accept_bi().await?;
@@ -37,7 +57,7 @@ fn destination_window_rotates_through_large_peer_history_in_four_candidate_steps
         let (candidates, _) =
             state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
         assert!(candidates.len() <= CANDIDATES_PER_LOOKUP);
-        observed.extend(candidates.into_iter().map(|candidate| candidate.0.id));
+        observed.extend(attempt_all(&mut state, &recipient, candidates));
     }
     assert_eq!(observed.len(), 1_000);
 }
@@ -91,7 +111,7 @@ fn destination_cursor_reaches_old_peer_during_new_inserts_and_deletes() {
         peers.insert(id.to_string(), EndpointAddr::new(id));
         let (candidates, _) =
             state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
-        reached |= candidates.iter().any(|candidate| candidate.0.id == target);
+        reached |= attempt_all(&mut state, &recipient, candidates).contains(&target);
         let first = peers.keys().next().unwrap().clone();
         if first != target.to_string() {
             peers.remove(&first);
@@ -125,13 +145,138 @@ fn rendezvous_window_does_not_starve_known_peer_cursor() {
             state.select(&recipient, [&peers, &BTreeMap::new(), &BTreeMap::new()]);
         assert!(candidates.len() <= CANDIDATES_PER_LOOKUP);
         observed_known.extend(
-            candidates
+            attempt_all(&mut state, &recipient, candidates)
                 .into_iter()
-                .filter(|item| peers.contains_key(&item.0.id.to_string()))
-                .map(|item| item.0.id),
+                .filter(|id| peers.contains_key(&id.to_string())),
         );
     }
     assert_eq!(observed_known.len(), 1_000);
+}
+
+#[test]
+fn destination_window_rotates_across_known_device_sources() {
+    let recipient = Pubkey::from("account-multiple-devices");
+    let first = EndpointAddr::new(SecretKey::from_bytes(&[51; 32]).public());
+    let second = EndpointAddr::new(SecretKey::from_bytes(&[52; 32]).public());
+    let gossip = BTreeMap::from([(first.id.to_string(), first.clone())]);
+    let docs = BTreeMap::from([(second.id.to_string(), second.clone())]);
+    let empty = BTreeMap::new();
+    let mut window = DestinationWindow::default();
+    let mut first_choices = BTreeSet::new();
+    for _ in 0..6 {
+        let (candidates, _) =
+            window.select(&recipient, [&empty, &empty, &empty, &gossip, &docs, &empty]);
+        assert!(candidates.len() <= CANDIDATES_PER_LOOKUP);
+        first_choices.insert(candidates[0].0.id);
+    }
+    assert_eq!(first_choices, BTreeSet::from([first.id, second.id]));
+}
+
+#[test]
+fn learned_cursor_waits_for_a_probe_with_full_cn_and_known_windows() {
+    let recipient = Pubkey::from("account-six-known-devices");
+    let address = |seed| EndpointAddr::new(SecretKey::from_bytes(&[seed; 32]).public());
+    let mut devices = (1..=6).map(address).collect::<Vec<_>>();
+    devices.sort_by_key(|peer| peer.id.to_string());
+    let source = |seed| {
+        let peer = address(seed);
+        BTreeMap::from([(peer.id.to_string(), peer)])
+    };
+    let configured = source(20);
+    let bootstrap = source(21);
+    let imported = source(22);
+    let docs = source(23);
+    let blob = source(24);
+    let mut window = DestinationWindow::default();
+    window.observe_rendezvous("cn", &recipient, vec![address(25), address(26)]);
+    let mut attempted = BTreeSet::new();
+    let mut known_first = false;
+    for _ in 0..36 {
+        let next = window.touch(&recipient).learned_cursors[0]
+            .as_ref()
+            .and_then(|(_, id)| devices.iter().position(|peer| peer.id.to_string() == *id))
+            .map(|index| (index + 1) % devices.len())
+            .unwrap_or(0);
+        let peer = devices[next].clone();
+        let gossip = BTreeMap::from([(peer.id.to_string(), peer.clone())]);
+        let (selected, _) = window.select(
+            &recipient,
+            [&configured, &bootstrap, &imported, &gossip, &docs, &blob],
+        );
+        assert!(selected.len() <= CANDIDATES_PER_LOOKUP);
+        known_first |= selected.first().is_some_and(|(candidate, _, _, _)| {
+            candidate.id != address(25).id && candidate.id != address(26).id
+        });
+        let page = [Some((0, peer.id.to_string())), None, None];
+        for (candidate, _, rendezvous_cursor, known_cursor) in selected {
+            window.attempted_candidate(
+                &recipient,
+                candidate.id,
+                &page,
+                rendezvous_cursor,
+                known_cursor,
+            );
+            if candidate.id == peer.id {
+                attempted.insert(candidate.id);
+            }
+        }
+    }
+    assert_eq!(attempted.len(), devices.len());
+    assert!(
+        known_first,
+        "known devices must get a first probe despite active CNs"
+    );
+}
+
+#[test]
+fn rendezvous_cursor_reaches_all_devices_when_first_binding_succeeds() {
+    let recipient = Pubkey::from("account-cn-eight-devices");
+    let peers = (30..38)
+        .map(|seed| EndpointAddr::new(SecretKey::from_bytes(&[seed; 32]).public()))
+        .collect::<Vec<_>>();
+    let mut window = DestinationWindow::default();
+    window.observe_rendezvous("cn", &recipient, peers);
+    let empty = BTreeMap::new();
+    let mut reached = BTreeSet::new();
+    for _ in 0..8 {
+        let (candidates, _) = window.select(&recipient, [&empty; 6]);
+        let (first, _, cursor, known_cursor) = candidates.into_iter().next().unwrap();
+        reached.insert(first.id);
+        window.attempted_candidate(
+            &recipient,
+            first.id,
+            &[None, None, None],
+            cursor,
+            known_cursor,
+        );
+    }
+    assert_eq!(reached.len(), 8);
+}
+
+#[test]
+fn seed_cursor_reaches_all_devices_when_first_binding_succeeds() {
+    let recipient = Pubkey::from("account-seed-six-devices");
+    let peers = (40..46)
+        .map(|seed| EndpointAddr::new(SecretKey::from_bytes(&[seed; 32]).public()))
+        .map(|peer| (peer.id.to_string(), peer))
+        .collect::<BTreeMap<_, _>>();
+    let mut window = DestinationWindow::default();
+    let empty = BTreeMap::new();
+    let mut reached = BTreeSet::new();
+    for _ in 0..6 {
+        let (candidates, _) =
+            window.select(&recipient, [&peers, &empty, &empty, &empty, &empty, &empty]);
+        let (first, _, rendezvous_cursor, known_cursor) = candidates.into_iter().next().unwrap();
+        reached.insert(first.id);
+        window.attempted_candidate(
+            &recipient,
+            first.id,
+            &[None, None, None],
+            rendezvous_cursor,
+            known_cursor,
+        );
+    }
+    assert_eq!(reached.len(), 6);
 }
 
 #[test]
@@ -494,6 +639,78 @@ async fn account_ticket_candidate_reaches_live_receive_binding() {
             .id,
         receiver.id()
     );
+    let learned_store = Arc::new(kukuri_store::SqliteStore::connect_memory().await.unwrap());
+    let other_device = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let other_binding = ReceiveEndpointBindingV1::sign(
+        &recipient,
+        &other_device.id().to_string(),
+        now,
+        now + 60_000,
+    )
+    .unwrap();
+    let other_router = Router::builder(other_device.clone())
+        .accept(
+            RECEIVE_BINDING_ALPN,
+            ReceiveBindingProtocol::new(other_device.id(), other_binding).unwrap(),
+        )
+        .spawn();
+    learned_store
+        .put_peer_candidate(
+            "docs",
+            "learned",
+            &receiver.id().to_string(),
+            &serde_json::to_vec(&receiver.addr()).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    learned_store
+        .put_peer_candidate(
+            "blob",
+            "learned",
+            &other_device.id().to_string(),
+            &serde_json::to_vec(&other_device.addr()).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    let mut learned_transport = IrohGossipTransport::bind_local()
+        .await
+        .unwrap()
+        .with_account_store(learned_store);
+    let mut reached = BTreeSet::new();
+    for _ in 0..6 {
+        let destination = learned_transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .unwrap();
+        reached.insert(destination.id);
+        learned_transport
+            .invalidate_receive_destination(&recipient.public_key(), &destination.id.to_string())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        reached,
+        BTreeSet::from([receiver.id(), other_device.id()]),
+        "CN-less known peers must rotate across two live devices"
+    );
+    learned_transport.shutdown().await;
+    learned_transport
+        ._router
+        .take()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+    other_router.shutdown().await.unwrap();
     router.shutdown().await.unwrap();
     transport.shutdown().await;
     transport._router.take().unwrap().shutdown().await.unwrap();
@@ -522,7 +739,11 @@ async fn saturated_probe_budget_defers_without_queuing() {
 
 #[tokio::test]
 async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
-    let mut transport = IrohGossipTransport::bind_local().await.unwrap();
+    let store = Arc::new(kukuri_store::SqliteStore::connect_memory().await.unwrap());
+    let mut transport = IrohGossipTransport::bind_local()
+        .await
+        .unwrap()
+        .with_account_store(store.clone());
     let receiver = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(RelayMode::Disabled)
         .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
@@ -629,6 +850,26 @@ async fn untrusted_rendezvous_candidate_requires_live_account_binding() {
             .unwrap()
             .is_none(),
         "CN consent removal must also clear a previously verified destination"
+    );
+    store
+        .put_peer_candidate(
+            "gossip",
+            "learned",
+            &receiver.id().to_string(),
+            &serde_json::to_vec(&receiver.addr()).unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transport
+            .resolve_receive_destination(&recipient.public_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        receiver.id(),
+        "clearing one CN must preserve an independently known direct peer"
     );
     let mut replacement = IrohGossipTransport::bind_local().await.unwrap();
     assert!(

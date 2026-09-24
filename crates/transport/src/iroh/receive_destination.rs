@@ -10,7 +10,6 @@ use kukuri_core::receive_route_for_account;
 
 const MAX_DESTINATION_ACCOUNTS: usize = 1_024;
 const CANDIDATES_PER_LOOKUP: usize = 4;
-const MAX_SELECTION_STEPS: usize = 12;
 const BINDING_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CACHED_BINDING_MS: i64 = 10_000;
 const MAX_RENDEZVOUS_CANDIDATES: usize = 8;
@@ -28,7 +27,8 @@ struct DestinationEntry {
     last_used: u64,
     revision: u64,
     source: usize,
-    cursors: [Option<String>; 3],
+    cursors: [Option<String>; 6],
+    learned_cursors: [Option<(i64, String)>; 3],
     verified: Option<CachedDestination>,
     rendezvous_sources: BTreeMap<String, RendezvousSource>,
     rendezvous_cursor: usize,
@@ -46,6 +46,13 @@ struct CachedDestination {
     expires_at_ms: i64,
     expires_at: Instant,
 }
+
+type DestinationCandidate = (
+    EndpointAddr,
+    Option<String>,
+    Option<usize>,
+    Option<(usize, String)>,
+);
 
 impl DestinationWindow {
     fn touch(&mut self, recipient: &Pubkey) -> &mut DestinationEntry {
@@ -69,6 +76,7 @@ impl DestinationWindow {
                 revision: tick,
                 source: 0,
                 cursors: Default::default(),
+                learned_cursors: Default::default(),
                 verified: None,
                 rendezvous_sources: BTreeMap::new(),
                 rendezvous_cursor: 0,
@@ -90,11 +98,11 @@ impl DestinationWindow {
         None
     }
 
-    fn select(
+    fn select<const N: usize>(
         &mut self,
         recipient: &Pubkey,
-        sources: [&BTreeMap<String, EndpointAddr>; 3],
-    ) -> (Vec<(EndpointAddr, Option<String>)>, u64) {
+        sources: [&BTreeMap<String, EndpointAddr>; N],
+    ) -> (Vec<DestinationCandidate>, u64) {
         let entry = self.touch(recipient);
         let mut selected = Vec::with_capacity(CANDIDATES_PER_LOOKUP);
         let mut seen = BTreeSet::new();
@@ -112,34 +120,69 @@ impl DestinationWindow {
                     .map(|address| (address, Some(key.clone())))
             })
             .collect::<Vec<_>>();
-        for _ in 0..rendezvous_candidates.len().min(2) {
-            let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
-            if seen.insert(candidate.0.id) {
-                selected.push(candidate);
+        let mut rendezvous_cursor = entry.rendezvous_cursor;
+        let mut known_cursors = entry.cursors.clone();
+        if entry.source.is_multiple_of(2) {
+            for _ in 0..rendezvous_candidates.len().min(2) {
+                let candidate =
+                    next_rendezvous_candidate(&mut rendezvous_cursor, &rendezvous_candidates);
+                if seen.insert(candidate.0.id) {
+                    selected.push((candidate.0, candidate.1, candidate.2, None));
+                }
             }
         }
-        for _ in 0..MAX_SELECTION_STEPS {
+        let first_source = entry.source;
+        entry.source = (entry.source + 1) % N;
+        for offset in 0..N * CANDIDATES_PER_LOOKUP {
             if selected.len() == CANDIDATES_PER_LOOKUP {
                 break;
             }
-            let source = entry.source;
-            entry.source = (entry.source + 1) % sources.len();
-            if let Some(candidate) = next_peer(sources[source], &mut entry.cursors[source])
+            let source = (first_source + offset) % N;
+            if let Some(candidate) = next_peer(sources[source], &mut known_cursors[source])
                 && seen.insert(candidate.id)
             {
-                selected.push((candidate, None));
+                selected.push((
+                    candidate,
+                    None,
+                    None,
+                    known_cursors[source].clone().map(|cursor| (source, cursor)),
+                ));
             }
         }
         for _ in 0..rendezvous_candidates.len().min(CANDIDATES_PER_LOOKUP) {
             if selected.len() == CANDIDATES_PER_LOOKUP {
                 break;
             }
-            let candidate = next_rendezvous_candidate(entry, &rendezvous_candidates);
+            let candidate =
+                next_rendezvous_candidate(&mut rendezvous_cursor, &rendezvous_candidates);
             if seen.insert(candidate.0.id) {
-                selected.push(candidate);
+                selected.push((candidate.0, candidate.1, candidate.2, None));
             }
         }
         (selected, entry.revision)
+    }
+
+    fn attempted_candidate(
+        &mut self,
+        recipient: &Pubkey,
+        endpoint_id: EndpointId,
+        pages: &[Option<(i64, String)>; 3],
+        rendezvous_cursor: Option<usize>,
+        known_cursor: Option<(usize, String)>,
+    ) {
+        let entry = self.touch(recipient);
+        if let Some(cursor) = rendezvous_cursor {
+            entry.rendezvous_cursor = cursor;
+        }
+        if let Some((source, cursor)) = known_cursor {
+            entry.cursors[source] = Some(cursor);
+        }
+        let id = endpoint_id.to_string();
+        for (cursor, page) in entry.learned_cursors.iter_mut().zip(pages) {
+            if page.as_ref().is_some_and(|(_, candidate)| candidate == &id) {
+                *cursor = page.clone();
+            }
+        }
     }
 
     fn observe_rendezvous(
@@ -255,12 +298,13 @@ impl DestinationWindow {
 }
 
 fn next_rendezvous_candidate(
-    entry: &mut DestinationEntry,
+    cursor: &mut usize,
     candidates: &[(EndpointAddr, Option<String>)],
-) -> (EndpointAddr, Option<String>) {
-    let index = entry.rendezvous_cursor % candidates.len();
-    entry.rendezvous_cursor = entry.rendezvous_cursor.wrapping_add(1);
-    candidates[index].clone()
+) -> (EndpointAddr, Option<String>, Option<usize>) {
+    let index = *cursor % candidates.len();
+    *cursor = (*cursor).wrapping_add(1);
+    let (address, source) = candidates[index].clone();
+    (address, source, Some(*cursor))
 }
 
 fn next_peer(
@@ -391,6 +435,26 @@ impl IrohGossipTransport {
         } else {
             BTreeMap::new()
         };
+        let mut learned = [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+        let mut learned_pages: [Option<(i64, String)>; 3] = Default::default();
+        if let Some(store) = &self.account_store {
+            let cursors = self
+                .receive_destinations
+                .lock()
+                .await
+                .touch(recipient)
+                .learned_cursors
+                .clone();
+            for (index, scope) in ["gossip", "docs", "blob"].into_iter().enumerate() {
+                let page = store
+                    .peer_candidate_window(scope, "learned", cursors[index].clone(), 1, now_ms)
+                    .await?;
+                if let Some((id, bytes, seen_ms)) = page.into_iter().next() {
+                    learned[index].insert(id.clone(), serde_json::from_slice(&bytes)?);
+                    learned_pages[index] = Some((seen_ms, id));
+                }
+            }
+        }
         let configured = self.configured_seed_peers.lock().await;
         let bootstrap = self.bootstrap_seed_peers.lock().await;
         let imported = self.imported_peers.lock().await;
@@ -399,16 +463,29 @@ impl IrohGossipTransport {
         } else {
             &*imported
         };
-        let (candidates, revision) = self
-            .receive_destinations
-            .lock()
-            .await
-            .select(recipient, [&configured, &bootstrap, imported_source]);
+        let (candidates, revision) = self.receive_destinations.lock().await.select(
+            recipient,
+            [
+                &configured,
+                &bootstrap,
+                imported_source,
+                &learned[0],
+                &learned[1],
+                &learned[2],
+            ],
+        );
         drop((configured, bootstrap, imported));
-        for (candidate, source) in candidates {
+        for (candidate, source, rendezvous_cursor, known_cursor) in candidates {
             if self.offer_closed.load(Ordering::Acquire) {
                 return Ok(None);
             }
+            self.receive_destinations.lock().await.attempted_candidate(
+                recipient,
+                candidate.id,
+                &learned_pages,
+                rendezvous_cursor,
+                known_cursor,
+            );
             let deadline = Instant::now() + BINDING_PROBE_TIMEOUT;
             let result = tokio::select! {
                 _ = &mut shutdown => return Ok(None),
