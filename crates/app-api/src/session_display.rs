@@ -32,7 +32,7 @@ impl AppService {
     }
 
     pub async fn set_session_display(&self, request: SessionDisplayRequest) -> Result<()> {
-        let _access = self.services.session_display_access.lock().await;
+        let _access = self.services.content_save_access.lock().await;
         let replica = ReplicaId::new(request.replica_id.clone());
         let key = format!("sessions/{}/{}/state", request.kind, request.session_id);
         anyhow::ensure!(

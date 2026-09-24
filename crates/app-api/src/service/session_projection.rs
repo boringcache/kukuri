@@ -317,13 +317,14 @@ impl SessionProjections {
                     .await;
                     let (fetched, mut attempt) = if let Ok(Ok(fetch)) = prepared {
                         let attempt = {
-                            let _access = services.session_display_access.lock().await;
+                            let _access = services.content_save_access.lock().await;
                             let mut state = registry.state.lock().await;
                             if state.entries.iter_mut().any(|e| {
                                 e.replica == replica
                                     && e.key == key
                                     && e.running.as_ref().is_some_and(|r| r.token == token)
                                     && !e.observers.is_empty()
+                                    && !*services.content_closed.borrow()
                                     && tokio::time::Instant::now() < deadline
                             }) {
                                 // 内側の共通walk枠も取得済み。待機取消には予算を使わない。
@@ -351,8 +352,16 @@ impl SessionProjections {
                         );
                         (None, None)
                     };
-                    let access = services.session_display_access.lock().await;
-                    if let Some(bytes) = fetched {
+                    let access = services.content_save_access.lock().await;
+                    let still_displayed = !*services.content_closed.borrow()
+                        && registry.state.lock().await.entries.iter().any(|entry| {
+                            entry.replica == replica
+                                && entry.key == key
+                                && entry.running.as_ref().is_some_and(|r| r.token == token)
+                                && entry.hashes.contains(&task_hash)
+                                && !entry.observers.is_empty()
+                        });
+                    if let Some(bytes) = fetched.filter(|_| still_displayed) {
                         match cache_and_project_displayed_manifest(
                             &services, &topic, &replica, &key, &task_hash, bytes, token,
                         )
@@ -366,6 +375,8 @@ impl SessionProjections {
                             Err(error) => warn!(%error, "failed to project a displayed session"),
                             _ => {}
                         }
+                    } else if !still_displayed && let Some(attempt) = attempt.take() {
+                        attempt.defer();
                     }
                     drop(attempt);
                     {

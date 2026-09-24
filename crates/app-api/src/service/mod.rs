@@ -393,7 +393,11 @@ pub type PrivateChannelCapabilityPersist =
 #[derive(Clone)]
 pub struct ServiceHandles {
     pub(crate) session_projections: Arc<session_projection::SessionProjections>,
-    pub(crate) session_display_access: Arc<Mutex<()>>,
+    pub(crate) content_save_access: Arc<Mutex<()>>,
+    pub(crate) content_closed: Arc<tokio::sync::watch::Sender<bool>>,
+    pub(crate) joined_private_channels: Arc<Mutex<HashMap<String, JoinedPrivateChannelState>>>,
+    pub(crate) content_scope_generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) content_scope_changes: Arc<tokio::sync::watch::Sender<u64>>,
     pub(crate) store: Arc<dyn Store>,
     pub(crate) projection_store: Arc<dyn ProjectionStore>,
     pub(crate) transport: Arc<dyn Transport>,
@@ -415,6 +419,68 @@ pub struct ServiceHandles {
 }
 
 impl ServiceHandles {
+    pub(crate) async fn active_content_scope_generation(
+        &self,
+        topic: &str,
+        channel: &str,
+    ) -> Option<u64> {
+        if *self.content_closed.borrow() {
+            return None;
+        }
+        if channel == PUBLIC_CHANNEL_ID {
+            return Some(0);
+        }
+        let generation = self
+            .joined_private_channels
+            .lock()
+            .await
+            .get(joined_private_channel_key(topic, channel).as_str())
+            .map(|state| state.generation);
+        if *self.content_closed.borrow() {
+            None
+        } else {
+            generation
+        }
+    }
+
+    pub(crate) async fn content_scope_is_current(
+        &self,
+        topic: &str,
+        channel: &str,
+        generation: u64,
+    ) -> bool {
+        self.active_content_scope_generation(topic, channel).await == Some(generation)
+    }
+
+    pub(crate) async fn until_content_invalid<T>(
+        &self,
+        topic: &str,
+        channel: &str,
+        generation: u64,
+        future: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        let mut closed = self.content_closed.subscribe();
+        let mut changed = self.content_scope_changes.subscribe();
+        tokio::pin!(future);
+        loop {
+            if self.active_content_scope_generation(topic, channel).await != Some(generation) {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                _ = closed.changed() => {},
+                _ = changed.changed() => {},
+                result = &mut future => {
+                    return if self.active_content_scope_generation(topic, channel).await != Some(generation) {
+                        None
+                    } else {
+                        Some(result)
+                    };
+                },
+            }
+        }
+    }
+
     pub fn new(
         store: Arc<dyn Store>,
         projection_store: Arc<dyn ProjectionStore>,
@@ -432,7 +498,11 @@ impl ServiceHandles {
                     &missing_body_ledger,
                 )),
             ),
-            session_display_access: Arc::default(),
+            content_save_access: Arc::default(),
+            content_closed: Arc::new(tokio::sync::watch::channel(false).0),
+            joined_private_channels: Arc::default(),
+            content_scope_generation: Arc::default(),
+            content_scope_changes: Arc::new(tokio::sync::watch::channel(0).0),
             projection_store,
             transport,
             hint_transport,
@@ -522,6 +592,7 @@ impl SubscriptionRecoveryBackoff {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JoinedPrivateChannelState {
+    pub(crate) generation: u64,
     pub(crate) topic_id: String,
     pub(crate) channel_id: ChannelId,
     pub(crate) label: String,
@@ -639,10 +710,11 @@ impl AppService {
         budget.validate()?;
         let cache = MetaverseBlobCacheIndex::new(budget.client.cache_capacity_bytes)?;
         let last_sync_ts = services.session_projections.last_change.clone();
+        let joined_private_channels = services.joined_private_channels.clone();
         Ok(Self {
             services,
             subscription_registry: SubscriptionRegistry::default(),
-            joined_private_channels: Arc::new(Mutex::new(HashMap::new())),
+            joined_private_channels,
             metaverse_room_events: Arc::new(Mutex::new(HashMap::new())),
             dome_host_heartbeats: Arc::new(Mutex::new(HashMap::new())),
             dome_host_sessions: Arc::new(Mutex::new(HashMap::new())),

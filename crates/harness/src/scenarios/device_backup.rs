@@ -228,6 +228,7 @@ pub(crate) async fn run_device_backup_restore(
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: attachment_hash,
             mime: "image/png".to_string(),
+            source_object_id: None,
         })
         .await?
         .context("restored attachment payload missing")?;

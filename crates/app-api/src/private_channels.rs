@@ -23,6 +23,7 @@ impl AppService {
             initial_private_channel_epoch_id(&input.audience_kind, now, owner_pubkey.as_str());
         let current_epoch_secret_hex = generate_keys().export_secret_hex();
         let state = JoinedPrivateChannelState {
+            generation: 0,
             topic_id: input.topic_id.as_str().to_string(),
             channel_id: channel_id.clone(),
             label: label.to_string(),

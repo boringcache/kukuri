@@ -9,6 +9,21 @@ const LEARNED_BUDGET_BYTES: i64 = 64 * 1024 * 1024;
 const MAX_ADDR_BYTES: usize = 4 * 1024;
 
 impl SqliteStore {
+    async fn begin_candidate_write(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        // A cancelled writer can return its pooled connection before SQLx finishes its
+        // queued rollback. A custom BEGIN cannot nest; give that rollback a finite turn.
+        for delay_ms in [5, 20, 75] {
+            match self.pool.begin_with("BEGIN IMMEDIATE").await {
+                Ok(transaction) => return Ok(transaction),
+                Err(sqlx::Error::InvalidSavePointStatement) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
     /// The account database owns the candidate history. Only learned rows are
     /// time/size evicted; explicit tickets and configured seeds are user input.
     pub async fn put_peer_candidate(
@@ -44,7 +59,7 @@ impl SqliteStore {
             "peer address exceeds candidate budget"
         );
         let bytes = (addr.len() + scope.len() + source.len() + endpoint_id.len() + 64) as i64;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_candidate_write().await?;
         let previous = sqlx::query(
             "SELECT endpoint_addr, accounted_bytes FROM peer_candidates \
              WHERE scope = ? AND source = ? AND endpoint_id = ?",
@@ -127,7 +142,7 @@ impl SqliteStore {
             .fetch_optional(&self.pool)
             .await?;
             if oldest.is_some_and(|seen| seen < now_ms.saturating_sub(LEARNED_RETENTION_MS)) {
-                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                let mut tx = self.begin_candidate_write().await?;
                 prune_learned(&mut tx, now_ms).await?;
                 tx.commit().await?;
             }
@@ -257,7 +272,7 @@ impl SqliteStore {
         now_ms: i64,
     ) -> Result<()> {
         let digest = blake3::hash(&serde_json::to_vec(&seeds)?);
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_candidate_write().await?;
         let previous: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT digest FROM peer_seed_state WHERE scope = ?")
                 .bind(scope)

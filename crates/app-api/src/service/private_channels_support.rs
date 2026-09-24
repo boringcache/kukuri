@@ -428,13 +428,31 @@ impl AppService {
 
     pub(crate) async fn register_joined_private_channel(
         &self,
-        state: JoinedPrivateChannelState,
+        mut state: JoinedPrivateChannelState,
     ) -> Result<()> {
         register_private_channel_replica_secrets(self.docs_sync(), &state).await?;
-        self.joined_private_channels.lock().await.insert(
-            joined_private_channel_key(state.topic_id.as_str(), state.channel_id.as_str()),
-            state.clone(),
-        );
+        let _save_access = self.services.content_save_access.lock().await;
+        let key = joined_private_channel_key(state.topic_id.as_str(), state.channel_id.as_str());
+        let mut joined = self.joined_private_channels.lock().await;
+        if let Some(previous) = joined.get(&key) {
+            state.generation = previous.generation;
+        }
+        let changed = joined.get(&key).is_none_or(|previous| *previous != state);
+        if changed {
+            state.generation = self
+                .services
+                .content_scope_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(1);
+        }
+        joined.insert(key, state.clone());
+        drop(joined);
+        if changed {
+            self.services
+                .content_scope_changes
+                .send_replace(state.generation);
+        }
+        drop(_save_access);
         self.persist_private_channel_capabilities_if_configured()
             .await?;
         self.ensure_private_channel_subscription(
@@ -450,12 +468,20 @@ impl AppService {
         topic_id: &str,
         channel_id: &str,
     ) -> Result<Option<JoinedPrivateChannelState>> {
-        let _display_access = self.services.session_display_access.lock().await;
+        let _display_access = self.services.content_save_access.lock().await;
         let removed = self
             .joined_private_channels
             .lock()
             .await
             .remove(joined_private_channel_key(topic_id, channel_id).as_str());
+        if removed.is_some() {
+            let generation = self
+                .services
+                .content_scope_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(1);
+            self.services.content_scope_changes.send_replace(generation);
+        }
         if let Some(state) = &removed {
             let replicas = private_channel_epoch_capabilities(state)
                 .iter()

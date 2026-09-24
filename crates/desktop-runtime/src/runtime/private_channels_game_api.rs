@@ -1135,7 +1135,11 @@ impl DesktopRuntime {
             return Ok(None);
         }
         self.app_service
-            .blob_media_payload(request.hash.as_str(), request.mime.as_str())
+            .blob_media_payload_for_post(
+                request.hash.as_str(),
+                request.mime.as_str(),
+                request.source_object_id.as_deref(),
+            )
             .await
     }
 }

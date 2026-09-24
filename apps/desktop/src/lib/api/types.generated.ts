@@ -782,7 +782,7 @@ export type SetChannelGossipEnabledRequest = { topic: string, channel: string, e
 
 export type GetBlobPreviewRequest = { hash: string, mime: string, metaverse_kind?: MetaverseAssetKind | null, };
 
-export type GetBlobMediaRequest = { hash: string, mime: string, };
+export type GetBlobMediaRequest = { hash: string, mime: string, source_object_id?: string | null, };
 
 export type AuthorRequest = { pubkey: string, };
 

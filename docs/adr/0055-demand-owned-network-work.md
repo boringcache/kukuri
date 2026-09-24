@@ -3,7 +3,7 @@
 ## Status
 
 Proposed。#1221のP2。基準は `984a491a3430f1da105bfe8ff49a877cbab4690f`。
-実装済みの仕様は参照先ADRとコードのままであり、本書の新経路はまだ有効化していない。
+実装済みの仕様は参照先ADRとコードで確認する。R3-Aのnode共通受付、R3-Bの表示再試行、R3-Cのapp-api保存境界は本番経路へ接続済みである。通知/DM・reader・旧同期の移行は後続条件として残る。
 作業状態・AC・INVAR・採用判断の台帳は [#1221](https://github.com/kukuri-app/kukuri/issues/1221) に集約する。
 
 ## Contextと決定の境界
@@ -449,6 +449,7 @@ serviceはretry台帳の作成時に割り当てる非再利用のプロセス�
 表示はcaller futureの破棄で止める。node終了は受付を閉じ、queue/実行を取消し、結果を返さない。
 完了callbackは受付lock外で実行し、retry結果を記録してからflightを退役する。queue futureのDropもlock外で行う。
 取得bytesの既存scope/token/内容検証と保存先のguardはapp-api等のcallerが維持する。
+R3-Cではapp-apiの本文・返信先・session・投稿添付を同じaccount閉鎖/参加世代の保存境界へ接続する。remote本文と投稿添付は取得中にblobを保存せず、取得後に現行の参加世代・取り下げ・添付所属・成人向けgateを再確認してからblob/projectionへ保存する。private退出と同じepochへの再参加は別世代とし、古いfutureを取消す。通常取得のcaller取消では上記のownerが成否を保持し、sessionの表示専用futureは最後のobserverが離れたら止める。添付の表示需要に伴うUI bytes/object URLの回収はR1-C、remote cache全体の所有と回収はR5-Aに固定する。
 
 失敗cooldownは従来の3秒・service別keyを維持し、1,024件・key256byteに制限する。
 期限索引で回収し、満杯なら期限の近い記録から捨てる。一時cacheであり、未送信outboxや試行回数の永続記録ではない。

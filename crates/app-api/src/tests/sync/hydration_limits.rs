@@ -580,10 +580,33 @@ async fn missing_body_is_retried_on_the_ledger_schedule_and_recovers() {
 #[derive(Default)]
 struct HangingBlobService {
     inner: MemoryBlobService,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+    fetches: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
 impl BlobService for HangingBlobService {
+    async fn prepare_display_fetch(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::DisplayBlobFetch> {
+        let Some(gate) = &self.gate else {
+            anyhow::bail!("display fetch unavailable");
+        };
+        let gate = gate.clone();
+        let inner = self.inner.clone();
+        let hash = hash.clone();
+        let fetches = self.fetches.clone();
+        let completed = self.completed.clone();
+        Ok(Box::pin(async move {
+            fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gate.acquire().await?.forget();
+            let bytes = inner.fetch_blob(&hash).await;
+            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            bytes
+        }))
+    }
     async fn fetch_local_blob(
         &self,
         _hash: &kukuri_core::BlobHash,
@@ -595,7 +618,16 @@ impl BlobService for HangingBlobService {
         self.inner.put_blob(data, mime).await
     }
 
-    async fn fetch_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.acquire().await?.forget();
+            let bytes = self.inner.fetch_blob(hash).await;
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return bytes;
+        }
         std::future::pending::<()>().await;
         Ok(None)
     }
@@ -615,6 +647,285 @@ impl BlobService for HangingBlobService {
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {
         self.inner.import_peer_ticket(ticket).await
     }
+}
+
+#[path = "hydration_limits_cancel.rs"]
+mod hydration_limits_cancel;
+
+#[tokio::test]
+async fn shutdown_rejects_a_body_that_arrives_after_the_account_closes() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let blobs = Arc::new(HangingBlobService {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let stored = blobs
+        .put_blob(b"late body".to_vec(), "text/plain")
+        .await
+        .unwrap();
+    let docs = Arc::new(CountingDocsSync::default());
+    let keys = generate_keys();
+    let topic = TopicId::new("kukuri:topic:late-body-after-shutdown");
+    let envelope = persist_test_post(
+        docs.as_ref(),
+        None,
+        &keys,
+        &topic,
+        PayloadRef::BlobText {
+            hash: stored.hash.clone(),
+            mime: "text/plain".into(),
+            bytes: stored.bytes,
+        },
+        Vec::new(),
+        None,
+    )
+    .await;
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs,
+        blobs.clone(),
+        keys,
+    );
+    app.list_timeline(topic.as_str(), None, 20).await.unwrap();
+    assert_eq!(blobs.fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    app.shutdown().await;
+    gate.add_permits(1);
+    sleep(Duration::from_millis(100)).await;
+    let row = store
+        .get_object_projection(&envelope.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.content.is_none(),
+        "closed account must reject late body bytes"
+    );
+    assert_eq!(blobs.completed.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn closing_the_account_after_fetch_but_before_save_discards_the_body() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let blobs = Arc::new(HangingBlobService {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let stored = blobs
+        .put_blob(b"completed body".to_vec(), "text/plain")
+        .await
+        .unwrap();
+    let docs = Arc::new(CountingDocsSync::default());
+    let keys = generate_keys();
+    let topic = TopicId::new("kukuri:topic:late-save-after-fetch");
+    let envelope = persist_test_post(
+        docs.as_ref(),
+        None,
+        &keys,
+        &topic,
+        PayloadRef::BlobText {
+            hash: stored.hash,
+            mime: "text/plain".into(),
+            bytes: stored.bytes,
+        },
+        Vec::new(),
+        None,
+    )
+    .await;
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let app = Arc::new(app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs,
+        blobs.clone(),
+        keys,
+    ));
+    let listing = {
+        let app = app.clone();
+        let topic = topic.clone();
+        tokio::spawn(async move { app.list_timeline(topic.as_str(), None, 20).await })
+    };
+    timeout(Duration::from_secs(2), async {
+        while blobs.fetches.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("body fetch starts");
+    let save_access = app.services.content_save_access.lock().await;
+    gate.add_permits(1);
+    timeout(Duration::from_secs(2), async {
+        while blobs.completed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("bytes arrive before account closure");
+    app.services.content_closed.send_replace(true);
+    drop(save_access);
+    let _ = listing.await;
+    let row = store
+        .get_object_projection(&envelope.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.content.is_none(),
+        "completed bytes must not cross a closed save boundary"
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn leaving_a_private_channel_rejects_its_late_body() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let blobs = Arc::new(HangingBlobService {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let docs = Arc::new(CountingDocsSync::default());
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let app = Arc::new(app_service_from_dependencies(
+        store.clone(),
+        store.clone(),
+        transport.clone(),
+        transport,
+        docs.clone(),
+        blobs.clone(),
+        generate_keys(),
+    ));
+    let topic = "kukuri:topic:late-private-body";
+    let channel = app
+        .create_private_channel(CreatePrivateChannelInput {
+            topic_id: TopicId::new(topic),
+            label: "late body".into(),
+            audience_kind: ChannelAudienceKind::InviteOnly,
+        })
+        .await
+        .unwrap();
+    let channel_id = ChannelId::new(channel.channel_id.clone());
+    let state = app
+        .joined_private_channel_state(topic, channel_id.as_str())
+        .await
+        .unwrap();
+    app.register_joined_private_channel(state.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        app.joined_private_channel_state(topic, channel_id.as_str())
+            .await
+            .unwrap()
+            .generation,
+        state.generation,
+        "the same membership must not invalidate an active scope"
+    );
+    let replica = current_private_channel_replica_id(&state);
+    let stored = blobs
+        .put_blob(b"private late body".to_vec(), "text/plain")
+        .await
+        .unwrap();
+    let media = blobs
+        .put_blob(b"private image".to_vec(), "image/png")
+        .await
+        .unwrap();
+    let envelope = build_post_envelope_with_payload_in_channel(
+        app.keys(),
+        &TopicId::new(topic),
+        PayloadRef::BlobText {
+            hash: stored.hash.clone(),
+            mime: "text/plain".into(),
+            bytes: stored.bytes,
+        },
+        vec![kukuri_core::AssetRef {
+            hash: media.hash.clone(),
+            mime: "image/png".into(),
+            bytes: media.bytes,
+            role: AssetRole::ImageOriginal,
+        }],
+        Vec::new(),
+        None,
+        ObjectVisibility::Private,
+        Some(&channel_id),
+        Vec::new(),
+    )
+    .unwrap();
+    let post = envelope.to_post_object().unwrap().unwrap();
+    persist_post_object(docs.as_ref(), &replica, post, envelope.clone())
+        .await
+        .unwrap();
+    store
+        .put_object_projection(super::super::support::verified_projection_row(
+            &envelope, &replica, None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(blobs.fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let listing = {
+        let app = app.clone();
+        let channel_id = channel_id.clone();
+        tokio::spawn(async move {
+            app.list_timeline_scoped(topic, TimelineScope::Channel { channel_id }, None, 20)
+                .await
+        })
+    };
+    let media_fetch = {
+        let app = app.clone();
+        let hash = media.hash.as_str().to_owned();
+        let object_id = envelope.id.as_str().to_owned();
+        tokio::spawn(async move {
+            app.blob_media_payload_for_post(&hash, "image/png", Some(&object_id))
+                .await
+        })
+    };
+    timeout(Duration::from_secs(2), async {
+        while blobs.fetches.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("private body and attachment fetches start");
+    app.remove_joined_private_channel(topic, channel_id.as_str())
+        .await
+        .unwrap();
+    app.register_joined_private_channel(state.clone())
+        .await
+        .unwrap();
+    assert_ne!(
+        app.joined_private_channel_state(topic, channel_id.as_str())
+            .await
+            .unwrap()
+            .generation,
+        state.generation,
+        "rejoining the same epoch must not revive an old fetch"
+    );
+    gate.add_permits(2);
+    let _ = listing.await;
+    assert!(media_fetch.await.unwrap().unwrap().is_none());
+    sleep(Duration::from_millis(100)).await;
+    let row = store
+        .get_object_projection(&envelope.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.content.is_none(),
+        "revoked scope must reject late body bytes"
+    );
+    assert_eq!(blobs.completed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        gate.available_permits(),
+        2,
+        "revoked fetches must drop their waiters"
+    );
+    app.shutdown().await;
 }
 
 // TR-3: 本文の取得を待っている走査が abort されても(購読の再起動など)、その hash は「取得中」のまま残らない。

@@ -8,7 +8,6 @@ import {
 } from 'react';
 
 import type {
-  AttachmentView,
   CommunityNodeNodeStatus,
   DesktopApi,
   GameRoomView,
@@ -21,6 +20,7 @@ import {
   logMediaDebug,
 } from '@/shell/media';
 import { MediaFetchLedger } from '@/shell/data/mediaFetchLedger';
+import type { PreviewableMediaAttachment } from '@/shell/data/usePreviewableMediaAttachments';
 import {
   PUBLIC_CHANNEL_REF,
   PUBLIC_TIMELINE_SCOPE,
@@ -59,7 +59,7 @@ type UseDesktopShellDataEffectsArgs = {
   mediaObjectUrls: DesktopShellState['mediaObjectUrls'];
   shellChromeState: ShellChromeProjection;
   selectedAuthorPubkey: string | null;
-  previewableMediaAttachments: AttachmentView[];
+  previewableMediaAttachments: PreviewableMediaAttachment[];
   /// #858: 表示設定 OFF の間にゲート対象となる成人向け添付 hash。
   gatedAdultMediaHashes: string[];
   remoteObjectUrlRef: MutableRefObject<Map<string, string>>;
@@ -652,8 +652,10 @@ export function useDesktopShellDataEffects({
         status: attachment.status,
       });
 
-      void api
-        .getBlobMediaPayload(attachment.hash, attachment.mime)
+      const payloadRequest = attachment.source_object_id
+        ? api.getBlobMediaPayload(attachment.hash, attachment.mime, attachment.source_object_id)
+        : api.getBlobMediaPayload(attachment.hash, attachment.mime);
+      void payloadRequest
         .then((payload) => {
           clearRetrying();
           if (!resultUsable()) {

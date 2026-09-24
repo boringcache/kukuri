@@ -277,6 +277,8 @@ pub struct GetBlobPreviewRequest {
 pub struct GetBlobMediaRequest {
     pub hash: String,
     pub mime: String,
+    #[serde(default)]
+    pub source_object_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

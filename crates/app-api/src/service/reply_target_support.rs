@@ -535,32 +535,59 @@ async fn reflect_reply_target_with(
     else {
         return Ok(ReplyTargetReflection::Unavailable);
     };
+    let channel = post
+        .header()
+        .channel_id
+        .as_ref()
+        .map_or(PUBLIC_CHANNEL_ID, ChannelId::as_str)
+        .to_owned();
+    let Some(scope_generation) = services
+        .active_content_scope_generation(topic_id, &channel)
+        .await
+    else {
+        return Ok(ReplyTargetReflection::Deferred);
+    };
     let is_withdrawn = services
         .projection_store
         .get_post_withdrawal(object_id)
         .await?
         .is_some();
+    let mut remote_bytes = None;
     let row = if is_withdrawn {
-        projection_row_from_post(&post.withdrawn(), Some(String::new()))
+        projection_row_from_post(&post.clone().withdrawn(), Some(String::new()))
     } else {
         let content = match (&post.header().payload_ref, body) {
             (PayloadRef::InlineText { text }, _) => Some(text.clone()),
             (PayloadRef::BlobText { hash, .. }, ReplyTargetBody::Remote) => {
                 let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
-                let Ok(Ok(fetch)) = tokio::time::timeout_at(
-                    deadline,
-                    services.blob_service.prepare_retry_fetch(hash),
-                )
-                .await
+                let Some(Ok(Ok(fetch))) = services
+                    .until_content_invalid(
+                        topic_id,
+                        &channel,
+                        scope_generation,
+                        tokio::time::timeout_at(
+                            deadline,
+                            services.blob_service.prepare_retry_fetch(hash),
+                        ),
+                    )
+                    .await
                 else {
                     return Ok(ReplyTargetReflection::Deferred);
                 };
-                tokio::time::timeout_at(deadline, fetch)
+                remote_bytes = services
+                    .until_content_invalid(
+                        topic_id,
+                        &channel,
+                        scope_generation,
+                        tokio::time::timeout_at(deadline, fetch),
+                    )
                     .await
-                    .ok()
                     .and_then(Result::ok)
-                    .flatten()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+                    .and_then(Result::ok)
+                    .flatten();
+                remote_bytes
+                    .as_ref()
+                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
             }
             (PayloadRef::BlobText { hash, .. }, ReplyTargetBody::LocalOnly) => {
                 match hydration_limits::fetch_local_projection_blob_text(
@@ -575,6 +602,29 @@ async fn reflect_reply_target_with(
             }
         };
         projection_row_from_post(&post, content)
+    };
+    let _save_access = services.content_save_access.lock().await;
+    if !services
+        .content_scope_is_current(topic_id, &channel, scope_generation)
+        .await
+    {
+        return Ok(ReplyTargetReflection::Deferred);
+    }
+    let row = if services
+        .projection_store
+        .get_post_withdrawal(object_id)
+        .await?
+        .is_some()
+    {
+        projection_row_from_post(&post.withdrawn(), Some(String::new()))
+    } else {
+        if let Some(bytes) = remote_bytes
+            && let PayloadRef::BlobText { hash, .. } = &post.header().payload_ref
+        {
+            let stored = services.blob_service.put_blob(bytes, "text/plain").await?;
+            anyhow::ensure!(stored.hash == *hash, "reply target body hash changed");
+        }
+        row
     };
     services
         .projection_store

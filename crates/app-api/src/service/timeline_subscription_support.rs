@@ -343,6 +343,13 @@ impl AppService {
             let PayloadRef::BlobText { hash, .. } = &row.payload_ref else {
                 continue;
             };
+            let Some(scope_generation) = self
+                .services
+                .active_content_scope_generation(&row.topic_id, &row.channel_id)
+                .await
+            else {
+                continue;
+            };
             let local = matches!(
                 best_effort_blob_cache_status(self.services.blob_service.as_ref(), hash).await,
                 BlobCacheStatus::Available | BlobCacheStatus::Pinned
@@ -351,6 +358,14 @@ impl AppService {
                 if let Some(text) =
                     fetch_projection_blob_text(self.services.blob_service.as_ref(), hash).await
                 {
+                    let _save_access = self.services.content_save_access.lock().await;
+                    if !self
+                        .services
+                        .content_scope_is_current(&row.topic_id, &row.channel_id, scope_generation)
+                        .await
+                    {
+                        continue;
+                    }
                     row.content = Some(text);
                     let stored = self
                         .services
@@ -391,14 +406,22 @@ impl AppService {
             let services = self.services.clone();
             let object_id = row.object_id.clone();
             let hash = hash.clone();
+            let topic_id = row.topic_id.clone();
+            let channel_id = row.channel_id.clone();
             let task = tokio::spawn(async move {
                 let _permit = permit;
                 let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
-                let Ok(Ok(fetch)) = tokio::time::timeout_at(
-                    deadline,
-                    services.blob_service.prepare_retry_fetch(&hash),
-                )
-                .await
+                let Some(Ok(Ok(fetch))) = services
+                    .until_content_invalid(
+                        &topic_id,
+                        &channel_id,
+                        scope_generation,
+                        tokio::time::timeout_at(
+                            deadline,
+                            services.blob_service.prepare_retry_fetch(&hash),
+                        ),
+                    )
+                    .await
                 else {
                     return;
                 };
@@ -408,16 +431,31 @@ impl AppService {
                 else {
                     return;
                 };
-                let Some(bytes) = tokio::time::timeout_at(deadline, fetch)
+                let Some(fetched) = services
+                    .until_content_invalid(
+                        &topic_id,
+                        &channel_id,
+                        scope_generation,
+                        tokio::time::timeout_at(deadline, fetch),
+                    )
                     .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
                 else {
+                    attempt.defer();
+                    return;
+                };
+                let Some(bytes) = fetched.ok().and_then(Result::ok).flatten() else {
                     attempt.fail();
                     return;
                 };
                 let text = String::from_utf8_lossy(&bytes).to_string();
+                let _save_access = services.content_save_access.lock().await;
+                if !services
+                    .content_scope_is_current(&topic_id, &channel_id, scope_generation)
+                    .await
+                {
+                    attempt.defer();
+                    return;
+                }
                 let stored = async {
                     let projection_store = services.projection_store.as_ref();
                     // 取得を待つ間に取り下げや更新が入った行は書き戻さない。
@@ -438,12 +476,14 @@ impl AppService {
                         PayloadRef::BlobText { hash: current_hash, .. } if *current_hash == hash
                     );
                     if current.content.is_none() && same_body {
+                        let stored = services.blob_service.put_blob(bytes, "text/plain").await?;
+                        anyhow::ensure!(stored.hash == hash, "recovered body hash changed");
                         current.content = Some(text);
                         projection_store.put_object_projection(current).await?;
+                        projection_store
+                            .mark_blob_status(&hash, BlobCacheStatus::Available)
+                            .await?;
                     }
-                    projection_store
-                        .mark_blob_status(&hash, BlobCacheStatus::Available)
-                        .await?;
                     Ok(())
                 }
                 .await;

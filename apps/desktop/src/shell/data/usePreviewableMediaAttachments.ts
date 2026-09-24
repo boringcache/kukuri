@@ -62,6 +62,7 @@ type UsePreviewableMediaAttachmentsArgs = {
 const EMPTY_ADVISORIES: TimelineContentAdvisoryIndex = {};
 const INACTIVE_LOOKUP: TimelineAdvisoryLookupState = { active: false, settled: {} };
 const EMPTY_POSTS: PostView[] = [];
+export type PreviewableMediaAttachment = AttachmentView & { source_object_id?: string };
 
 export function usePreviewableMediaAttachments({
   activeTimeline,
@@ -83,12 +84,12 @@ export function usePreviewableMediaAttachments({
   knownAuthorsByPubkey,
   notifications,
   adultContentEnabled,
-}: UsePreviewableMediaAttachmentsArgs): AttachmentView[] {
+}: UsePreviewableMediaAttachmentsArgs): PreviewableMediaAttachment[] {
   return useMemo(() => {
-    const attachments = new Map<string, AttachmentView>();
+    const attachments = new Map<string, PreviewableMediaAttachment>();
     const gatedHashes = new Set(gatedMediaHashes);
 
-    const tryAddAttachment = (attachment: AttachmentView | null) => {
+    const tryAddAttachment = (attachment: AttachmentView | null, sourceObjectId?: string) => {
       if (!attachment) {
         return;
       }
@@ -107,10 +108,12 @@ export function usePreviewableMediaAttachments({
         });
         return;
       }
+      if (attachments.get(hash)?.source_object_id && !sourceObjectId) return;
       attachments.set(hash, {
         ...attachment,
         hash,
         mime,
+        ...(sourceObjectId ? { source_object_id: sourceObjectId } : {}),
       });
     };
 
@@ -148,7 +151,7 @@ export function usePreviewableMediaAttachments({
           selectVideoPoster(post),
           selectVideoManifest(post),
         ]) {
-          tryAddAttachment(attachment);
+          tryAddAttachment(attachment, post.object_id);
         }
       }
       for (const reaction of post.reaction_summary ?? []) {
