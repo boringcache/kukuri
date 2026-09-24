@@ -1,4 +1,5 @@
 use super::*;
+use crate::buckets::{BucketReplica, BucketScope};
 use crate::remote_source::RemoteDocsSource;
 use kukuri_iroh_node::{DocReadQuery, DocReadResponse};
 
@@ -10,6 +11,25 @@ impl IrohDocsSync {
 
     pub fn remote_source(&self, peer: EndpointAddr) -> RemoteDocsSource {
         RemoteDocsSource::new(self.clone(), peer)
+    }
+
+    pub(crate) async fn public_bucket_readers_owned(
+        &self,
+        replica: &ReplicaId,
+    ) -> Result<Vec<Arc<dyn DocsSync>>> {
+        anyhow::ensure!(
+            matches!(
+                BucketReplica::parse(replica)?.scope(),
+                BucketScope::Topic { .. }
+            ),
+            "remote bucket reader requires a public topic"
+        );
+        Ok(self
+            .remote_read_candidates()
+            .await
+            .into_iter()
+            .map(|peer| Arc::new(self.remote_source(peer)) as Arc<dyn DocsSync>)
+            .collect())
     }
 
     pub(crate) async fn query_remote_docs(

@@ -2,6 +2,8 @@ use crate::service::*;
 #[path = "community_index_source_reader.rs"]
 mod reader;
 use reader::LocalSourceReader;
+use std::time::Duration;
+use tokio::time::{Instant, timeout_at};
 
 impl AppService {
     pub async fn resolve_community_index_posts(
@@ -19,6 +21,7 @@ impl AppService {
             (String, Option<String>),
             (String, TimelineScope, Vec<CommunityIndexPostResolveInput>),
         >::new();
+        let remote_deadline = Instant::now() + Duration::from_secs(30);
         for input in inputs {
             if !seen_keys.insert(input.key.clone()) {
                 continue;
@@ -69,26 +72,48 @@ impl AppService {
                     .ensure_scope_subscriptions(topic.as_str(), &scope)
                     .await
                     .is_ok();
-            if scope_ready {
+            if scope_ready && let Some(source) = source.as_deref() {
+                let topic_ref = topic.as_str();
+                let mut unverified = entries
+                    .iter()
+                    .map(|input| input.key.clone())
+                    .collect::<HashSet<_>>();
+                let requests = entries
+                    .iter()
+                    .map(|input| (input.key.clone(), input.object_id.clone()))
+                    .collect::<Vec<_>>();
+                let mut reads = futures_util::stream::iter(requests.into_iter().map(
+                    |(key, object_id)| async move {
+                        (
+                            key,
+                            self.resolve_public_index_source(topic_ref, source, &object_id)
+                                .await,
+                        )
+                    },
+                ))
+                .buffer_unordered(8);
+                while let Ok(Some((key, resolved))) =
+                    timeout_at(remote_deadline, reads.next()).await
+                {
+                    unverified.remove(&key);
+                    if resolved.is_err() {
+                        // A bad locator does not hide another result from the same bucket.
+                        failed_entries.insert(key);
+                    }
+                }
+                failed_entries.extend(unverified);
+            } else if scope_ready {
                 for input in &entries {
-                    let resolved = if let Some(source) = source.as_deref() {
-                        self.resolve_public_index_source(&topic, source, &input.object_id)
-                            .await
-                    } else {
-                        self.ensure_object_projection(
+                    if self
+                        .ensure_object_projection(
                             topic.as_str(),
                             &scope,
                             &EnvelopeId::from(input.object_id.clone()),
                             DocFetchPolicy::LocalOnly,
                         )
                         .await
-                    };
-                    if resolved.is_err() {
-                        if source.is_some() {
-                            // locatorは結果1件の手がかり。不正な1件で同じbucketの正常な結果を消さない。
-                            failed_entries.insert(input.key.clone());
-                            continue;
-                        }
+                        .is_err()
+                    {
                         scope_ready = false;
                         break;
                     }
@@ -263,22 +288,53 @@ impl AppService {
             .await?;
             return Ok(true);
         }
+        let replica = ReplicaId::new(source);
         let mut services = self.services.clone();
         services.docs_sync = Arc::new(LocalSourceReader {
             docs: self.services.docs_sync.clone(),
-            replica: ReplicaId::new(source),
+            replica: replica.clone(),
         });
-        Ok(hydrate_object_in_topic_with(
+        if hydrate_object_in_topic_with(
             &services,
             topic,
-            &ReplicaId::new(source),
+            &replica,
             &object_id,
             None,
             DocFetchPolicy::LocalOnly,
             BodyFetch::LocalOnly,
         )
         .await?
-            == ObjectHydration::Hydrated)
+            == ObjectHydration::Hydrated
+        {
+            return Ok(true);
+        }
+        if kukuri_docs_sync::BucketReplica::parse(&replica).is_err() {
+            return Ok(false);
+        }
+        for reader in self
+            .services
+            .docs_sync
+            .public_bucket_readers(&replica)
+            .await?
+        {
+            services.docs_sync = reader;
+            match hydrate_object_in_topic_with(
+                &services,
+                topic,
+                &replica,
+                &object_id,
+                None,
+                DocFetchPolicy::LocalThenRemote,
+                BodyFetch::LocalOnly,
+            )
+            .await
+            {
+                Ok(ObjectHydration::Hydrated) => return Ok(true),
+                Ok(ObjectHydration::Missing | ObjectHydration::Invalid) => {}
+                Err(error) => warn!(%error, "public bucket provider read failed"),
+            }
+        }
+        Ok(false)
     }
 
     async fn refresh_local_index_reference_withdrawals(

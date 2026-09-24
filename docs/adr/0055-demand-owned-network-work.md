@@ -449,6 +449,9 @@ serviceはretry台帳の作成時に割り当てる非再利用のプロセス�
 queueに保持する診断ラベルはsubject128byte/error4,096byte、hash/flight keyは固定hash等の短い識別子だけ。
 本文・添付をmetadataとしてqueueへコピーしない。通常取得のworkerには既存のper-service成否記録callbackを持たせる。
 
+公開bucketの明示的なQUIC key/exact読取りは、1要求ごとにDocs workとして同じ64scope・8実行枠と
+30秒deadlineへ登録する。clientのCN検索結果では候補最大4peer、8対象並列、batch全体30秒に制限し、
+期限/取消後のQUIC要求を継続しない。署名・scope・取り下げはapp-apiの既存gateで検証する。
 native docsの自動downloader、gossip、peer台帳、意味上のscope世代/需要理由の全caller接続は未完了。
 このadapterを通る取得の合計上限を、SDK内部を含む全通信の上限達成と読み替えない。
 

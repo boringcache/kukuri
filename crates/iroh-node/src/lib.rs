@@ -27,7 +27,27 @@ impl IrohDocsNode {
         secret: &iroh_docs::NamespaceSecret,
         query: DocReadQuery,
     ) -> anyhow::Result<DocReadResponse> {
-        page_read::fetch(self.endpoint(), peer, replica.as_str(), secret, query).await
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let lease = self
+            .network_work
+            .acquire_docs(
+                *blake3::hash(replica.as_str().as_bytes()).as_bytes(),
+                deadline,
+            )
+            .await?;
+        let result = tokio::select! {
+            biased;
+            _ = lease.cancelled() => anyhow::bail!("docs read was cancelled"),
+            result = tokio::time::timeout_at(
+                deadline,
+                page_read::fetch(self.endpoint(), peer, replica.as_str(), secret, query),
+            ) => result.map_err(|_| anyhow::anyhow!("docs read deadline exceeded"))?,
+        };
+        if lease.finish() {
+            result
+        } else {
+            anyhow::bail!("docs read scope expired")
+        }
     }
 
     pub async fn read_local_blob(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {

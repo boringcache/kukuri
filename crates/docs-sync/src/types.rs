@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -247,6 +248,11 @@ pub trait DocsSync: Send + Sync {
         Ok(())
     }
     async fn assist_peer_ids(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// A fresh, bounded read lease per peer for one public bucket object.
+    /// Implementations without the public QUIC reader return no candidates.
+    async fn public_bucket_readers(&self, _replica: &ReplicaId) -> Result<Vec<Arc<dyn DocsSync>>> {
         Ok(Vec::new())
     }
 }

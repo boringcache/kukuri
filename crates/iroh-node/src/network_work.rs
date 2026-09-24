@@ -91,6 +91,7 @@ impl NetworkWorkRuntime {
         deadline: Instant,
     ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
         self.acquire_blob_work(
+            WorkProtocol::Blob,
             hash,
             u64::MAX,
             WorkMode::Display,
@@ -109,6 +110,7 @@ impl NetworkWorkRuntime {
         deadline: Instant,
     ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
         self.acquire_blob_work(
+            WorkProtocol::Blob,
             hash,
             max_bytes,
             WorkMode::Fetch,
@@ -118,8 +120,25 @@ impl NetworkWorkRuntime {
         .await
     }
 
+    pub(crate) async fn acquire_docs(
+        self: &Arc<Self>,
+        replica_hash: [u8; 32],
+        deadline: Instant,
+    ) -> Result<DisplayWorkLease, NetworkAdmissionError> {
+        self.acquire_blob_work(
+            WorkProtocol::Docs,
+            replica_hash,
+            1024 * 1024,
+            WorkMode::Fetch,
+            WorkLane::Background,
+            deadline,
+        )
+        .await
+    }
+
     async fn acquire_blob_work(
         self: &Arc<Self>,
+        protocol: WorkProtocol,
         hash: [u8; 32],
         byte_limit: u64,
         mode: WorkMode,
@@ -142,7 +161,7 @@ impl NetworkWorkRuntime {
             // fetches never join a normal or another scope's stored fetch.
             let key = WorkKey {
                 scope,
-                protocol: WorkProtocol::Blob,
+                protocol,
                 object: hash,
                 mode,
                 persistence: WorkPersistence::Ephemeral,

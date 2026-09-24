@@ -95,6 +95,10 @@ iroh-docsの受信前filterと同一視しない。
 署名済みrecordを既存gateへ渡す。readerはnamespaceをimport/open/start_syncせず、1対象の読取りだけを
 保持する。legacy writerが使う旧namespace同期はwriter切替まで残すが、新形式定常経路へ持ち越さない。
 private/authorのreaderと保護cache/移行は未完了であり、この公開経路だけをR5全体の達成としない。
+clientのCN検索結果についても、検証した公開bucket locatorの対象投稿だけを既存peerから読み、
+署名・scope・取り下げを既存の反映経路で確認する。検索metadataは先に返し、投稿詳細は最大100件を
+8並列・batch全体30秒以内で解決する。読めない対象は未解決のままにし、取得を理由にclientの
+namespaceをimport/open/syncしない。通常timeline/thread、private/author、writer切替、保存回収は残る。
 
 - `LocalOnly`の読み取りはnamespaceをネットワークへ参加させない。ローカルopenとsync開始を別操作にする。
   secretの登録だけでもsyncを開始しない。remote要求はaudience/同意/成人向け取得guardを通してからownerへ渡す。
