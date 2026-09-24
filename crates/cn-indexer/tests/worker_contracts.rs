@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use kukuri_cn_core::TestDatabase;
 use kukuri_cn_core::{
     ChannelSecretCipher, IndexScopeKind, MemoryIndexEntryStore, add_supported_topic,
-    connect_postgres, initialize_database, register_channel_secret, remove_channel_secret,
-    remove_supported_topic,
+    connect_postgres, initialize_database, mark_index_demand, register_channel_secret,
+    remove_channel_secret, remove_supported_topic,
 };
 use kukuri_cn_indexer::ingest::IngestPipeline;
 use kukuri_cn_indexer::participant::{IndexerParticipant, ScopeReplica};
@@ -246,6 +246,13 @@ async fn worker_ingests_on_startup_and_reacts_to_replica_events() -> Result<()> 
     assert!(state.snapshot().worker_running);
     assert!(state.snapshot().last_sync_at.is_some());
     assert_eq!(state.snapshot().opened_scopes, 1);
+    let initial_demand: bool = sqlx::query_scalar(
+        "SELECT last_index_demand_at IS NOT NULL FROM cn_index.supported_topics
+         WHERE kind = 'public_topic' AND id = 'rust'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!initial_demand, "periodic reuse is not new-content demand");
 
     // レプリカの変更通知で 2 件目が取り込まれる（定期見直しはまだ先）。
     let second = persist_post(docs.as_ref(), &replica, &topic, "event driven post").await;
@@ -261,6 +268,19 @@ async fn worker_ingests_on_startup_and_reacts_to_replica_events() -> Result<()> 
     })
     .await;
     assert!(entries.contains(IndexScopeKind::PublicTopic, "rust", second.as_str()));
+    wait_until("verified new-content demand", || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT last_index_demand_at IS NOT NULL FROM cn_index.supported_topics
+                 WHERE kind = 'public_topic' AND id = 'rust'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false)
+        }
+    })
+    .await;
 
     handle.shutdown().await;
     assert!(!state.snapshot().worker_running);
@@ -923,3 +943,6 @@ async fn private_periodic_and_unknown_key_reads_stop_at_the_current_window() -> 
     handle.shutdown().await;
     Ok(())
 }
+
+#[path = "worker_contracts/scope_admission.rs"]
+mod scope_admission;

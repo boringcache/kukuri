@@ -204,14 +204,15 @@ pub async fn list_supported_topics(pool: &PgPool) -> Result<Vec<SupportedTopic>>
     rows.iter().map(supported_topic_from_row).collect()
 }
 
-/// Authenticated public search/discovery marks a scope as recently needed at most once a minute.
-pub async fn mark_public_index_demand(pool: &PgPool, topic_id: &str) -> Result<()> {
+/// Authorized scoped search/discovery marks demand at most once a minute.
+pub async fn mark_index_demand(pool: &PgPool, kind: IndexScopeKind, scope_id: &str) -> Result<()> {
     sqlx::query(
         "UPDATE cn_index.supported_topics SET last_index_demand_at = NOW()
-         WHERE kind = 'public_topic' AND id = $1
+         WHERE kind = $1 AND id = $2
            AND (last_index_demand_at IS NULL OR last_index_demand_at < NOW() - INTERVAL '1 minute')",
     )
-    .bind(topic_id)
+    .bind(kind.as_str())
+    .bind(scope_id)
     .execute(pool)
     .await?;
     Ok(())

@@ -100,6 +100,8 @@ private/authorのreaderと保護cache/移行は未完了であり、この公開
 media manifestの遅着を契機に過去全件を読み直さず、窓外の既存索引を消さない。
 private旧replicaの定常passと対象不明通知も、登録済みcapabilityのgateを維持したまま
 同じ100 ID窓へ限定する。失効時のscope de-indexと、手動の旧全scope取込は別経路として残る。
+旧workerのopen/購読は最大32物理replicaに限り、新公開readerの最大32scopeと合わせる。
+最近の認証済み利用・検証済み新着を優先し、残りは永続cursorで巡回する。選外の既存索引は保持する。
 clientのCN検索結果についても、検証した公開bucket locatorの対象投稿だけを既存peerから読み、
 署名・scope・取り下げを既存の反映経路で確認する。検索metadataは先に返し、投稿詳細は最大100件を
 8並列・batch全体30秒以内で解決する。読めない対象は未解決のままにし、取得を理由にclientの

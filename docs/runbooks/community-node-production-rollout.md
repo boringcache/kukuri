@@ -502,7 +502,9 @@ readinessの鮮度やfail-closed判定を緩めない。remote blob取得は1件
 4. 対象通知の前後で `scanned` / `last_event_ingest_duration_ms` と対象期間のlogを確認する。既知IDは対象別、対象不明keyは現在索引窓として処理され、今回選んだ投稿の結果へ到達したかを区別する。全prefix読取り0・100 ID上限の判定は変更PRのcontractで行い、rollout時のstatus値だけから全履歴非走査を推定しない。
 5. peer更新を変更した場合は、対象peerの登録後の本文/media取得を同じ投稿で確認する。対象batchの失敗時はその原因を記録し、全peer・全scopeの強制再適用で成功扱いにしない。
 
-手動全scope取込、全supported scopeの列挙/open、旧namespace同期は残る。この有限な運用確認の成功を、これらの総件数依存や保持量・失敗回数への依存の解消と読み替えない。
+旧workerのopen/購読は最大32物理replica、新公開readerの受付は最大32scopeであり、`opened_scopes`は
+全support件数ではなくその時点の旧worker作業集合を表す。手動全scope取込、全supported/全indexed scopeの
+DB列挙、旧namespace同期は残る。この有限な運用確認の成功を、残る総件数依存や保持量・失敗回数への依存の解消と読み替えない。
 
 ### 5.7 content advisory 付き索引と trust 不変の確認（#1054）
 

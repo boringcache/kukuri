@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use kukuri_cn_core::{
     ApiError, ApiResult, IndexScopeKind, filter_relation_visible, get_channel_secret,
     insert_indexing_request, is_topic_supported, list_indexing_requests_for_requester,
-    mark_public_index_demand, register_channel_secret, require_bearer_identity, require_consents,
+    mark_index_demand, register_channel_secret, require_bearer_identity, require_consents,
 };
 use kukuri_cn_indexer::IndexQuery;
 use kukuri_cn_protocol::{
@@ -442,10 +442,8 @@ pub(crate) async fn index_search(
             if scope_kind == IndexScopeKind::PrivateChannel {
                 require_channel_membership(&state, &headers, scope_id.as_str()).await?;
             }
-            if scope_kind == IndexScopeKind::PublicTopic
-                && let Err(error) = mark_public_index_demand(&state.pool, &scope_id).await
-            {
-                tracing::warn!(scope_id = %scope_id, %error, "failed to mark public index demand");
+            if let Err(error) = mark_index_demand(&state.pool, scope_kind, &scope_id).await {
+                tracing::warn!(scope_id = %scope_id, %error, "failed to mark index demand");
             }
             index_query
                 .search_scope(scope_kind, scope_id.as_str(), query, limit)
@@ -487,10 +485,10 @@ pub(crate) async fn index_discovery(
     if let Some((IndexScopeKind::PrivateChannel, scope_id)) = scope.as_ref() {
         require_channel_membership(&state, &headers, scope_id.as_str()).await?;
     }
-    if let Some((IndexScopeKind::PublicTopic, scope_id)) = scope.as_ref()
-        && let Err(error) = mark_public_index_demand(&state.pool, scope_id).await
+    if let Some((kind, scope_id)) = scope.as_ref()
+        && let Err(error) = mark_index_demand(&state.pool, *kind, scope_id).await
     {
-        tracing::warn!(scope_id = %scope_id, %error, "failed to mark public index demand");
+        tracing::warn!(scope_id = %scope_id, %error, "failed to mark index demand");
     }
     let entries = index_query
         .list_recent(scope.as_ref().map(|(kind, id)| (*kind, id.as_str())), limit)

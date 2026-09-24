@@ -178,8 +178,7 @@ impl PublicBucketReader {
 mod tests {
     use super::*;
     use kukuri_cn_core::{
-        TestDatabase, add_supported_topic, connect_postgres, initialize_database,
-        mark_public_index_demand,
+        TestDatabase, add_supported_topic, connect_postgres, initialize_database, mark_index_demand,
     };
 
     #[tokio::test]
@@ -202,7 +201,7 @@ mod tests {
             )
             .await?;
         }
-        mark_public_index_demand(&pool, "topic-39").await?;
+        mark_index_demand(&pool, IndexScopeKind::PublicTopic, "topic-39").await?;
         let mut fair = HashSet::new();
         for _ in 0..3 {
             let (selected, cursor) = PublicBucketReader::selected_topics(&pool).await?;
