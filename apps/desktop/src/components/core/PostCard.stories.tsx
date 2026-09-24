@@ -64,7 +64,7 @@ function createView(overrides?: Partial<PostCardView>): PostCardView {
     authorLabel: 'Alice',
     authorPicture: null,
     relationshipLabel: null,
-    audienceChipLabel: 'Public',
+    audience: { kind: 'public' },
     threadTargetId: 'post-1',
     media: {
       objectId: 'post-1',
@@ -446,6 +446,37 @@ export const MediaFetchRetrying: Story = {
       'aria-disabled',
       'true'
     );
+  },
+};
+
+// #1345: フォロー関係・公開範囲の icon 状態。mutual / friend of friend と公開は他の story が持つ。
+export const FollowingInNamedPrivateChannel: Story = {
+  args: {
+    view: createView({
+      relationshipLabel: 'following',
+      audience: { kind: 'private', channelLabel: 'core contributors' },
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('img', { name: 'following' })).toBeInTheDocument();
+    await expect(
+      canvas.getByRole('img', { name: 'Private: core contributors' })
+    ).toBeInTheDocument();
+  },
+};
+
+export const FollowerInUnnamedPrivateChannel: Story = {
+  args: {
+    view: createView({
+      relationshipLabel: 'follows you',
+      audience: { kind: 'private', channelLabel: null },
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('img', { name: 'follower' })).toBeInTheDocument();
+    await expect(canvas.getByRole('img', { name: 'Private' })).toBeInTheDocument();
   },
 };
 

@@ -729,14 +729,10 @@
   justify-content: flex-end;
 }
 
-.post-meta-chip {
+.post-meta-icon {
   display: inline-flex;
   align-items: center;
-  border-radius: var(--radius-pill);
-  padding: var(--space-2xs) var(--space-xs);
-  color: var(--accent-foreground);
-  background: var(--surface-accent-soft);
-  line-height: 1.1;
+  color: var(--muted-foreground);
 }
 
 .post-repost-attribution {

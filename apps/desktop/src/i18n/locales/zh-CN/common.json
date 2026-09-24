@@ -79,7 +79,9 @@
   },
   "audience": {
     "posting": "正在发布到 {{audience}}",
+    "private": "私密",
     "privateChannel": "私密频道",
+    "privateNamed": "私密：{{channel}}",
     "public": "公开",
     "viewing": "正在查看 {{audience}}"
   },
@@ -242,11 +244,14 @@
     "blockedFollowReason": "已屏蔽的用户无法关注。请先取消屏蔽。",
     "blockedMessageReason": "已屏蔽的用户无法发送消息。请先取消屏蔽。",
     "blocking": "已屏蔽",
+    "follow": "关注",
+    "follower": "粉丝",
     "followsYou": "对方关注了你",
     "following": "已关注",
     "friendOfFriend": "通过你关注的用户建立联系",
     "mutual": "互相关注",
-    "via": "经由"
+    "via": "经由",
+    "viaFollow": "通过你关注的用户建立联系"
   },
   "states": {
     "accepted": "已接受",

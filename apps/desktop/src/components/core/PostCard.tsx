@@ -54,7 +54,7 @@ import {
   type ReportSubmitInput,
 } from './ReportRoutingDialog';
 import type { ReportRoutingSubject } from './ReportRoutingDialog';
-import { RelationshipBadge } from './RelationshipBadge';
+import { PostMetaIcons } from './PostMetaIcons';
 import { SmartReferenceText } from './SmartReferenceText';
 import { type ContentAdvisoryView, type PostCardView } from './types';
 
@@ -201,7 +201,6 @@ export function PostCard({
   const localState = post.local_state ?? null;
   const isWithdrawn = post.withdrawal != null;
   const interactionDisabled = localState !== null || isWithdrawn;
-  const audienceChipLabel = view.audienceChipLabel ?? post.audience_label;
   const publishedTopicId = post.published_topic_id?.trim() || post.origin_topic_id?.trim() || null;
   const canonicalPostTopicId = view.threadTopicId?.trim() || publishedTopicId;
   const canonicalPostLink = canonicalPostTopicId
@@ -592,8 +591,7 @@ export function PostCard({
           onClick={() => onOpenAuthor(primaryAuthor.pubkey)}
         />
         <div className='post-meta-trailing'>
-          <RelationshipBadge label={view.relationshipLabel} />
-          <span className='post-meta-chip'>{audienceChipLabel}</span>
+          <PostMetaIcons relationshipLabel={view.relationshipLabel} audience={view.audience} />
           <time className='post-timestamp' dateTime={new Date(post.created_at * 1000).toISOString()}>{formatPostDateTime(post.created_at * 1000)}</time>
         </div>
       </div>

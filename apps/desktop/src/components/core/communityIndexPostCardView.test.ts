@@ -213,7 +213,7 @@ describe('communityIndexPostCardView', () => {
     });
     expect(view.authorLabel).toBe('Alice');
     expect(view.authorPicture).toBe('blob:avatar-hash');
-    expect(view.audienceChipLabel).toBe('Public');
+    expect(view.audience).toEqual({ kind: 'public' });
     expect(view.threadTopicId).toBe(entry.scope_id);
     expect(view.canReply).toBe(true);
     expect(view.canRepost).toBe(true);
@@ -411,7 +411,7 @@ describe('communityIndexPostCardView', () => {
       }
     );
 
-    expect(view.audienceChipLabel).toBe('Private channel');
+    expect(view.audience).toEqual({ kind: 'private', channelLabel: null });
     expect(view.threadTopicId).toBeNull();
     expect(view.post.channel_id).toBeNull();
     expect(JSON.stringify(view)).not.toContain('private-channel-secret-id');

@@ -79,7 +79,9 @@
   },
   "audience": {
     "posting": "Posting {{audience}}",
+    "private": "Private",
     "privateChannel": "Private channel",
+    "privateNamed": "Private: {{channel}}",
     "public": "Public",
     "viewing": "Viewing {{audience}}"
   },
@@ -242,11 +244,14 @@
     "blockedFollowReason": "You can't follow a user you've blocked. Unblock them first.",
     "blockedMessageReason": "You can't message a user you've blocked. Unblock them first.",
     "blocking": "Blocked",
+    "follow": "following",
+    "follower": "follower",
     "followsYou": "follows you",
     "following": "following",
     "friendOfFriend": "followed by someone you follow",
     "mutual": "mutual follow",
-    "via": "via"
+    "via": "via",
+    "viaFollow": "connected via someone you follow"
   },
   "states": {
     "accepted": "accepted",

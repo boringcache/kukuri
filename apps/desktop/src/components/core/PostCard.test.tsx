@@ -28,7 +28,6 @@ test('post card hides the object kind and shows a placeholder avatar when no pic
   );
 
   expect(screen.queryByText(/^post$/i)).not.toBeInTheDocument();
-  expect(screen.getByText('core contributors')).toHaveClass('post-meta-chip');
   expect(screen.getByTestId('post-1-author-avatar')).toHaveTextContent('A');
 });
 

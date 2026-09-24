@@ -275,7 +275,7 @@ test('reply banner keeps the target summary and a compact clear icon action', ()
         authorLabel: 'Alice',
         authorPicture: null,
         relationshipLabel: null,
-        audienceChipLabel: 'Imported',
+        audience: { kind: 'private', channelLabel: 'Imported' },
         threadTargetId: 'post-1',
         media: {
           objectId: 'post-1',

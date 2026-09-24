@@ -41,6 +41,7 @@ function node(
     context: 'thread',
     authorLabel: objectId,
     relationshipLabel: null,
+    audience: { kind: 'public' },
     threadTargetId: 'root',
     media: {
       objectId,

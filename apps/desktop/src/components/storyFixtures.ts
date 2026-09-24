@@ -112,8 +112,8 @@ export function createStoryTimelinePosts(): PostCardView[] {
       context: 'timeline',
       authorLabel: 'bob',
       authorPicture: null,
-      relationshipLabel: i18n.t('common:relationships.mutual'),
-      audienceChipLabel: i18n.t('common:audience.public'),
+      relationshipLabel: 'mutual',
+      audience: { kind: 'public' },
       threadTargetId: 'timeline-post-1',
       provenance: STORY_INDEX_PROVENANCE,
       media: {
@@ -157,8 +157,8 @@ export function createStoryTimelinePosts(): PostCardView[] {
       context: 'timeline',
       authorLabel: 'Carol',
       authorPicture: null,
-      relationshipLabel: i18n.t('common:relationships.friendOfFriend'),
-      audienceChipLabel: i18n.t('common:audience.public'),
+      relationshipLabel: 'friend of friend',
+      audience: { kind: 'public' },
       threadTargetId: 'timeline-post-2',
       media: {
         objectId: 'timeline-post-2',
@@ -214,8 +214,8 @@ export function createStoryThreadPosts(): PostCardView[] {
       suppressReplyPreview: true,
       authorLabel: 'dan',
       authorPicture: null,
-      relationshipLabel: i18n.t('common:relationships.followsYou'),
-      audienceChipLabel: i18n.t('common:audience.public'),
+      relationshipLabel: 'follows you',
+      audience: { kind: 'public' },
       threadTargetId: 'timeline-post-1',
       media: {
         objectId: 'thread-reply-1',
@@ -259,8 +259,8 @@ export function createStoryThreadPosts(): PostCardView[] {
       suppressReplyPreview: true,
       authorLabel: 'bob',
       authorPicture: null,
-      relationshipLabel: i18n.t('common:relationships.mutual'),
-      audienceChipLabel: i18n.t('common:audience.public'),
+      relationshipLabel: 'mutual',
+      audience: { kind: 'public' },
       threadTargetId: 'timeline-post-1',
       media: {
         objectId: 'thread-reply-2',
@@ -305,7 +305,7 @@ export function createStoryThreadPosts(): PostCardView[] {
       authorLabel: 'erin',
       authorPicture: null,
       relationshipLabel: null,
-      audienceChipLabel: i18n.t('common:audience.public'),
+      audience: { kind: 'public' },
       threadTargetId: 'timeline-post-1',
       media: {
         objectId: 'thread-reply-3',
