@@ -50,18 +50,12 @@ pub(crate) async fn hydrate_object_projection_from_post(
         .await?
         .is_some()
     {
-        let _save_access = services.content_save_access.lock().await;
-        if services
-            .content_scope_is_current(topic, channel, scope_generation)
-            .await
-        {
-            projection_store
-                .put_object_projection(projection_row_from_post(
-                    &post.withdrawn(),
-                    Some(String::new()),
-                ))
-                .await?;
-        }
+        projection_store
+            .put_object_projection(projection_row_from_post(
+                &post.withdrawn(),
+                Some(String::new()),
+            ))
+            .await?;
         return Ok(());
     }
     let mut fetched_body = None;
@@ -92,20 +86,29 @@ pub(crate) async fn hydrate_object_projection_from_post(
         let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
         attachment_statuses.push((&attachment.hash, status));
     }
-    let _save_access = services.content_save_access.lock().await;
-    if !services
-        .content_scope_is_current(topic, channel, scope_generation)
-        .await
+    let remote_bytes = fetched_body
+        .as_ref()
+        .is_some_and(|body: &super::hydration_limits::BoundedBody| body.remote_bytes.is_some());
+    let _save_access = if remote_bytes {
+        Some(services.content_save_access.lock().await)
+    } else {
+        None
+    };
+    if remote_bytes
+        && !services
+            .content_scope_is_current(topic, channel, scope_generation)
+            .await
     {
         if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
             attempt.defer();
         }
         return Ok(());
     }
-    if projection_store
-        .get_post_withdrawal(&header.object_id)
-        .await?
-        .is_some()
+    if remote_bytes
+        && projection_store
+            .get_post_withdrawal(&header.object_id)
+            .await?
+            .is_some()
     {
         projection_store
             .put_object_projection(projection_row_from_post(
@@ -240,16 +243,23 @@ pub(crate) async fn hydrate_object_in_topic_with(
         policy,
     )
     .await?;
-    let channel = post
-        .header()
-        .channel_id
-        .as_ref()
-        .map_or(PUBLIC_CHANNEL_ID, ChannelId::as_str);
-    let Some(scope_generation) = services
-        .active_content_scope_generation(topic_id, channel)
-        .await
-    else {
-        return Ok(ObjectHydration::Missing);
+    let scope_generation = if body_fetch == BodyFetch::Bounded
+        && matches!(&post.header().payload_ref, PayloadRef::BlobText { .. })
+    {
+        let channel = post
+            .header()
+            .channel_id
+            .as_ref()
+            .map_or(PUBLIC_CHANNEL_ID, ChannelId::as_str);
+        let Some(generation) = services
+            .active_content_scope_generation(topic_id, channel)
+            .await
+        else {
+            return Ok(ObjectHydration::Missing);
+        };
+        generation
+    } else {
+        0
     };
     hydrate_object_projection_from_post(services, post, body_fetch, scope_generation).await?;
     Ok(ObjectHydration::Hydrated)
