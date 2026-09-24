@@ -138,6 +138,11 @@ export type ContentAdvisoryView = {
   subjectId: string;
 };
 
+// private channel の名前が分からなければ channelLabel は null(#1345)。
+export type PostAudienceView =
+  | { kind: 'public' }
+  | { kind: 'private'; channelLabel: string | null };
+
 export type PostCardView = {
   post: PostView;
   // index previewの表示用PostViewと、操作対象の正本PostViewを分離する。
@@ -146,7 +151,7 @@ export type PostCardView = {
   authorLabel: string;
   authorPicture?: string | null;
   relationshipLabel: string | null;
-  audienceChipLabel?: string | null;
+  audience: PostAudienceView;
   threadTargetId: string;
   threadTopicId?: string | null;
   canOpenThread?: boolean;

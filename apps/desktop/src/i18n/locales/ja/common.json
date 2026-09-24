@@ -79,7 +79,9 @@
   },
   "audience": {
     "posting": "{{audience}} に投稿中",
+    "private": "プライベート",
     "privateChannel": "プライベートチャンネル",
+    "privateNamed": "プライベート: {{channel}}",
     "public": "公開",
     "viewing": "{{audience}} を表示中"
   },
@@ -242,11 +244,14 @@
     "blockedFollowReason": "ブロック中はフォローできません。先にブロックを解除してください。",
     "blockedMessageReason": "ブロック中はメッセージを送れません。先にブロックを解除してください。",
     "blocking": "ブロック中",
+    "follow": "フォロー",
+    "follower": "フォロワー",
     "followsYou": "相手があなたをフォロー",
     "following": "フォロー中",
     "friendOfFriend": "フォロー中のユーザーを介したつながり",
     "mutual": "相互フォロー",
-    "via": "経由"
+    "via": "経由",
+    "viaFollow": "フォローを介したつながり"
   },
   "states": {
     "accepted": "受諾済み",

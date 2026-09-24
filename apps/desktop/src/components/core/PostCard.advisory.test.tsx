@@ -86,7 +86,10 @@ test.each([
   expect(screen.queryByTestId(`post-adult-gated-${OBJECT_ID}`)).not.toBeInTheDocument();
   expect(screen.queryByTestId(`post-advisory-details-trigger-${OBJECT_ID}`)).not.toBeInTheDocument();
   expect(screen.queryByText('hello')).not.toBeInTheDocument();
-  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  // 投稿カードの公開範囲 icon(#1345)以外に、gated media の画像を描画しない。
+  expect(
+    screen.queryAllByRole('img').filter((element) => !element.classList.contains('post-meta-icon'))
+  ).toHaveLength(0);
 
   rerender(
     <PostCard

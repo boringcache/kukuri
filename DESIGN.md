@@ -79,6 +79,8 @@ Columnの外底面とCanvasの横スクロールバーの間には`--space-sm`�
 
 投稿カード右上には端末timezoneの年月日と時分秒を常時表示する。日付順は選択localeに従い、日本語は年月日順とする。狭幅では折り返しを許容し、投稿者・公開範囲・日時を重ねたり切り捨てたりしない。
 
+投稿カード右上のフォロー関係と公開範囲は文字chipではなくiconで示し、意味はローカライズ済みのaccessible nameとhover tooltipで伝える。相互フォローは`users-round`、フォロー・フォロワーは`user-round-arrow-left`、フォローを介したつながりは`user-round-group`、公開は`book-open`、プライベートチャンネルは`book-lock`とし、tooltipはチャンネル名が分かれば「プライベート: <チャンネル名>」とする。状態表示であり操作ではないためtab移動の対象にしない（[#1345](https://github.com/kukuri-app/kukuri/issues/1345)）。
+
 投稿・DMの画像／動画と画像viewerは、自動取得が固定回数で失敗したら、その部分だけを「取得に失敗しました」と再取得のicon buttonへ置き換える。投稿本文、scroll位置、focus、表示制限による代替表示は変えず、表示制限中は失敗表示も再取得操作も出さない。icon buttonはaccessible nameを持ち、再取得中は同じ位置に残したままbusyを示して重複操作を受け付けない。reduced motionではiconの回転を止め、状態名で伝える。avatar・カスタムリアクションは既存のfallbackを使い、再取得操作を置かない。回数とリセット条件は`docs/architecture/blob-cache.md`に従う。
 
 投稿本文と返信先previewの本文blobも、取得できないときは該当部分を同じ失敗表示と再読み込みicon buttonへ置き換える。投稿カードの操作群の一番右には「投稿を再読み込み」icon buttonを常時置き、そのカードで欠けている本文・直前の返信先本文・添付だけを1回再試行する。投稿単位の操作でtopic全体を同期せず、取得済み内容、scroll、focus、draftを保持する。再読み込み中は同じ位置でbusyを示し、対象カードの操作を重複実行しない。

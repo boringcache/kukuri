@@ -34,7 +34,7 @@ export function createView(overrides?: Partial<PostCardView>): PostCardView {
     authorLabel: 'Alice',
     authorPicture: null,
     relationshipLabel: null,
-    audienceChipLabel: 'core contributors',
+    audience: { kind: 'public' },
     threadTargetId: 'post-1',
     media: {
       objectId: 'post-1',

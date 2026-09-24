@@ -22,7 +22,6 @@ import {
   authorDisplayLabel,
   canCreateRepostFromPost,
   isQuoteRepost,
-  localizeAudienceLabel,
   publishedTopicIdForPost,
   resolveProfilePictureSrc,
   strongestRelationshipLabel,
@@ -273,10 +272,14 @@ export function useTimelineViewModels({
         ),
         authorPicture,
         relationshipLabel: strongestRelationshipLabel(post),
-        audienceChipLabel: post.channel_id
-          ? joinedChannels.find((channel) => channel.channel_id === post.channel_id)?.label ??
-            localizeAudienceLabel(post.audience_label)
-          : localizeAudienceLabel(post.audience_label),
+        audience: post.channel_id
+          ? {
+              kind: 'private',
+              channelLabel:
+                joinedChannels.find((channel) => channel.channel_id === post.channel_id)?.label ??
+                (post.audience_label === 'Private channel' ? null : post.audience_label),
+            }
+          : { kind: 'public' },
         threadTargetId,
         threadTopicId,
         canReply: post.is_threadable ?? (post.object_kind !== 'repost' || isQuoteRepost(post)),

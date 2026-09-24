@@ -186,7 +186,10 @@ export function communityIndexPostCardView(
         ? options.mediaObjectUrls[resolvedPost.author_picture_asset.hash]
         : null,
     relationshipLabel: null,
-    audienceChipLabel: audience,
+    audience:
+      entry.scope_kind === 'private_channel'
+        ? { kind: 'private', channelLabel: null }
+        : { kind: 'public' },
     threadTargetId: resolvedPost?.root_id ?? entry.object_id,
     threadTopicId: capabilities.open_thread ? topicId : null,
     canOpenThread: capabilities.open_thread,
