@@ -202,11 +202,19 @@ impl ReferenceGuard<'_> {
                 .await
                 .map_err(transient)?;
             for record in withdrawals {
-                if let Ok(withdrawal) = serde_json::from_slice::<KukuriEnvelope>(&record.value) {
-                    ensure!(
-                        verify_post_withdrawal(&withdrawal, &envelope).is_err(),
-                        "post was withdrawn during scan"
-                    );
+                if let Ok(withdrawal) = serde_json::from_slice::<KukuriEnvelope>(&record.value)
+                    && verify_post_withdrawal(&withdrawal, &envelope).is_ok()
+                {
+                    self.pipeline
+                        .entries
+                        .record_verified_withdrawal(
+                            self.scope_kind,
+                            self.scope_id,
+                            &self.object.object_id,
+                        )
+                        .await
+                        .map_err(transient)?;
+                    anyhow::bail!("post was withdrawn during scan");
                 }
             }
         }

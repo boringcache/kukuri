@@ -6,12 +6,20 @@
 //! - 変更通知の key に対応する object だけを取り込み、特定できない key は scope 全体へ倒す。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
-use kukuri_cn_core::IndexScopeKind;
+use async_trait::async_trait;
+use kukuri_cn_core::{IndexEntryStore, IndexScopeKind};
 use kukuri_cn_indexer::ingest::IngestPipeline;
 use kukuri_cn_indexer::projection::{IndexProjection, MemoryIndexProjection};
-use kukuri_cn_safety::{MockSafetyProvider, ModerationEventSigner, SafetyPolicy};
+use kukuri_cn_safety::provider::{
+    ProviderScanRequest, ProviderScanResult, SafetyProvider, ScanError,
+};
+use kukuri_cn_safety::{
+    MockSafetyProvider, ModerationEventSigner, SafetyPolicy, SafetyProviderCapability,
+};
 use kukuri_cn_safety_runtime::clock::SystemScanClock;
 use kukuri_cn_safety_runtime::id::UuidEventIdGenerator;
 use kukuri_cn_safety_runtime::{
@@ -20,9 +28,34 @@ use kukuri_cn_safety_runtime::{
 };
 use kukuri_core::TopicId;
 use kukuri_docs_sync::{DocOp, DocsSync, MemoryDocsSync, stable_key, topic_replica_id};
+use tokio::sync::Notify;
 
 mod ingest_support;
 use ingest_support::*;
+
+struct PausingProvider {
+    inner: MockSafetyProvider,
+    pause_once: AtomicBool,
+    entered: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[async_trait]
+impl SafetyProvider for PausingProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> &[SafetyProviderCapability] {
+        self.inner.capabilities()
+    }
+    async fn scan(&self, request: &ProviderScanRequest) -> Result<ProviderScanResult, ScanError> {
+        if self.pause_once.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        }
+        self.inner.scan(request).await
+    }
+}
 
 /// provider 呼び出しを記録する known-CSAM provider を使う service（store を共有できる）。
 fn recording_service(
@@ -415,6 +448,104 @@ async fn withdrawal_after_reuse_still_deindexes() -> Result<()> {
         .await?;
     assert_eq!(late.indexed, 0);
     assert!(!entries.contains(IndexScopeKind::PublicTopic, "rust", &object_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn withdrawal_verified_during_scan_stays_suppressed_across_providers() -> Result<()> {
+    let docs = Arc::new(MemoryDocsSync::default());
+    let projection = Arc::new(MemoryIndexProjection::new());
+    let replica = topic_replica_id("rust");
+    let (id, keys, envelope, state) = persist_post_with_source(
+        &docs,
+        &replica,
+        &TopicId::new("rust"),
+        "mid-scan withdrawal",
+    )
+    .await;
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let provider = Arc::new(PausingProvider {
+        inner: MockSafetyProvider::known_csam("pausing-known-csam"),
+        pause_once: AtomicBool::new(true),
+        entered: entered.clone(),
+        resume: resume.clone(),
+    });
+    let store = Arc::new(MemorySafetyArtifactStore::new());
+    let service = service_with_store(
+        store.clone(),
+        SafetyPolicy::public_node_default(),
+        vec![provider],
+    );
+    let entries = Arc::new(kukuri_cn_core::MemoryIndexEntryStore::new(store));
+    let pipeline = IngestPipeline::new(docs.clone(), service, entries.clone(), projection.clone());
+    let ingest = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let replica = replica.clone();
+        let key = stable_key("objects", &format!("{id}/state"));
+        async move {
+            pipeline
+                .ingest_changed_keys(IndexScopeKind::PublicTopic, "rust", &replica, &[key])
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    let withdrawal = kukuri_core::build_post_withdrawal_envelope(
+        &keys,
+        &envelope,
+        1,
+        None,
+        kukuri_core::WithdrawalReasonVisibility::Public,
+        Some(kukuri_core::PostWithdrawalReason::AuthorRequest),
+    )?;
+    docs.apply_doc_op(
+        &replica,
+        DocOp::SetJson {
+            key: stable_key("withdrawals", &format!("{id}/state")),
+            value: serde_json::to_value(withdrawal)?,
+        },
+    )
+    .await?;
+    resume.notify_one();
+    let _ = ingest.await??;
+    assert!(
+        entries
+            .is_known_withdrawn(IndexScopeKind::PublicTopic, "rust", &id)
+            .await?
+    );
+    assert!(!entries.contains(IndexScopeKind::PublicTopic, "rust", &id));
+
+    let stale = Arc::new(MemoryDocsSync::default());
+    stale.open_replica(&replica).await?;
+    for (suffix, value) in [
+        ("state", serde_json::to_value(&state)?),
+        ("envelope", serde_json::to_value(&envelope)?),
+    ] {
+        stale
+            .apply_doc_op(
+                &replica,
+                DocOp::SetJson {
+                    key: stable_key("objects", &format!("{id}/{suffix}")),
+                    value,
+                },
+            )
+            .await?;
+    }
+    let late = pipeline
+        .with_docs_source(stale)
+        .ingest_changed_keys(
+            IndexScopeKind::PublicTopic,
+            "rust",
+            &replica,
+            &[stable_key("objects", &format!("{id}/state"))],
+        )
+        .await?;
+    assert_eq!(late.indexed, 0);
+    assert!(
+        !projection
+            .contains_object(IndexScopeKind::PublicTopic, "rust", &id)
+            .await?
+    );
     Ok(())
 }
 

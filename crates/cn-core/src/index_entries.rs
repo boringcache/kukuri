@@ -522,18 +522,6 @@ impl IndexEntryStore for MemoryIndexEntryStore {
 
     async fn upsert_entry(&self, entry: &NewIndexEntry) -> Result<()> {
         if self
-            .withdrawn
-            .lock()
-            .expect("withdrawn mutex poisoned")
-            .contains(&(
-                entry.scope_kind,
-                entry.scope_id.clone(),
-                entry.object_id.clone(),
-            ))
-        {
-            bail!("known withdrawn post cannot be indexed");
-        }
-        if self
             .prevented
             .lock()
             .expect("prevented mutex poisoned")
@@ -561,14 +549,19 @@ impl IndexEntryStore for MemoryIndexEntryStore {
                 entry.verdict_id
             );
         }
-        self.entries.lock().expect("entries mutex poisoned").insert(
-            (
-                entry.scope_kind,
-                entry.scope_id.clone(),
-                entry.object_id.clone(),
-            ),
-            entry.clone(),
+        let key = (
+            entry.scope_kind,
+            entry.scope_id.clone(),
+            entry.object_id.clone(),
         );
+        let withdrawn = self.withdrawn.lock().expect("withdrawn mutex poisoned");
+        if withdrawn.contains(&key) {
+            bail!("known withdrawn post cannot be indexed");
+        }
+        self.entries
+            .lock()
+            .expect("entries mutex poisoned")
+            .insert(key, entry.clone());
         Ok(())
     }
 
@@ -600,10 +593,8 @@ impl IndexEntryStore for MemoryIndexEntryStore {
         object_id: &str,
     ) -> Result<()> {
         let key = (scope_kind, scope_id.to_string(), object_id.to_string());
-        self.withdrawn
-            .lock()
-            .expect("withdrawn mutex poisoned")
-            .insert(key.clone());
+        let mut withdrawn = self.withdrawn.lock().expect("withdrawn mutex poisoned");
+        withdrawn.insert(key.clone());
         self.entries
             .lock()
             .expect("entries mutex poisoned")
