@@ -259,15 +259,7 @@ impl BlobService for MemoryBlobService {
 #[async_trait]
 impl BlobService for IrohBlobService {
     async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
-        let fetch = self.prepare_display_fetch(hash).await?;
-        let service = self.clone();
-        Ok(Box::pin(async move {
-            let Some(bytes) = fetch.await? else {
-                return Ok(None);
-            };
-            let stored = service.put_blob(bytes, "application/octet-stream").await?;
-            service.fetch_local_blob(&stored.hash).await
-        }))
+        self.prepare_display_fetch(hash).await
     }
     async fn prepare_display_fetch(&self, hash: &BlobHash) -> Result<DisplayBlobFetch> {
         if let Some(bytes) = self.fetch_local_blob(hash).await? {

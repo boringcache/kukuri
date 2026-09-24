@@ -46,11 +46,13 @@ test('timeline image stops loading and shows the fetch failure after null respon
       ],
     },
   });
-  api.getBlobMediaPayload = async () => payload.promise;
+  const getBlobMediaPayload = vi.fn(async () => payload.promise);
+  api.getBlobMediaPayload = getBlobMediaPayload;
 
   render(<App api={api} />);
 
   expect(await within(getActiveColumn('Timeline')).findByTestId('media-skeleton-image-post')).toBeInTheDocument();
+  await waitFor(() => expect(getBlobMediaPayload).toHaveBeenCalledWith('a'.repeat(64), 'image/png', 'image-post'));
   act(() => payload.resolve(null));
 
   await waitFor(() => {

@@ -242,6 +242,7 @@ async fn late_joiner_backfills_video_media_payload() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: poster.hash.clone(),
             mime: poster.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("video poster payload");
@@ -255,6 +256,7 @@ async fn late_joiner_backfills_video_media_payload() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: manifest.hash.clone(),
             mime: manifest.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("video playback payload");
@@ -308,6 +310,7 @@ async fn blob_media_payload_roundtrip() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: created.attachments[0].hash.clone(),
             mime: created.attachments[0].mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("blob media payload")
@@ -337,6 +340,7 @@ async fn blank_blob_media_hash_returns_none_without_panicking() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: "   ".into(),
             mime: "image/png".into(),
+            source_object_id: None,
         })
         .await
         .expect("blank hash payload");
@@ -606,6 +610,7 @@ async fn restart_restores_video_media_payload() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: poster.hash.clone(),
             mime: poster.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("video payload after restart");
@@ -619,6 +624,7 @@ async fn restart_restores_video_media_payload() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: manifest.hash.clone(),
             mime: manifest.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("video playback payload after restart");

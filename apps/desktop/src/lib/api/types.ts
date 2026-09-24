@@ -628,7 +628,7 @@ export interface DesktopApi {
   setTopicGossipEnabled(topic: string, enabled: boolean): Promise<void>;
   setChannelGossipEnabled(topic: string, channelId: string, enabled: boolean): Promise<void>;
   getLocalPeerTicket(): Promise<string | null>;
-  getBlobMediaPayload(hash: string, mime: string): Promise<BlobMediaPayload | null>;
+  getBlobMediaPayload(hash: string, mime: string, sourceObjectId?: string): Promise<BlobMediaPayload | null>;
   // #858: 成人向け表現の表示設定(既定 OFF)。
   getContentDisplaySettings(): Promise<ContentDisplaySettings>;
   setAdultContentDisplayEnabled(enabled: boolean): Promise<ContentDisplaySettings>;

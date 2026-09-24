@@ -295,21 +295,31 @@ impl MissingBodyLedger {
 }
 
 /// 走査中の本文取得。local にあれば読み、無ければ台帳の間隔と回数の内でだけ remote を試す。
+pub(crate) struct BoundedBody {
+    pub(crate) text: String,
+    pub(crate) remote_bytes: Option<Vec<u8>>,
+    pub(crate) attempt: Option<MissingBodyAttempt>,
+}
+
 pub(crate) async fn fetch_projection_blob_text_bounded(
     blob_service: &dyn BlobService,
     missing_bodies: &MissingBodyLedger,
     hash: &kukuri_core::BlobHash,
-) -> Option<String> {
+) -> Option<BoundedBody> {
     let local = matches!(
         best_effort_blob_cache_status(blob_service, hash).await,
         BlobCacheStatus::Available | BlobCacheStatus::Pinned
     );
     if local {
-        let payload = fetch_projection_blob_text(blob_service, hash).await;
+        let payload = fetch_local_projection_blob_text(blob_service, hash).await;
         if payload.is_some() {
             missing_bodies.forget(hash);
         }
-        return payload;
+        return payload.map(|text| BoundedBody {
+            text,
+            remote_bytes: None,
+            attempt: None,
+        });
     }
     let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
     let fetch = tokio::time::timeout_at(deadline, blob_service.prepare_retry_fetch(hash))
@@ -324,10 +334,11 @@ pub(crate) async fn fetch_projection_blob_text_bounded(
         .and_then(Result::ok)
         .flatten();
     match bytes {
-        Some(bytes) => {
-            attempt.succeed();
-            Some(String::from_utf8_lossy(&bytes).to_string())
-        }
+        Some(bytes) => Some(BoundedBody {
+            text: String::from_utf8_lossy(&bytes).to_string(),
+            remote_bytes: Some(bytes),
+            attempt: Some(attempt),
+        }),
         None => {
             attempt.fail();
             None

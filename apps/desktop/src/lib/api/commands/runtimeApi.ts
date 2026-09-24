@@ -1074,11 +1074,12 @@ export const runtimeApi: DesktopApi = {
   getLocalPeerTicket: command('getLocalPeerTicket', async () => {
     return invokeDesktop<string | null>('get_local_peer_ticket');
   }),
-  getBlobMediaPayload: command('getBlobMediaPayload', async (hash, mime) => {
+  getBlobMediaPayload: command('getBlobMediaPayload', async (hash, mime, sourceObjectId) => {
     return invokeDesktop<BlobMediaPayload | null>('get_blob_media_payload', {
       request: {
         hash,
         mime,
+        source_object_id: sourceObjectId ?? null,
       } satisfies GetBlobMediaRequest,
     });
   }),

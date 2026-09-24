@@ -80,6 +80,15 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
             .expect("display does not cache"),
         None
     );
+    let retry = receiver
+        .prepare_retry_fetch(&stored.hash)
+        .await
+        .expect("retry admission");
+    assert_eq!(
+        retry.await.expect("retry bytes"),
+        Some(b"remote-only-attachment".to_vec())
+    );
+    assert_eq!(receiver.fetch_local_blob(&stored.hash).await.unwrap(), None);
     // pin記録だけがあり、実体は健全なremote peerにしか無い場合もローカル読取りは取得しない。
     receiver
         .pin_blob(&stored.hash)

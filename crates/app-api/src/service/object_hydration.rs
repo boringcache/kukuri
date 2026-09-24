@@ -4,7 +4,7 @@
 //! 行は署名つき envelope から作る(#1248)。
 
 use super::hydration_limits::{
-    MissingBodyLedger, fetch_local_projection_blob_text, fetch_projection_blob_text_bounded,
+    fetch_local_projection_blob_text, fetch_projection_blob_text_bounded,
 };
 use super::*;
 
@@ -32,14 +32,78 @@ pub(crate) enum BodyFetch {
 
 /// 検証済みの投稿を 1 件、projection へ反映する。
 pub(crate) async fn hydrate_object_projection_from_post(
-    blob_service: &dyn BlobService,
-    projection_store: &dyn ProjectionStore,
-    missing_bodies: &MissingBodyLedger,
+    services: &ServiceHandles,
     post: VerifiedPost,
     body_fetch: BodyFetch,
+    scope_generation: u64,
 ) -> Result<()> {
+    let projection_store = services.projection_store.as_ref();
+    let blob_service = services.blob_service.as_ref();
+    let header = post.header();
+    let topic = header.topic_id.as_str();
+    let channel = header
+        .channel_id
+        .as_ref()
+        .map_or(PUBLIC_CHANNEL_ID, ChannelId::as_str);
     if projection_store
-        .get_post_withdrawal(&post.header().object_id)
+        .get_post_withdrawal(&header.object_id)
+        .await?
+        .is_some()
+    {
+        let _save_access = services.content_save_access.lock().await;
+        if services
+            .content_scope_is_current(topic, channel, scope_generation)
+            .await
+        {
+            projection_store
+                .put_object_projection(projection_row_from_post(
+                    &post.withdrawn(),
+                    Some(String::new()),
+                ))
+                .await?;
+        }
+        return Ok(());
+    }
+    let mut fetched_body = None;
+    let content = match &header.payload_ref {
+        PayloadRef::InlineText { text } => Some(text.clone()),
+        PayloadRef::BlobText { hash, .. } => match body_fetch {
+            BodyFetch::LocalOnly => fetch_local_projection_blob_text(blob_service, hash).await,
+            BodyFetch::Bounded => {
+                fetched_body = services
+                    .until_content_invalid(
+                        topic,
+                        channel,
+                        scope_generation,
+                        fetch_projection_blob_text_bounded(
+                            blob_service,
+                            services.missing_body_ledger.as_ref(),
+                            hash,
+                        ),
+                    )
+                    .await
+                    .flatten();
+                fetched_body.as_ref().map(|body| body.text.clone())
+            }
+        },
+    };
+    let mut attachment_statuses = Vec::with_capacity(header.attachments.len());
+    for attachment in &header.attachments {
+        let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
+        attachment_statuses.push((&attachment.hash, status));
+    }
+    let _save_access = services.content_save_access.lock().await;
+    if !services
+        .content_scope_is_current(topic, channel, scope_generation)
+        .await
+    {
+        if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
+            attempt.defer();
+        }
+        return Ok(());
+    }
+    if projection_store
+        .get_post_withdrawal(&header.object_id)
         .await?
         .is_some()
     {
@@ -49,39 +113,39 @@ pub(crate) async fn hydrate_object_projection_from_post(
                 Some(String::new()),
             ))
             .await?;
+        if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
+            attempt.succeed();
+        }
         return Ok(());
     }
-    let header = post.header();
-    let content = match &header.payload_ref {
-        PayloadRef::InlineText { text } => Some(text.clone()),
-        PayloadRef::BlobText { hash, .. } => {
-            let payload = match body_fetch {
-                BodyFetch::LocalOnly => fetch_local_projection_blob_text(blob_service, hash).await,
-                BodyFetch::Bounded => {
-                    fetch_projection_blob_text_bounded(blob_service, missing_bodies, hash).await
-                }
-            };
-            projection_store
-                .mark_blob_status(
-                    hash,
-                    match payload {
-                        Some(_) => BlobCacheStatus::Available,
-                        None => BlobCacheStatus::Missing,
-                    },
-                )
-                .await?;
-            payload
+    if let PayloadRef::BlobText { hash, .. } = &header.payload_ref {
+        if let Some(bytes) = fetched_body
+            .as_mut()
+            .and_then(|body| body.remote_bytes.take())
+        {
+            let stored = blob_service.put_blob(bytes, "text/plain").await?;
+            anyhow::ensure!(stored.hash == *hash, "hydrated body hash changed");
         }
-    };
-    for attachment in &header.attachments {
-        let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
         projection_store
-            .mark_blob_status(&attachment.hash, status)
+            .mark_blob_status(
+                hash,
+                if content.is_some() {
+                    BlobCacheStatus::Available
+                } else {
+                    BlobCacheStatus::Missing
+                },
+            )
             .await?;
+    }
+    for (hash, status) in attachment_statuses {
+        projection_store.mark_blob_status(hash, status).await?;
     }
     projection_store
         .put_object_projection(projection_row_from_post(&post, content))
         .await?;
+    if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
+        attempt.succeed();
+    }
     Ok(())
 }
 
@@ -176,13 +240,17 @@ pub(crate) async fn hydrate_object_in_topic_with(
         policy,
     )
     .await?;
-    hydrate_object_projection_from_post(
-        services.blob_service.as_ref(),
-        projection_store,
-        services.missing_body_ledger.as_ref(),
-        post,
-        body_fetch,
-    )
-    .await?;
+    let channel = post
+        .header()
+        .channel_id
+        .as_ref()
+        .map_or(PUBLIC_CHANNEL_ID, ChannelId::as_str);
+    let Some(scope_generation) = services
+        .active_content_scope_generation(topic_id, channel)
+        .await
+    else {
+        return Ok(ObjectHydration::Missing);
+    };
+    hydrate_object_projection_from_post(services, post, body_fetch, scope_generation).await?;
     Ok(ObjectHydration::Hydrated)
 }

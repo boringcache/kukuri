@@ -200,6 +200,7 @@ async fn desktop_runtime_restores_profile_avatar_blob_after_restart() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: asset.hash.as_str().to_string(),
             mime: asset.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("avatar payload before restart")
@@ -255,6 +256,7 @@ async fn desktop_runtime_restores_profile_avatar_blob_after_restart() {
         .get_blob_media_payload(GetBlobMediaRequest {
             hash: asset.hash.as_str().to_string(),
             mime: asset.mime.clone(),
+            source_object_id: None,
         })
         .await
         .expect("avatar payload after restart")

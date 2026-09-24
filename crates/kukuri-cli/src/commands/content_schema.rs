@@ -55,6 +55,8 @@ pub(super) fn input(name: &str) -> Value {
                 "output_path": {"type": "string", "description": "新規出力ファイルの絶対path。既存ファイルは上書きしない。"}});
             if name == "get_blob_preview_url" {
                 fields["metaverse_kind"] = json!({"enum": ["vrm", "glb", "texture", "other"]});
+            } else {
+                fields["source_object_id"] = json!({"type": "string"});
             }
             object(fields, &["hash", "mime", "output_path"])
         }

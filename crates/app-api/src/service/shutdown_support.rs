@@ -2,6 +2,10 @@ use super::*;
 
 impl AppService {
     pub async fn shutdown(&self) {
+        {
+            let _save_access = self.services.content_save_access.lock().await;
+            self.services.content_closed.send_replace(true);
+        }
         self.shutdown_direct_message_outbox_retry().await;
         self.shutdown_account_receive_offers().await;
         self.services.session_projections.clear().await;

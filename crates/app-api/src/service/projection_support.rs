@@ -272,6 +272,7 @@ pub(crate) fn joined_private_channel_state_from_capability(
         capability.owner_pubkey
     };
     Ok(JoinedPrivateChannelState {
+        generation: 0,
         topic_id: capability.topic_id,
         channel_id: ChannelId::new(capability.channel_id),
         label: capability.label.trim().to_string(),
@@ -315,6 +316,7 @@ pub(crate) fn merged_private_channel_state_from_epoch_join(
         });
     }
     JoinedPrivateChannelState {
+        generation: 0,
         topic_id: topic_id.to_string(),
         channel_id,
         label: label.to_string(),

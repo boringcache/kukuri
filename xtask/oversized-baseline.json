@@ -29,7 +29,7 @@
       "path": "crates/cn-operator/src/docs.rs"
     },
     {
-      "lines": 1141,
+      "lines": 1145,
       "path": "crates/desktop-runtime/src/runtime/private_channels_game_api.rs"
     },
     {
@@ -37,20 +37,20 @@
       "path": "apps/desktop/src/components/extended/metaverse/useMetaverseRoomSession.ts"
     },
     {
-      "lines": 1129,
+      "lines": 1130,
       "path": "crates/app-api/src/private_channels.rs"
+    },
+    {
+      "lines": 1122,
+      "path": "crates/app-api/src/service/private_channels_support.rs"
     },
     {
       "lines": 1112,
       "path": "apps/desktop/src/shell/useDesktopShellData.ts"
     },
     {
-      "lines": 1103,
+      "lines": 1104,
       "path": "apps/desktop/src/lib/api/commands/runtimeApi.ts"
-    },
-    {
-      "lines": 1096,
-      "path": "crates/app-api/src/service/private_channels_support.rs"
     },
     {
       "lines": 1056,

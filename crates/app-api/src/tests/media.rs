@@ -1,40 +1,7 @@
 use super::*;
 
-#[tokio::test]
-async fn create_post_with_image_attachment_surfaces_attachment_metadata() {
-    let store = Arc::new(MemoryStore::default());
-    let transport = Arc::new(FakeTransport::new("app", FakeNetwork::default()));
-    let app = AppService::new(store, transport);
-
-    let object_id = app
-        .create_post_with_attachments(
-            "kukuri:topic:image-write",
-            "caption",
-            None,
-            vec![PendingAttachment {
-                mime: "image/png".into(),
-                bytes: b"fake-image".to_vec(),
-                role: AssetRole::ImageOriginal,
-            }],
-        )
-        .await
-        .expect("create image post");
-    let timeline = app
-        .list_timeline("kukuri:topic:image-write", None, 10)
-        .await
-        .expect("timeline");
-
-    let post = timeline
-        .items
-        .iter()
-        .find(|post| post.object_id == object_id)
-        .expect("image post");
-    assert_eq!(post.content, "caption");
-    assert_eq!(post.attachments.len(), 1);
-    assert_eq!(post.attachments[0].mime, "image/png");
-    assert_eq!(post.attachments[0].role, "image_original");
-    assert_eq!(post.attachments[0].status, BlobViewStatus::Available);
-}
+#[path = "media_scoped_fetch.rs"]
+mod media_scoped_fetch;
 
 #[tokio::test]
 async fn create_post_with_image_only_succeeds() {
