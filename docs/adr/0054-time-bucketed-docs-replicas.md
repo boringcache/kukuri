@@ -111,6 +111,10 @@ private/authorのreaderと保護cache/移行は未完了であり、この公開
 
 ### 5. 保存と回収
 
+CNが署名済み取り下げを検証した対象は、providerが変わっても古い投稿で再索引しないよう
+scope/object単位の抑制stateへ記録する。旧投稿を受け付け得る間は通常remote cacheの容量回収で
+この抑制を消さない。対象bucketを索引対象から外した後の有界な回収は#1221 R5.4の残件である。
+
 - 再取得可能なremote cacheはentry本体・索引・blob・projectionを含めて予算管理する。
   本人の投稿、bookmark、参加状態、未送信outboxは保護データ。保護データを自動削除して予算を達成しない。
   cacheの有限性と利用者が明示的に増やす保護データの量を別の指標にする。

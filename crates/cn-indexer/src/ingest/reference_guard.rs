@@ -78,6 +78,15 @@ impl ReferenceGuard<'_> {
                 .map_err(transient)?,
             "post is transmission prevented"
         );
+        ensure!(
+            !self
+                .pipeline
+                .entries
+                .is_known_withdrawn(self.scope_kind, self.scope_id, &self.object.object_id)
+                .await
+                .map_err(transient)?,
+            "post has a verified withdrawal"
+        );
         // 新bucketのmarkerは発見用。書換えで署名済み投稿の検査を失効させない。
         if !self.replica.as_str().starts_with("bucket::") {
             let state = self

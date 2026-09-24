@@ -89,7 +89,6 @@ pub struct WorkerHandle {
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
-        self.join.abort();
         if let Some(remote_join) = &self.remote_join {
             remote_join.abort();
         }
@@ -110,8 +109,6 @@ impl WorkerHandle {
             let _ = remote_join.await;
         }
         if let Err(error) = tokio::time::timeout(Duration::from_secs(10), &mut self.join).await {
-            self.join.abort();
-            let _ = (&mut self.join).await;
             warn!(%error, "indexer worker did not stop within 10s");
         }
     }

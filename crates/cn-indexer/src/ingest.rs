@@ -52,39 +52,13 @@ mod recent;
 pub(crate) use recent::recent_object_keys;
 mod reference_guard;
 mod source;
+mod summary;
+pub use summary::IngestSummary;
+mod withdrawal;
 use failure::{is_transient, transient};
 use source::{PostObjectView, SourceResolver};
 
 const RECORDS_PER_EXACT_KEY: usize = 8;
-
-/// 単一 scope（topic / channel）を ingest した結果のサマリ（監査 / テスト用）。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct IngestSummary {
-    /// 走査した object state entry 数。
-    pub scanned: usize,
-    /// `allow` verdict で投影へ書いた entry 数。
-    pub indexed: usize,
-    /// fail-closed（unscanned / scan_failed / 非 allow / 取り込みの失敗）で投影しなかった entry 数。
-    /// 一時的な失敗では既存 entry を保持する（#1090）。
-    pub skipped_non_allow: usize,
-    /// tombstone / deleted で de-index した entry 数。
-    pub deindexed: usize,
-    /// provider を呼んで判定した scan 数（post text + media blob。#1050）。
-    pub scans_fresh: usize,
-    /// 保存済みsubject判定または共通内容判定を再利用してproviderを呼ばなかったscan数。
-    pub scans_reused: usize,
-}
-
-impl IngestSummary {
-    pub(crate) fn merge(&mut self, other: Self) {
-        self.scanned += other.scanned;
-        self.indexed += other.indexed;
-        self.skipped_non_allow += other.skipped_non_allow;
-        self.deindexed += other.deindexed;
-        self.scans_fresh += other.scans_fresh;
-        self.scans_reused += other.scans_reused;
-    }
-}
 
 /// 変更通知の key 種別ごとの取り込み方（#1050 / #1065）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -539,6 +513,8 @@ impl IngestPipeline {
     ) -> Result<IngestSummary> {
         // これは一部keyまたは1bucketの窓。ここに無い投稿をscopeから消えたとは判定しない。
         // 完了jobの保持上限はschedulerが所有し、別bucketの実行中leaseを失効させない。
+        self.apply_verified_withdrawals(scope_kind, scope_id, &context.withdrawn_object_ids)
+            .await?;
         let mut waiting = state_records.iter();
         let mut active = FuturesUnordered::new();
         for _ in 0..self.max_concurrent_posts {
@@ -708,8 +684,13 @@ impl IngestPipeline {
             .withdrawn_object_ids
             .contains(object.object_id.as_str())
         {
-            self.deindex_object(scope_kind, scope_id, object.object_id.as_str())
-                .await?;
+            // ingest_records already persisted this verified withdrawal and removed its projection.
+            return Ok(IngestOutcome::Deindexed);
+        }
+        if self
+            .suppress_known_withdrawal(scope_kind, scope_id, object.object_id.as_str())
+            .await?
+        {
             return Ok(IngestOutcome::Deindexed);
         }
 

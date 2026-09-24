@@ -337,7 +337,7 @@ async fn withdrawal_after_reuse_still_deindexes() -> Result<()> {
     let projection = Arc::new(MemoryIndexProjection::new());
     let topic = TopicId::new("rust");
     let replica = topic_replica_id("rust");
-    let (object_id, keys, envelope, _state) =
+    let (object_id, keys, envelope, state) =
         persist_post_with_source(&docs, &replica, &topic, "withdrawn later").await;
 
     let (allow, store) = allow_service();
@@ -384,6 +384,37 @@ async fn withdrawal_after_reuse_still_deindexes() -> Result<()> {
             .contains_object(IndexScopeKind::PublicTopic, "rust", &object_id)
             .await?
     );
+
+    // A different provider can still have the older signed post without the withdrawal.
+    // Once CN has verified the withdrawal, that stale copy must not revive the index.
+    let stale = Arc::new(MemoryDocsSync::default());
+    stale.open_replica(&replica).await?;
+    for (suffix, value) in [
+        ("state", serde_json::to_value(&state)?),
+        ("envelope", serde_json::to_value(&envelope)?),
+    ] {
+        stale
+            .apply_doc_op(
+                &replica,
+                DocOp::SetJson {
+                    key: stable_key("objects", &format!("{object_id}/{suffix}")),
+                    value,
+                },
+            )
+            .await?;
+    }
+    let late = pipeline
+        .clone()
+        .with_docs_source(stale)
+        .ingest_changed_keys(
+            IndexScopeKind::PublicTopic,
+            "rust",
+            &replica,
+            &[stable_key("objects", &format!("{object_id}/state"))],
+        )
+        .await?;
+    assert_eq!(late.indexed, 0);
+    assert!(!entries.contains(IndexScopeKind::PublicTopic, "rust", &object_id));
     Ok(())
 }
 
