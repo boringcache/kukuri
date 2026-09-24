@@ -743,8 +743,6 @@ async fn worker_event_ingest_processes_only_changed_object_and_records_metrics()
         "only the new object reached the provider"
     );
     // #1065: 索引 key を含む実クライアントの key 集合でも全体見直しへ倒れない。
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
-    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
     assert_eq!(snapshot.scans_reused, 0);
 
     handle.shutdown().await;
@@ -825,6 +823,102 @@ async fn periodic_public_poll_stops_at_the_current_index_window() -> Result<()> 
         docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst),
         600,
         "unknown keys reuse the same 100-ID index window"
+    );
+    handle.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_periodic_and_unknown_key_reads_stop_at_the_current_window() -> Result<()> {
+    let Some(admin_url) = integration_test_admin_database_url() else {
+        return Ok(());
+    };
+    let database = TestDatabase::create(admin_url.as_str(), "cn_private_bounded_window").await?;
+    let pool = connect_postgres(database.database_url.as_str()).await?;
+    initialize_database(&pool).await?;
+    add_supported_topic(&pool, IndexScopeKind::PrivateChannel, "secret-room").await?;
+    register_channel_secret(&pool, &cipher(), "secret-room", TEST_NAMESPACE_SECRET).await?;
+
+    let replica = kukuri_docs_sync::private_channel_replica_id("secret-room");
+    let inner = Arc::new(MemoryDocsSync::default());
+    inner
+        .register_private_replica_secret(&replica, TEST_NAMESPACE_SECRET)
+        .await?;
+    let post = persist_post_in_channel(
+        inner.as_ref(),
+        &replica,
+        &TopicId::new("secret-room"),
+        "current private post",
+        Some("secret-room"),
+    )
+    .await;
+    let older = chrono::Utc::now().timestamp() - 60;
+    for index in 0..1_001 {
+        let id = format!("older-{index:04}");
+        inner
+            .apply_doc_op(
+                &replica,
+                DocOp::SetBytes {
+                    key: stable_key("indexes/timeline", &format!("{older:020}-{id}/{id}")),
+                    value: Vec::new(),
+                },
+            )
+            .await?;
+    }
+    let docs = Arc::new(CountingDocsSync {
+        inner,
+        whole_scope_queries: std::sync::atomic::AtomicUsize::new(0),
+        exact_queries: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let state = Arc::new(IndexerRuntimeState::default());
+    let projection = Arc::new(MemoryIndexProjection::default());
+    let (participant, _) = participant_with_docs(&pool, docs.clone(), &projection, &state);
+    let event_participant = participant.clone();
+    let handle = IndexerWorker::new(
+        participant,
+        docs.clone(),
+        state,
+        fast_config(Duration::from_secs(120)),
+    )
+    .spawn();
+    wait_until("bounded private poll", || {
+        let projection = projection.clone();
+        let post = post.clone();
+        async move {
+            projection
+                .contains_object(IndexScopeKind::PrivateChannel, "secret-room", &post)
+                .await
+                .unwrap_or(false)
+        }
+    })
+    .await;
+    assert_eq!(
+        docs.whole_scope_queries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "private startup must not read the full objects prefix"
+    );
+    let first_exact = docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        (300..=330).contains(&first_exact),
+        "one 100-ID window plus the verified post"
+    );
+    event_participant
+        .ingest_changed_keys(
+            &ScopeReplica::from_scope(IndexScopeKind::PrivateChannel, "secret-room"),
+            &["unregistered/object/state".into()],
+        )
+        .await?;
+    assert_eq!(
+        docs.whole_scope_queries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "unknown private keys must not read the full objects prefix"
+    );
+    let second_exact = docs.exact_queries.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        (300..=330).contains(&(second_exact - first_exact)),
+        "unknown key revisits one bounded private window"
     );
     handle.shutdown().await;
     Ok(())

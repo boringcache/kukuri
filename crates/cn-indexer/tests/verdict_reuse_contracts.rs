@@ -795,9 +795,6 @@ async fn unregistered_public_key_rechecks_only_the_current_window() -> Result<()
     pipeline
         .ingest_changed_keys(IndexScopeKind::PublicTopic, "rust", &replica, &written)
         .await?;
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
-    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
 
     let mut batch = written.clone();
     batch.push(format!("future-feature/{second}/state"));
@@ -809,9 +806,6 @@ async fn unregistered_public_key_rechecks_only_the_current_window() -> Result<()
         (2, 2),
         "the two posts remain in the current index window"
     );
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
-    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
 
     // A media manifest also revisits only the current window.
     pipeline
@@ -822,9 +816,6 @@ async fn unregistered_public_key_rechecks_only_the_current_window() -> Result<()
             &[stable_key("manifests/media", "m1/envelope")],
         )
         .await?;
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
-    assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
     assert_eq!(provider.subjects().len(), 2);
     Ok(())
 }

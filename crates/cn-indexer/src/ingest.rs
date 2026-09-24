@@ -74,8 +74,8 @@ pub enum KeyDisposition {
 /// 種別ごとの取り込み方。種別が増えたらここで判断を強制する（ワイルドカードを置かない）。
 ///
 /// `Ignore` にできるのは indexer が読まない種別だけ（[`INDEXER_READ_FAMILIES`] と交わらない）。
-/// media manifest は参照元 object を特定できないためscope見直しへ渡す。公開scopeは現在索引窓、
-/// private scopeは旧経路を使う（投稿stateとmanifestの到着順が前後しても再確認する）。
+/// media manifest は参照元 object を特定できないため現在索引窓へ渡す
+/// （投稿stateとmanifestの到着順が前後しても再確認する）。
 pub const fn key_disposition(family: SharedReplicaKeyFamily) -> KeyDisposition {
     match family {
         SharedReplicaKeyFamily::PostObject | SharedReplicaKeyFamily::PostWithdrawal => {
@@ -344,8 +344,8 @@ impl IngestPipeline {
     ///
     /// `objects/<id>/…` と `withdrawals/<id>/state` は対象 object を特定できるため、その object の
     /// `objects/<id>/` prefix（state + envelope）と撤回だけを読み、scope 全体の prefix 走査を
-    /// 行わない。対象を特定できない鍵（media manifest / 未登録 key）が混ざる場合、公開scopeは
-    /// 現在索引窓、private scopeは旧`ingest_scope`へ渡す。索引に影響しない鍵だけなら何もしない（#1065）。
+    /// 行わない。対象を特定できない鍵（media manifest / 未登録 key）が混ざる場合は
+    /// 現在索引窓へ渡す。索引に影響しない鍵だけなら何もしない（#1065）。
     pub async fn ingest_changed_keys(
         &self,
         scope_kind: IndexScopeKind,
@@ -368,37 +368,27 @@ impl IngestPipeline {
                 Ok(IngestSummary::default())
             }
             ChangedKeys::ScopeReview { reason, objects } => {
-                if scope_kind == IndexScopeKind::PublicTopic {
-                    debug!(
-                        replica_id = %replica_id.as_str(),
-                        keys = keys.len(),
-                        reason = %reason,
-                        "changed keys are not object-scoped; checking the current public index window"
-                    );
-                    let mut summary = if objects.is_empty() {
-                        IngestSummary::default()
-                    } else {
-                        self.ingest_object_ids(scope_kind, scope_id, replica_id, &objects)
-                            .await?
-                    };
-                    summary.merge(
-                        Box::pin(self.ingest_recent_scope_excluding(
-                            scope_kind, scope_id, replica_id, &objects,
-                        ))
-                        .await?,
-                    );
-                    return Ok(summary);
-                }
                 debug!(
                     replica_id = %replica_id.as_str(),
                     keys = keys.len(),
                     reason = %reason,
-                    "private changed keys are not object-scoped; falling back to the whole scope"
+                    "changed keys are not object-scoped; checking the current index window"
                 );
-                if let Some(metrics) = &self.metrics {
-                    metrics.record_whole_scope_fallback(&reason);
-                }
-                self.ingest_scope(scope_kind, scope_id, replica_id).await
+                let mut summary = if objects.is_empty() {
+                    IngestSummary::default()
+                } else {
+                    self.ingest_object_ids(scope_kind, scope_id, replica_id, &objects)
+                        .await?
+                };
+                summary.merge(
+                    Box::pin(
+                        self.ingest_recent_scope_excluding(
+                            scope_kind, scope_id, replica_id, &objects,
+                        ),
+                    )
+                    .await?,
+                );
+                Ok(summary)
             }
         }
     }

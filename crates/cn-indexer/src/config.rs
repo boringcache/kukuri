@@ -142,7 +142,7 @@ pub struct IndexerConfig {
     /// `COMMUNITY_NODE_INDEXER_SEED_PEERS`（カンマ区切り、`endpoint_id` または
     /// `endpoint_id@host:port`）から読む。不正な値は起動エラー（fail-closed）。
     pub seed_peers: Vec<SeedPeer>,
-    /// 常駐ワーカーの全件見直し間隔（#613 T2）。
+    /// 常駐ワーカーのscope窓巡回間隔（#613 T2）。
     pub poll_interval: std::time::Duration,
     /// 投稿取得・検査を同時に進める最大件数。
     pub max_concurrent_posts: usize,
@@ -188,7 +188,7 @@ pub(crate) const MEDIA_FETCH_TIMEOUT_SECS_ENV: &str = "COMMUNITY_NODE_MEDIA_FETC
 /// カンマ区切りで `endpoint_id` または `endpoint_id@host:port` を並べる。
 pub const SEED_PEERS_ENV: &str = "COMMUNITY_NODE_INDEXER_SEED_PEERS";
 
-/// 常駐ワーカーの全件見直し間隔（秒。#613 T2）。未設定なら既定 300 秒。0 は起動エラー。
+/// 常駐ワーカーのscope窓巡回間隔（秒。#613 T2）。未設定なら既定 300 秒。0 は起動エラー。
 pub const POLL_INTERVAL_SECS_ENV: &str = "COMMUNITY_NODE_INDEXER_POLL_INTERVAL_SECS";
 pub const MAX_CONCURRENT_POSTS_ENV: &str = "COMMUNITY_NODE_INDEXER_MAX_CONCURRENT_POSTS";
 
@@ -196,7 +196,7 @@ pub const MAX_CONCURRENT_POSTS_ENV: &str = "COMMUNITY_NODE_INDEXER_MAX_CONCURREN
 /// 未設定なら HTTP では公開しない。例: `127.0.0.1:8630`。
 pub const STATUS_ADDR_ENV: &str = "COMMUNITY_NODE_INDEXER_STATUS_ADDR";
 
-/// 全件見直し間隔の既定値。
+/// scope窓巡回間隔の既定値。
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Default for MediaFetchConfig {
@@ -372,7 +372,7 @@ fn parse_max_concurrent_posts_env() -> Result<usize> {
     Ok(value)
 }
 
-/// 全件見直し間隔 env を読む。0 や非数値は起動エラー（fail-closed）。
+/// scope窓巡回間隔 env を読む。0 や非数値は起動エラー（fail-closed）。
 fn parse_poll_interval_env() -> Result<std::time::Duration> {
     let Some(raw) = non_empty_env(POLL_INTERVAL_SECS_ENV) else {
         return Ok(DEFAULT_POLL_INTERVAL);

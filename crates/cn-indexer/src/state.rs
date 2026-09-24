@@ -24,7 +24,7 @@ pub struct IndexerStateSnapshot {
     pub ingest_enabled: bool,
     /// 開いているスコープ数。
     pub opened_scopes: u64,
-    /// 最後に全件見直し（restore → 取り込み 1 巡）が成功した時刻（unix 秒）。
+    /// 最後にscope窓の1巡（restore → 対象別取り込み）が成功した時刻（unix 秒）。
     pub last_sync_at: Option<i64>,
     /// 最後にスコープ取り込みが成功した時刻（unix 秒）。
     pub last_ingest_at: Option<i64>,
@@ -58,7 +58,7 @@ pub struct IndexerStateSnapshot {
     /// 保存済み verdict を再利用して provider を呼ばなかった scan 数の累計（#1050）。
     #[serde(default)]
     pub scans_reused: u64,
-    /// 最後の全件見直し 1 巡にかかった時間（ミリ秒。#1050）。
+    /// 最後のscope窓1巡にかかった時間（ミリ秒。#1050）。
     #[serde(default)]
     pub last_pass_duration_ms: Option<u64>,
     /// 最後の変更通知駆動の取り込みにかかった時間（ミリ秒。#1050）。
@@ -68,12 +68,6 @@ pub struct IndexerStateSnapshot {
     /// 近似値。#1050）。
     #[serde(default)]
     pub last_index_lag_secs: Option<i64>,
-    /// 変更通知の key から対象 object を特定できず scope 全体の見直しへ倒した回数の累計（#1065）。
-    #[serde(default)]
-    pub event_whole_scope_fallbacks: u64,
-    /// 直近の全体見直しへ倒した理由（key の種別 prefix。object id 等は含めない。#1065）。
-    #[serde(default)]
-    pub last_whole_scope_fallback_reason: Option<String>,
     /// 投稿取得schedulerの現在状態。本文・hash・peer識別子は含めない。
     #[serde(default)]
     pub post_scheduler: PostFetchSchedulerSnapshot,
@@ -104,8 +98,6 @@ pub struct IndexerRuntimeState {
     last_pass_duration_ms: RwLock<Option<u64>>,
     last_event_ingest_duration_ms: RwLock<Option<u64>>,
     last_index_lag_secs: RwLock<Option<i64>>,
-    event_whole_scope_fallbacks: AtomicU64,
-    last_whole_scope_fallback_reason: RwLock<Option<String>>,
     post_scheduler: RwLock<Option<std::sync::Arc<PostFetchScheduler>>>,
 }
 
@@ -134,7 +126,7 @@ impl IndexerRuntimeState {
         self.opened_scopes.store(count, Ordering::Relaxed);
     }
 
-    /// 全件見直しの成功を記録する（unix 秒）。
+    /// scope窓1巡の成功を記録する（unix 秒）。
     pub fn record_sync_success(&self, at_unix: i64) {
         *self.last_sync_at.write().expect("last_sync_at poisoned") = Some(at_unix);
     }
@@ -159,7 +151,7 @@ impl IndexerRuntimeState {
             .fetch_add(summary.scans_reused as u64, Ordering::Relaxed);
     }
 
-    /// 全件見直し 1 巡の所要時間を記録する（#1050）。
+    /// scope窓1巡の所要時間を記録する（#1050）。
     pub fn record_pass_duration(&self, millis: u64) {
         *self
             .last_pass_duration_ms
@@ -218,16 +210,6 @@ impl IndexerRuntimeState {
         self.media_fetch_unavailable.load(Ordering::Relaxed)
     }
 
-    /// 変更通知の取り込みが scope 全体の見直しへ倒れたことと、その理由 prefix を記録する（#1065）。
-    pub fn record_whole_scope_fallback(&self, reason: &str) {
-        self.event_whole_scope_fallbacks
-            .fetch_add(1, Ordering::Relaxed);
-        *self
-            .last_whole_scope_fallback_reason
-            .write()
-            .expect("last_whole_scope_fallback_reason poisoned") = Some(reason.to_string());
-    }
-
     pub fn record_media_fetch_timeout(&self) {
         self.media_fetch_timeout.fetch_add(1, Ordering::Relaxed);
     }
@@ -282,12 +264,6 @@ impl IndexerRuntimeState {
                 .last_index_lag_secs
                 .read()
                 .expect("last_index_lag_secs poisoned"),
-            event_whole_scope_fallbacks: self.event_whole_scope_fallbacks.load(Ordering::Relaxed),
-            last_whole_scope_fallback_reason: self
-                .last_whole_scope_fallback_reason
-                .read()
-                .expect("last_whole_scope_fallback_reason poisoned")
-                .clone(),
             post_scheduler: self
                 .post_scheduler
                 .read()
@@ -334,8 +310,6 @@ mod tests {
         state.record_media_fetch_timeout();
         state.record_media_fetch_oversize();
         state.record_error(Some("topic::rust"), "boom");
-        state.record_whole_scope_fallback("unregistered:a");
-        state.record_whole_scope_fallback("manifests/media");
         let scheduler = std::sync::Arc::new(PostFetchScheduler::new(2));
         let _lease = scheduler.enqueue(
             crate::scheduler::PostFetchJobKey {
@@ -374,11 +348,6 @@ mod tests {
             Some(0),
             "negative lag is clamped"
         );
-        assert_eq!(snapshot.event_whole_scope_fallbacks, 2);
-        assert_eq!(
-            snapshot.last_whole_scope_fallback_reason.as_deref(),
-            Some("manifests/media")
-        );
         assert_eq!(snapshot.post_scheduler.queued, 1);
     }
 
@@ -410,8 +379,6 @@ mod tests {
         assert_eq!(snapshot.scans_reused, 0);
         assert_eq!(snapshot.last_pass_duration_ms, None);
         assert_eq!(snapshot.last_index_lag_secs, None);
-        assert_eq!(snapshot.event_whole_scope_fallbacks, 0);
-        assert_eq!(snapshot.last_whole_scope_fallback_reason, None);
         assert_eq!(
             snapshot.post_scheduler,
             PostFetchSchedulerSnapshot::default()
@@ -429,8 +396,6 @@ mod tests {
         assert!(json.get("last_sync_at").is_some());
         assert!(json.get("provider_unavailable").is_some());
         assert!(json.get("media_fetch_timeout").is_some());
-        assert!(json.get("event_whole_scope_fallbacks").is_some());
-        assert!(json.get("last_whole_scope_fallback_reason").is_some());
         assert!(json.get("post_scheduler").is_some());
     }
 }
