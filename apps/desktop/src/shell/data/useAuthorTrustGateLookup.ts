@@ -8,6 +8,7 @@ import type {
   PostView,
 } from '@/lib/api';
 import { useDesktopShellStoreApi } from '@/shell/store';
+import { retainRecordEntries } from '@/shell/stateUpdates';
 
 /// 同じ描画更新でまとめて照会するための待ち時間。
 export const AUTHOR_TRUST_GATE_LOOKUP_DEBOUNCE_MS = 300;
@@ -104,6 +105,8 @@ export function useAuthorTrustGateLookup({
   // 照会済みの著者と、作り直す時刻・使うのをやめる時刻（epoch ms）。
   const expiryRef = useRef<Map<string, TrustGateExpiry>>(new Map());
   const queueRef = useRef<Set<string>>(new Set());
+  const requestTokensRef = useRef<Map<string, number>>(new Map());
+  const nextRequestTokenRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationRef = useRef(0);
   const apiRef = useRef(api);
@@ -112,7 +115,7 @@ export function useAuthorTrustGateLookup({
     apiRef.current = api;
   }, [api]);
 
-  const authors = useMemo(() => {
+  const authorsKey = useMemo(() => {
     const unique = new Set<string>();
     for (const post of posts) {
       for (const author of postTrustGateAuthors(post)) unique.add(author);
@@ -121,7 +124,7 @@ export function useAuthorTrustGateLookup({
       const trimmed = host.trim();
       if (trimmed) unique.add(trimmed);
     }
-    return unique;
+    return [...unique].sort().join(',');
   }, [hostPubkeys, posts]);
 
   // 採用順位・認証・必須同意が変わったら、以前の判断と照会済み記録を捨てる。
@@ -129,6 +132,7 @@ export function useAuthorTrustGateLookup({
     generationRef.current += 1;
     expiryRef.current = new Map();
     queueRef.current = new Set();
+    requestTokensRef.current = new Map();
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -137,16 +141,32 @@ export function useAuthorTrustGateLookup({
   }, [adoptionSignature, storeApi]);
 
   useEffect(() => {
+    const authors = new Set(authorsKey ? authorsKey.split(',') : []);
     authorsRef.current = authors;
+    for (const author of expiryRef.current.keys()) {
+      if (!authors.has(author)) expiryRef.current.delete(author);
+    }
+    for (const author of queueRef.current) {
+      if (!authors.has(author)) queueRef.current.delete(author);
+    }
+    for (const author of requestTokensRef.current.keys()) {
+      if (!authors.has(author)) requestTokensRef.current.delete(author);
+    }
+    storeApi.getState().setField('authorTrustGates', (current) => retainRecordEntries(current, authors));
     if (!active) return;
 
     async function lookupBatch(batch: string[], generation: number) {
       const fallback = Date.now() + AUTHOR_TRUST_GATE_LOOKUP_FALLBACK_TTL_MS;
+      const requested = new Set(batch);
+      const tokens = new Map(batch.map((author) => [author, requestTokensRef.current.get(author)]));
+      const isCurrent = (author: string) =>
+        authorsRef.current.has(author) && tokens.get(author) === requestTokensRef.current.get(author);
       try {
         const result = await apiRef.current.evaluateAuthorTrustGates({ author_pubkeys: batch });
         if (generation !== generationRef.current) return;
         const additions: Record<string, AuthorTrustGate> = {};
         for (const gate of result.gates) {
+          if (!requested.has(gate.author_pubkey) || !isCurrent(gate.author_pubkey)) continue;
           additions[gate.author_pubkey] = gate;
           const refreshAt = gateExpiry(gate, fallback);
           expiryRef.current.set(gate.author_pubkey, {
@@ -155,24 +175,27 @@ export function useAuthorTrustGateLookup({
           });
         }
         // 応答に含まれなかった著者の判断は残さない（作り直しに失敗した扱い）。
-        const dropped = batch.filter((author) => !(author in additions));
+        const dropped = batch.filter((author) => isCurrent(author) && !(author in additions));
         storeApi.getState().setField('authorTrustGates', (current) => {
           const next = { ...current, ...additions };
           for (const author of dropped) delete next[author];
-          return next;
+          return Object.keys(additions).length || dropped.length ? next : current;
         });
       } catch {
         // 照会できない著者は未評価として扱い、折りたたみをやめる（fail-open）。
         if (generation !== generationRef.current) return;
         for (const author of batch) {
+          if (!isCurrent(author)) continue;
           expiryRef.current.set(author, {
             refreshAt: fallback,
             dropAt: fallback + AUTHOR_TRUST_GATE_LOOKUP_STALE_GRACE_MS,
           });
         }
         storeApi.getState().setField('authorTrustGates', (current) => {
+          const dropped = batch.filter((author) => isCurrent(author) && author in current);
+          if (dropped.length === 0) return current;
           const next = { ...current };
-          for (const author of batch) delete next[author];
+          for (const author of dropped) delete next[author];
           return next;
         });
       }
@@ -218,6 +241,7 @@ export function useAuthorTrustGateLookup({
           refreshAt,
           dropAt: expiry?.dropAt ?? refreshAt + AUTHOR_TRUST_GATE_LOOKUP_STALE_GRACE_MS,
         });
+        requestTokensRef.current.set(author, ++nextRequestTokenRef.current);
         queueRef.current.add(author);
       }
       // 直前の cleanup で timer が消えている場合も、待ち行列が残っていれば張り直す。
@@ -235,5 +259,5 @@ export function useAuthorTrustGateLookup({
         timerRef.current = null;
       }
     };
-  }, [active, authors, storeApi]);
+  }, [active, authorsKey, storeApi]);
 }

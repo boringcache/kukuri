@@ -50,6 +50,7 @@ import {
   type ShellHookHarness,
 } from '@/shell/testSupport/renderShellHook';
 import { columnIdentityId, openTransientColumn } from '@/shell/slices/workspace';
+import { mergeAuthorView } from '@/shell/presentation';
 
 const AUTHOR_PUBKEY = 'a'.repeat(64);
 
@@ -715,6 +716,116 @@ describe('useDesktopShellData characterization', () => {
 
     expect(harness.store.getState().error).toBe('common:errors.failedToLoadTopic');
 
+    view.unmount();
+  });
+
+  test('known author details follow the visible post window and release late additions', async () => {
+    const { harness, view } = renderDataHook(createDesktopMockApi());
+    await flushAsyncWork();
+    const nextAuthor = 'b'.repeat(64);
+    const staleAuthor = 'c'.repeat(64);
+    const author = (pubkey: string) => mergeAuthorView(null, { author_pubkey: pubkey });
+
+    actPatchState(harness.store, {
+      timelinesByKey: { 'kukuri:topic:general::public': [buildPost()] },
+      knownAuthorsByPubkey: {
+        [AUTHOR_PUBKEY]: author(AUTHOR_PUBKEY),
+        [staleAuthor]: author(staleAuthor),
+      },
+    });
+    expect(Object.keys(harness.store.getState().knownAuthorsByPubkey)).toEqual([AUTHOR_PUBKEY]);
+
+    actPatchState(harness.store, {
+      timelinesByKey: {
+        'kukuri:topic:general::public': [buildPost({ object_id: 'post-2', author_pubkey: nextAuthor })],
+      },
+      knownAuthorsByPubkey: {
+        ...harness.store.getState().knownAuthorsByPubkey,
+        [nextAuthor]: author(nextAuthor),
+      },
+    });
+    expect(Object.keys(harness.store.getState().knownAuthorsByPubkey)).toEqual([nextAuthor]);
+
+    actPatchState(harness.store, {
+      knownAuthorsByPubkey: {
+        ...harness.store.getState().knownAuthorsByPubkey,
+        [staleAuthor]: author(staleAuthor),
+      },
+    });
+    expect(Object.keys(harness.store.getState().knownAuthorsByPubkey)).toEqual([nextAuthor]);
+    view.unmount();
+  });
+
+  test('author details from open profile columns stay within the eight visible lists', async () => {
+    const { harness, view } = renderDataHook(createDesktopMockApi());
+    await flushAsyncWork();
+    const initial = harness.store.getState().workspaceState;
+    const pubkeys = Array.from({ length: 10 }, (_, index) => (index + 1).toString(16).padStart(64, '0'));
+    const ids = pubkeys.map((_, index) => `profile-${index}`);
+    let workspace = initial;
+    for (const [index, pubkey] of pubkeys.entries()) {
+      workspace = openTransientColumn(workspace, {
+        id: ids[index], kind: 'profile', entityId: pubkey, pinned: false,
+      });
+    }
+    const authors = Object.fromEntries(pubkeys.map((pubkey) => [
+      pubkey, mergeAuthorView(null, { author_pubkey: pubkey }),
+    ]));
+    actPatchState(harness.store, {
+      workspaceState: { ...workspace, activeColumnId: initial.activeColumnId },
+      visibleListColumnIds: [initial.activeColumnId, ...ids.slice(0, 7)],
+      knownAuthorsByPubkey: authors,
+    });
+    expect(Object.keys(harness.store.getState().knownAuthorsByPubkey)).toEqual(pubkeys.slice(0, 7));
+
+    actPatchState(harness.store, {
+      visibleListColumnIds: [initial.activeColumnId, ...ids.slice(3, 10)],
+      knownAuthorsByPubkey: authors,
+    });
+    expect(Object.keys(harness.store.getState().knownAuthorsByPubkey)).toEqual(pubkeys.slice(3, 10));
+    view.unmount();
+  });
+
+  test('a visible metaverse room coalesces host lookup and ignores a previous visit', async () => {
+    const host = 'b'.repeat(64);
+    const topic = 'kukuri:topic:general';
+    const baseApi = createDesktopMockApi({
+      seedGameRooms: { [topic]: [{
+        room_id: 'room-1', host_pubkey: host, title: 'Room', description: '',
+        status: 'Waiting', phase_label: '', scores: [], updated_at: 1,
+        channel_id: null, audience_label: 'Public',
+      }] },
+      authorSocialViews: { [host]: { name: 'host' } },
+    });
+    const authorView = await baseApi.getAuthorSocialView(host);
+    const first = createDeferred<typeof authorView>();
+    const second = createDeferred<typeof authorView>();
+    const pending = [first.promise, second.promise];
+    const getAuthorSocialView = vi.fn(() =>
+      pending.shift() ?? Promise.resolve(authorView));
+    const api: DesktopApi = { ...baseApi, getAuthorSocialView };
+    const harness = createShellHookHarness();
+    const workspaceState = openTransientColumn(harness.store.getState().workspaceState, {
+      id: 'metaverse-room-1', kind: 'metaverse',
+      scope: { topicId: topic, channelId: null }, pinned: false,
+    });
+    harness.store.getState().patchState({
+      workspaceState, visibleListColumnIds: [workspaceState.activeColumnId],
+    });
+
+    const { view } = renderDataHook(api, harness);
+    await flushAsyncWork();
+    expect(getAuthorSocialView).toHaveBeenCalledWith(host);
+    expect(getAuthorSocialView).toHaveBeenCalledTimes(1);
+    const key = `${topic}::public`;
+    const room = harness.store.getState().gameRoomsByScopeKey[key][0];
+    actPatchState(harness.store, { gameRoomsByScopeKey: { [key]: [] } });
+    actPatchState(harness.store, { gameRoomsByScopeKey: { [key]: [room] } });
+    expect(getAuthorSocialView).toHaveBeenCalledTimes(2);
+    await act(async () => { first.resolve(authorView); });
+    expect(harness.store.getState().knownAuthorsByPubkey[host]).toBeUndefined();
+    await act(async () => { second.resolve(authorView); });
+    expect(harness.store.getState().knownAuthorsByPubkey[host]?.name).toBe('host');
     view.unmount();
   });
 });

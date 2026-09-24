@@ -16,7 +16,7 @@ import type {
   PostView,
 } from '@/lib/api';
 
-import { removeRecordEntry, setRecordEntry, setTimelineCursorEntry, updateRecordEntry } from '@/shell/stateUpdates';
+import { removeRecordEntry, retainRecordEntries, setRecordEntry, setTimelineCursorEntry, updateRecordEntry } from '@/shell/stateUpdates';
 import { useConnectivityStatusRefresh } from '@/shell/data/useConnectivityStatusRefresh';
 import { useAdultGatedMediaHashes } from '@/shell/data/useAdultGatedMediaHashes';
 import { useCommunityNodeRecovery } from '@/shell/actions/useCommunityNodeRecovery';
@@ -197,60 +197,20 @@ export function useDesktopShellData({
   const setReactionPanelState = useDesktopShellFieldSetter('reactionPanelState');
   const setError = useDesktopShellFieldSetter('error');
 
-  useEffect(() => {
-    if (shellChromeState.activePrimarySection !== 'game') {
-      return;
-    }
-    const missingHostPubkeys = Array.from(
-      new Set(
-        activeGameRooms
-          .map((room) => room.host_pubkey)
-          .filter(
-            (pubkey) =>
-              pubkey &&
-              pubkey !== localProfile?.pubkey &&
-              pubkey !== state.syncStatus.local_author_pubkey &&
-              !knownAuthorsByPubkey[pubkey]
-          )
-      )
-    );
-    if (missingHostPubkeys.length === 0) {
-      return;
-    }
-    let disposed = false;
-    void Promise.all(
-      missingHostPubkeys.map((pubkey) => api.getAuthorSocialView(pubkey).catch(() => null))
-    ).then((authors) => {
-      if (disposed) {
-        return;
-      }
-      const resolvedAuthors = authors.filter((author) => author !== null);
-      if (resolvedAuthors.length > 0) {
-        setKnownAuthorsByPubkey((current) => mergeKnownAuthors(current, resolvedAuthors));
-      }
-    });
-    return () => {
-      disposed = true;
-    };
-  }, [
-    activeGameRooms,
-    api,
-    knownAuthorsByPubkey,
-    localProfile?.pubkey,
-    setKnownAuthorsByPubkey,
-    shellChromeState.activePrimarySection,
-    state.syncStatus.local_author_pubkey,
-  ]);
-
   // #1056: 開いている Timeline Column と各表示経路の投稿を、採用 node へ一括照会する対象にする。
   // 「見つける」の解決済み投稿は index 応答の advisory(#1055)で扱うため対象外。
   // `buildPostCardView` を通る投稿源(Timeline / Thread / Profile Column、ブックマーク等)は
   // すべて照会対象に含める。含めない投稿は照会済みにならず、スケルトンのまま残るため。
   const workspaceColumns = state.workspaceState.columns;
+  const visibleColumns = useMemo(() => {
+    const activeId = state.workspaceState.activeColumnId;
+    const ids = new Set([activeId, ...state.visibleListColumnIds.filter((id) => id !== activeId).slice(0, 7)]);
+    return workspaceColumns.filter((column) => ids.has(column.id));
+  }, [state.visibleListColumnIds, state.workspaceState.activeColumnId, workspaceColumns]);
   const timelinesByKey = state.timelinesByKey;
   const authorTimelinesByPubkey = state.authorTimelinesByPubkey;
   const advisoryLookupPosts = useMemo(() => {
-    const columnPosts = workspaceColumns.flatMap((column) => {
+    const columnPosts = visibleColumns.flatMap((column) => {
       if (column.kind === 'timeline' && column.scope) {
         return (
           timelinesByKey[
@@ -285,7 +245,7 @@ export function useDesktopShellData({
     thread,
     threadsById,
     timelinesByKey,
-    workspaceColumns,
+    visibleColumns,
   ]);
   const visibleBookmarkIds = useMemo(() => [
     ...new Set([...advisoryLookupPosts, ...communityIndexResolvedPosts].map((post) => post.object_id)),
@@ -337,20 +297,89 @@ export function useDesktopShellData({
   // #1061: live / game 一覧の主催者も折りたたみ判断の対象にする。
   const trustGateHostPubkeys = useMemo(() => {
     const hosts = new Set<string>();
-    for (const sessions of Object.values(state.liveSessionsByScopeKey)) {
-      for (const session of sessions) {
+    const scopeKeys = new Set(
+      visibleColumns
+        .filter((column) =>
+          (column.kind === 'stream' || column.kind === 'game' || column.kind === 'metaverse') && column.scope)
+        .map((column) => timelineStorageKeyForChannel(column.scope!.topicId, column.scope!.channelId))
+    );
+    for (const key of scopeKeys) {
+      for (const session of state.liveSessionsByScopeKey[key] ?? []) {
         const pubkey = session.host_pubkey?.trim();
         if (pubkey) hosts.add(pubkey);
       }
-    }
-    for (const rooms of Object.values(gameRoomsByScopeKey)) {
-      for (const room of rooms) {
+      for (const room of gameRoomsByScopeKey[key] ?? []) {
         const pubkey = room.host_pubkey?.trim();
         if (pubkey) hosts.add(pubkey);
       }
     }
     return [...hosts];
-  }, [gameRoomsByScopeKey, state.liveSessionsByScopeKey]);
+  }, [gameRoomsByScopeKey, state.liveSessionsByScopeKey, visibleColumns]);
+  const referencedAuthorKeys = useMemo(() => {
+    const keys = new Set<string>(trustGateHostPubkeys);
+    for (const post of [...advisoryLookupPosts, ...communityIndexResolvedPosts]) {
+      if (post.author_pubkey) keys.add(post.author_pubkey);
+      if (post.repost_of?.source_author_pubkey) keys.add(post.repost_of.source_author_pubkey);
+    }
+    for (const notification of notifications) {
+      if (notification.actor_pubkey) keys.add(notification.actor_pubkey);
+    }
+    for (const column of visibleColumns) {
+      if ((column.kind === 'profile' || column.kind === 'conversation') && column.entityId) {
+        keys.add(column.entityId);
+      }
+    }
+    if (selectedAuthorPubkey) keys.add(selectedAuthorPubkey);
+    if (state.selectedDirectMessagePeerPubkey) keys.add(state.selectedDirectMessagePeerPubkey);
+    return [...keys].sort().join(',');
+  }, [advisoryLookupPosts, communityIndexResolvedPosts, notifications, selectedAuthorPubkey,
+    state.selectedDirectMessagePeerPubkey, trustGateHostPubkeys, visibleColumns]);
+  useEffect(() => {
+    const activeAuthors = new Set(referencedAuthorKeys ? referencedAuthorKeys.split(',') : []);
+    setKnownAuthorsByPubkey((current) => retainRecordEntries(current, activeAuthors));
+  }, [knownAuthorsByPubkey, referencedAuthorKeys, setKnownAuthorsByPubkey]);
+  const hostDemandRef = useRef<ReadonlySet<string>>(new Set());
+  const pendingHostPubkeysRef = useRef<Map<string, number>>(new Map());
+  const nextHostRequestTokenRef = useRef(0);
+  useEffect(() => {
+    const demand = new Set(trustGateHostPubkeys);
+    hostDemandRef.current = demand;
+    for (const pubkey of pendingHostPubkeysRef.current.keys()) {
+      if (!demand.has(pubkey)) pendingHostPubkeysRef.current.delete(pubkey);
+    }
+    return () => { hostDemandRef.current = new Set(); };
+  }, [trustGateHostPubkeys]);
+  useEffect(() => () => { pendingHostPubkeysRef.current.clear(); }, []);
+  useEffect(() => {
+    if (shellChromeState.activePrimarySection !== 'game') return;
+    const missing = [...new Set(activeGameRooms.map((room) => room.host_pubkey))].filter((pubkey) =>
+      pubkey && pubkey !== localProfile?.pubkey &&
+      pubkey !== state.syncStatus.local_author_pubkey &&
+      !knownAuthorsByPubkey[pubkey] && !pendingHostPubkeysRef.current.has(pubkey));
+    if (missing.length === 0) return;
+    const tokens = new Map(missing.map((pubkey) => {
+      const token = ++nextHostRequestTokenRef.current;
+      pendingHostPubkeysRef.current.set(pubkey, token);
+      return [pubkey, token] as const;
+    }));
+    void Promise.all(missing.map((pubkey) => api.getAuthorSocialView(pubkey).catch(() => null)))
+      .then((authors) => {
+        const resolved = authors.filter((author) =>
+          author !== null && hostDemandRef.current.has(author.author_pubkey) &&
+          tokens.get(author.author_pubkey) === pendingHostPubkeysRef.current.get(author.author_pubkey));
+        if (resolved.length > 0) {
+          setKnownAuthorsByPubkey((current) => mergeKnownAuthors(current, resolved));
+        }
+      })
+      .finally(() => {
+        for (const pubkey of missing) {
+          if (tokens.get(pubkey) === pendingHostPubkeysRef.current.get(pubkey)) {
+            pendingHostPubkeysRef.current.delete(pubkey);
+          }
+        }
+      });
+  }, [activeGameRooms, api, knownAuthorsByPubkey, localProfile?.pubkey,
+    setKnownAuthorsByPubkey, shellChromeState.activePrimarySection, state.syncStatus.local_author_pubkey]);
   // #1061: 表示中の著者を採用 CN へ一括照会し、折りたたみ判断を state へ置く。
   useAuthorTrustGateLookup({
     api,
@@ -387,6 +416,7 @@ export function useDesktopShellData({
     selectedAuthorTimeline,
     thread,
     selectedDirectMessageTimeline,
+    directMessages: state.directMessages,
     ownedReactionAssets,
     bookmarkedReactionAssets,
     recentReactions,
