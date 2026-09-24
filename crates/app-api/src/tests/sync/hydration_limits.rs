@@ -256,6 +256,36 @@ struct GatedBlobService {
     inner: MemoryBlobService,
     open: std::sync::atomic::AtomicBool,
     fetches: std::sync::atomic::AtomicUsize,
+    reject_admission: std::sync::atomic::AtomicBool,
+}
+
+#[tokio::test]
+async fn deferred_body_admission_does_not_spend_a_network_attempt() {
+    let blobs = GatedBlobService::default();
+    let ledger = crate::service::hydration_limits::MissingBodyLedger::default();
+    let hash = BlobHash::new("f".repeat(64));
+    blobs
+        .reject_admission
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        crate::service::hydration_limits::fetch_projection_blob_text_bounded(
+            &blobs, &ledger, &hash
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(ledger.attempts(&hash), 0);
+    blobs
+        .reject_admission
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        crate::service::hydration_limits::fetch_projection_blob_text_bounded(
+            &blobs, &ledger, &hash
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(ledger.attempts(&hash), 1);
 }
 
 // #1284 AC-2 / AC-5: 利用者の明示再試行は自動 retry の cooldown 中でも対象本文を
@@ -377,6 +407,19 @@ async fn manual_post_body_retry_bypasses_the_automatic_cooldown_once() {
 
 #[async_trait]
 impl BlobService for GatedBlobService {
+    async fn prepare_retry_fetch<'a>(
+        &'a self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::PreparedRetryFetch<'a>> {
+        if self
+            .reject_admission
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("shared network capacity is full");
+        }
+        let hash = hash.clone();
+        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+    }
     async fn fetch_local_blob(
         &self,
         hash: &kukuri_core::BlobHash,
@@ -457,6 +500,31 @@ async fn missing_body_is_retried_on_the_ledger_schedule_and_recovers() {
         keys,
     );
 
+    blob_service
+        .reject_admission
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let deferred = app
+        .list_timeline(topic.as_str(), None, 20)
+        .await
+        .expect("timeline while shared network admission is full");
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(app.services.missing_body_ledger.attempts(&stored.hash), 0);
+    assert_eq!(
+        blob_service
+            .fetches
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        app.post_display_retry_at(&deferred.items[0])
+            .await
+            .expect("retry deadline")
+            .is_some()
+    );
+    blob_service
+        .reject_admission
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
     for _ in 0..5 {
         let view = app
             .list_timeline(topic.as_str(), None, 20)
@@ -498,6 +566,13 @@ async fn missing_body_is_retried_on_the_ledger_schedule_and_recovers() {
     })
     .await
     .expect("the body is recovered on the next scheduled attempt");
+    let recovered = app.list_timeline(topic.as_str(), None, 20).await.unwrap();
+    assert_eq!(
+        app.post_display_retry_at(&recovered.items[0])
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(docs_sync.restarts().await, 0);
 }
 

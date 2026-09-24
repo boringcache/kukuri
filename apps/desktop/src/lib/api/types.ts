@@ -94,6 +94,7 @@ import type {
 
 // PostView は wire 型に front 専用のローカル下書き状態を交差させる。
 export type PostView = WirePostView & {
+  display_retry_next_at_ms?: number | null;
   local_id?: string | null;
   local_state?: 'pending' | 'syncing' | 'failed' | null;
   local_error?: string | null;

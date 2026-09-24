@@ -373,6 +373,13 @@ impl AppService {
                 }
                 continue;
             }
+            if !self
+                .services
+                .missing_body_ledger
+                .ready_key(hash.as_str(), now)
+            {
+                continue;
+            }
             let Ok(permit) = self
                 .services
                 .missing_body_ledger
@@ -381,21 +388,36 @@ impl AppService {
             else {
                 continue;
             };
-            // `attempt` は task と一緒に破棄されても失敗として記録される(panic・runtime の終了を含む)。
-            let Some(attempt) = self.services.missing_body_ledger.try_begin(hash, now) else {
-                continue;
-            };
             let services = self.services.clone();
             let object_id = row.object_id.clone();
             let hash = hash.clone();
             let task = tokio::spawn(async move {
                 let _permit = permit;
-                let Some(text) =
-                    fetch_projection_blob_text(services.blob_service.as_ref(), &hash).await
+                let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
+                let Ok(Ok(fetch)) = tokio::time::timeout_at(
+                    deadline,
+                    services.blob_service.prepare_retry_fetch(&hash),
+                )
+                .await
+                else {
+                    return;
+                };
+                let Some(attempt) = services
+                    .missing_body_ledger
+                    .try_begin(&hash, Utc::now().timestamp_millis())
+                else {
+                    return;
+                };
+                let Some(bytes) = tokio::time::timeout_at(deadline, fetch)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
                 else {
                     attempt.fail();
                     return;
                 };
+                let text = String::from_utf8_lossy(&bytes).to_string();
                 let stored = async {
                     let projection_store = services.projection_store.as_ref();
                     // 取得を待つ間に取り下げや更新が入った行は書き戻さない。

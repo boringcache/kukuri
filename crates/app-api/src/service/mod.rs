@@ -410,8 +410,6 @@ pub struct ServiceHandles {
     pub(crate) missing_body_ledger: Arc<hydration_limits::MissingBodyLedger>,
     /// #1239: 表示した投稿の取り下げの、背景での確認の台帳。
     pub(crate) withdrawal_checks: Arc<hydration_limits::BackgroundCheckLedger>,
-    /// #1239: projection に無い返信先の、背景での反映の台帳(view の生成は docs を読まない)。
-    pub(crate) reply_target_checks: Arc<hydration_limits::BackgroundCheckLedger>,
     /// #1239: ページの範囲と時系列の索引の照合の台帳。
     pub(crate) range_checks: Arc<replica_window::RangeCheckLedger>,
 }
@@ -426,9 +424,14 @@ impl ServiceHandles {
         blob_service: Arc<dyn BlobService>,
         keys: KukuriKeys,
     ) -> Self {
+        let missing_body_ledger = Arc::default();
         Self {
             store,
-            session_projections: Arc::default(),
+            session_projections: Arc::new(
+                session_projection::SessionProjections::with_retry_ledger(Arc::clone(
+                    &missing_body_ledger,
+                )),
+            ),
             session_display_access: Arc::default(),
             projection_store,
             transport,
@@ -440,9 +443,8 @@ impl ServiceHandles {
             game_room_projections: Arc::default(),
             live_session_projections: Arc::default(),
             dome_mutations: Arc::default(),
-            missing_body_ledger: Arc::default(),
+            missing_body_ledger,
             withdrawal_checks: Arc::default(),
-            reply_target_checks: Arc::default(),
             range_checks: Arc::default(),
         }
     }

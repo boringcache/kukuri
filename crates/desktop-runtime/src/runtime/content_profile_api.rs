@@ -302,6 +302,10 @@ impl DesktopRuntime {
             .await
     }
 
+    pub async fn post_display_retry_at(&self, post: &PostView) -> Result<Option<i64>> {
+        self.app_service.post_display_retry_at(post).await
+    }
+
     pub async fn get_my_profile(&self) -> Result<Profile> {
         self.app_service.get_my_profile().await
     }

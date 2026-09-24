@@ -40,8 +40,7 @@ impl AppService {
             "invalid session key"
         );
         if !request.visible {
-            return self
-                .services
+            self.services
                 .session_projections
                 .visibility(
                     &request.topic,
@@ -51,7 +50,12 @@ impl AppService {
                     false,
                     false,
                 )
+                .await?;
+            self.services
+                .session_projections
+                .schedule(&self.services)
                 .await;
+            return Ok(());
         }
         let allowed = self.scope_replicas(&request.topic, &request.scope).await?;
         let replicas = if request.replica_id.is_empty() {

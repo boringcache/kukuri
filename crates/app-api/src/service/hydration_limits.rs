@@ -1,6 +1,6 @@
 //! #1225: 欠損した本文 blob の取り直しを有限にするための状態。
 //!
-//! - `MissingBodyLedger`: 取得できない本文 blob の試行を hash 単位で数え、間隔と回数に上限を置く。
+//! - `MissingBodyLedger`: 取得できない本文・返信先・session の試行を対象key単位で数え、間隔と回数に上限を置く。
 //!
 //! replica の全件走査と、その指紋の cache(`ReplicaScanCache`)は #1239 で削除した。
 
@@ -13,16 +13,26 @@ use tokio::sync::Semaphore;
 use super::*;
 
 /// n 回目の失敗から次の試行までの待ち時間。最後の値を以後の間隔として使う。
-pub(crate) const MISSING_BODY_RETRY_DELAYS_MS: [i64; 4] = [5_000, 30_000, 120_000, 600_000];
+pub(crate) const MISSING_BODY_RETRY_DELAYS_MS: [i64; 3] = [5_000, 30_000, 120_000];
 /// 本文 blob 1 つあたりの最大試行数。docs の event・hint の個別反映、利用者の操作の対象の反映、表示した行の
 /// 取り直しは、どれもこの台帳を通る。超えた後は、再起動(台帳は memory 上にある)まで取り直さない。
-pub(crate) const MISSING_BODY_MAX_ATTEMPTS: u32 = 8;
+pub(crate) const MISSING_BODY_MAX_ATTEMPTS: u32 = 4;
 /// 表示のときに取りに行き始めた本文を待つ時間の上限。件数に依存しない。過ぎた取得は背景で続く。
 pub(crate) const MISSING_BODY_DISPLAY_GRACE_MS: u64 = 300;
 /// 背景で同時に取り直す本文 blob の上限。
 pub(crate) const MISSING_BODY_MAX_CONCURRENT_FETCHES: usize = 4;
 /// 台帳の上限。超えた分は、取得中でない項目から捨てる。
-pub(crate) const MISSING_BODY_LEDGER_LIMIT: usize = 4_096;
+pub(crate) const MISSING_BODY_LEDGER_LIMIT: usize = 1_024;
+pub(crate) const MISSING_BODY_FAILURE_KEY_MAX_BYTES: usize = 256;
+
+pub(crate) fn display_retry_key(kind: &str, scope: &str, target: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    for part in [kind, scope, target] {
+        hash.update(&(part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{kind}:{}", hash.finalize().to_hex())
+}
 
 #[derive(Clone, Copy, Debug)]
 struct MissingBodyEntry {
@@ -66,6 +76,20 @@ impl MissingBodyAttempt {
 
     /// 失敗を記録する。何もせずに手放しても同じ結果になる。
     pub(crate) fn fail(self) {}
+
+    /// 共通network受付前の延期は試行に数えない。
+    pub(crate) fn defer(mut self) {
+        self.settled = true;
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if let Some(entry) = entries.get_mut(&self.hash) {
+            entry.in_flight = false;
+            entry.attempts = entry.attempts.saturating_sub(1);
+            entry.next_attempt_at_ms = 0;
+            if entry.attempts == 0 {
+                entries.remove(&self.hash);
+            }
+        }
+    }
 }
 
 impl Drop for MissingBodyAttempt {
@@ -88,14 +112,18 @@ impl MissingBodyLedger {
     /// 利用者の明示再試行。自動試行の cooldown / 上限とは別に、この hash を 1 回だけ
     /// `try_begin` できる状態へ置く。取得中の要求は合流させ、台帳の上限も維持する。
     pub(crate) fn request_manual_retry(&self, hash: &BlobHash) -> bool {
-        let mut entries = self.entries.lock().expect("missing body ledger lock");
-        if entries
-            .get(hash.as_str())
-            .is_some_and(|entry| entry.in_flight)
-        {
+        self.request_manual_retry_key(hash.as_str())
+    }
+
+    pub(crate) fn request_manual_retry_key(&self, key: &str) -> bool {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
             return false;
         }
-        if !entries.contains_key(hash.as_str()) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if entries.get(key).is_some_and(|entry| entry.in_flight) {
+            return false;
+        }
+        if !entries.contains_key(key) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
             let evictable = entries
                 .iter()
                 .find(|(_, entry)| !entry.in_flight)
@@ -106,7 +134,7 @@ impl MissingBodyLedger {
             entries.remove(&key);
         }
         entries.insert(
-            hash.as_str().to_string(),
+            key.to_string(),
             MissingBodyEntry {
                 attempts: MISSING_BODY_MAX_ATTEMPTS.saturating_sub(1),
                 next_attempt_at_ms: 0,
@@ -118,8 +146,15 @@ impl MissingBodyLedger {
 
     /// この hash を今 remote へ取りに行ってよいか。`Some` を返したときは試行を 1 回消費し、取得中にする。
     pub(crate) fn try_begin(&self, hash: &BlobHash, now_ms: i64) -> Option<MissingBodyAttempt> {
+        self.try_begin_key(hash.as_str(), now_ms)
+    }
+
+    pub(crate) fn try_begin_key(&self, key: &str, now_ms: i64) -> Option<MissingBodyAttempt> {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return None;
+        }
         let mut entries = self.entries.lock().expect("missing body ledger lock");
-        if !entries.contains_key(hash.as_str()) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
+        if !entries.contains_key(key) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
             let evictable = entries
                 .iter()
                 .find(|(_, entry)| !entry.in_flight)
@@ -131,13 +166,11 @@ impl MissingBodyLedger {
                 None => return None,
             }
         }
-        let entry = entries
-            .entry(hash.as_str().to_string())
-            .or_insert(MissingBodyEntry {
-                attempts: 0,
-                next_attempt_at_ms: 0,
-                in_flight: false,
-            });
+        let entry = entries.entry(key.to_string()).or_insert(MissingBodyEntry {
+            attempts: 0,
+            next_attempt_at_ms: 0,
+            in_flight: false,
+        });
         if entry.in_flight
             || entry.attempts >= MISSING_BODY_MAX_ATTEMPTS
             || entry.next_attempt_at_ms > now_ms
@@ -148,19 +181,88 @@ impl MissingBodyLedger {
         entry.in_flight = true;
         Some(MissingBodyAttempt {
             entries: Arc::clone(&self.entries),
-            hash: hash.as_str().to_string(),
+            hash: key.to_string(),
             settled: false,
         })
     }
 
     /// local から本文を読めた。台帳に残っている記録を消す。
     pub(crate) fn forget(&self, hash: &BlobHash) {
+        self.forget_key(hash.as_str());
+    }
+
+    pub(crate) fn forget_key(&self, key: &str) {
         let mut entries = self.entries.lock().expect("missing body ledger lock");
-        if entries
-            .get(hash.as_str())
-            .is_some_and(|entry| !entry.in_flight)
+        if entries.get(key).is_some_and(|entry| !entry.in_flight) {
+            entries.remove(key);
+        }
+    }
+
+    pub(crate) fn ready_key(&self, key: &str, now_ms: i64) -> bool {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return false;
+        }
+        self.entries
+            .lock()
+            .expect("missing body ledger lock")
+            .get(key)
+            .is_none_or(|entry| {
+                !entry.in_flight
+                    && entry.attempts < MISSING_BODY_MAX_ATTEMPTS
+                    && entry.next_attempt_at_ms <= now_ms
+            })
+    }
+
+    pub(crate) fn next_attempt_at_key(&self, key: &str) -> Option<i64> {
+        self.entries
+            .lock()
+            .expect("missing body ledger lock")
+            .get(key)
+            .filter(|entry| !entry.in_flight && entry.attempts < MISSING_BODY_MAX_ATTEMPTS)
+            .map(|entry| entry.next_attempt_at_ms)
+    }
+
+    pub(crate) fn display_retry_at_key(&self, key: &str, now_ms: i64) -> Option<i64> {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return None;
+        }
+        match self
+            .entries
+            .lock()
+            .expect("missing body ledger lock")
+            .get(key)
         {
-            entries.remove(hash.as_str());
+            Some(entry) if entry.attempts >= MISSING_BODY_MAX_ATTEMPTS && !entry.in_flight => None,
+            Some(entry) if entry.in_flight => Some(now_ms.saturating_add(5_000)),
+            Some(entry) => Some(entry.next_attempt_at_ms.max(now_ms.saturating_add(1_000))),
+            None => Some(now_ms.saturating_add(5_000)),
+        }
+    }
+
+    /// 共有network受付の延期。失敗回数を増やさず、表示中の再確認期限だけを置く。
+    pub(crate) fn defer_key(&self, key: &str, until_ms: i64) {
+        if key.len() > MISSING_BODY_FAILURE_KEY_MAX_BYTES {
+            return;
+        }
+        let mut entries = self.entries.lock().expect("missing body ledger lock");
+        if !entries.contains_key(key) && entries.len() >= MISSING_BODY_LEDGER_LIMIT {
+            if let Some(victim) = entries
+                .iter()
+                .find(|(_, entry)| !entry.in_flight)
+                .map(|(key, _)| key.clone())
+            {
+                entries.remove(&victim);
+            } else {
+                return;
+            }
+        }
+        let entry = entries.entry(key.to_owned()).or_insert(MissingBodyEntry {
+            attempts: 0,
+            next_attempt_at_ms: 0,
+            in_flight: false,
+        });
+        if !entry.in_flight && entry.attempts < MISSING_BODY_MAX_ATTEMPTS {
+            entry.next_attempt_at_ms = entry.next_attempt_at_ms.max(until_ms);
         }
     }
 
@@ -202,20 +304,35 @@ pub(crate) async fn fetch_projection_blob_text_bounded(
         best_effort_blob_cache_status(blob_service, hash).await,
         BlobCacheStatus::Available | BlobCacheStatus::Pinned
     );
-    // 取得を待つ間に走査が abort されても、`attempt` の drop で失敗として記録される。
-    let attempt = if local {
-        None
-    } else {
-        Some(missing_bodies.try_begin(hash, Utc::now().timestamp_millis())?)
-    };
-    let payload = fetch_projection_blob_text(blob_service, hash).await;
-    match (payload.is_some(), attempt) {
-        (true, Some(attempt)) => attempt.succeed(),
-        (true, None) => missing_bodies.forget(hash),
-        (false, Some(attempt)) => attempt.fail(),
-        (false, None) => {}
+    if local {
+        let payload = fetch_projection_blob_text(blob_service, hash).await;
+        if payload.is_some() {
+            missing_bodies.forget(hash);
+        }
+        return payload;
     }
-    payload
+    let deadline = tokio::time::Instant::now() + projection_blob_fetch_timeout();
+    let fetch = tokio::time::timeout_at(deadline, blob_service.prepare_retry_fetch(hash))
+        .await
+        .ok()?
+        .ok()?;
+    // 共有network枠の受付後にだけ試行を数える。abort時はattemptのDropで失敗を記録する。
+    let attempt = missing_bodies.try_begin(hash, Utc::now().timestamp_millis())?;
+    let bytes = tokio::time::timeout_at(deadline, fetch)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+    match bytes {
+        Some(bytes) => {
+            attempt.succeed();
+            Some(String::from_utf8_lossy(&bytes).to_string())
+        }
+        None => {
+            attempt.fail();
+            None
+        }
+    }
 }
 
 /// 手元にある本文だけを読む。remote からは取得しない。
@@ -241,11 +358,8 @@ pub(crate) const BACKGROUND_CHECK_LEDGER_LIMIT: usize = 4_096;
 /// 背景で同時に行う確認の上限(台帳ごと)。
 pub(crate) const BACKGROUND_CHECK_MAX_CONCURRENT: usize = 4;
 
-/// view の生成から背景へ出した確認を、確認先(replica と object id の組)ごとに間隔を空けて行うための台帳(#1239)。
-///
-/// view の生成中に docs を読まないため、表示した投稿の取り下げの確認と、projection に無い返信先の反映は背景へ出す。
-/// 用途ごとに別の台帳を持つ。同じ object を表示し続けても、確認は間隔ごとに 1 回で、key を指定した読み出しだけを行う
-/// (replica は走査しない)。
+/// view の生成から背景へ出した取り下げ確認を、確認先(replica と object id の組)ごとに間隔を空ける台帳(#1239)。
+/// 同じ object を表示し続けても確認は間隔ごとに 1 回で、replica は走査しない。
 pub(crate) struct BackgroundCheckLedger {
     next_check_at_ms: Mutex<HashMap<String, i64>>,
     permits: Arc<Semaphore>,
@@ -364,7 +478,7 @@ mod tests {
         let target = hash("a");
         let mut now = chrono::Utc::now().timestamp_millis();
         let mut waits = Vec::new();
-        for _ in 0..MISSING_BODY_MAX_ATTEMPTS {
+        for _ in 0..4 {
             let attempt = ledger.try_begin(&target, now).expect("due");
             assert!(ledger.try_begin(&target, now).is_none(), "in flight");
             let failed_at = chrono::Utc::now().timestamp_millis();
@@ -378,8 +492,8 @@ mod tests {
             waits.push((next - failed_at + 500) / 1_000 * 1_000);
             now = next;
         }
-        assert_eq!(&waits[..4], &[5_000, 30_000, 120_000, 600_000]);
-        assert_eq!(ledger.attempts(&target), MISSING_BODY_MAX_ATTEMPTS);
+        assert_eq!(waits[..3], [5_000, 30_000, 120_000]);
+        assert_eq!(ledger.attempts(&target), 4);
         assert!(ledger.try_begin(&target, i64::MAX).is_none());
     }
 
@@ -418,6 +532,65 @@ mod tests {
             "an abandoned attempt must not block later attempts"
         );
         assert_eq!(ledger.attempts(&target), 2);
+    }
+
+    #[test]
+    fn deferred_admission_does_not_spend_a_retry() {
+        let ledger = MissingBodyLedger::default();
+        let target = hash("d");
+        ledger.try_begin(&target, 0).expect("admitted").defer();
+        assert_eq!(ledger.attempts(&target), 0);
+        assert!(ledger.try_begin(&target, 0).is_some());
+    }
+
+    #[test]
+    fn deferred_network_admission_keeps_the_retry_budget() {
+        let ledger = MissingBodyLedger::default();
+        let key = "session:deferred";
+        ledger.defer_key(key, 5_000);
+        assert_eq!(ledger.attempts(&BlobHash::new(key)), 0);
+        assert!(!ledger.ready_key(key, 4_999));
+        assert!(ledger.ready_key(key, 5_000));
+    }
+
+    #[test]
+    fn display_deadline_follows_real_attempts_and_stops_after_four() {
+        let ledger = MissingBodyLedger::default();
+        let hash = hash("b");
+        assert_eq!(ledger.display_retry_at_key(hash.as_str(), 0), Some(5_000));
+        for _ in 0..4 {
+            ledger
+                .try_begin(&hash, i64::MAX)
+                .expect("network attempt")
+                .fail();
+        }
+        assert_eq!(ledger.attempts(&hash), 4);
+        assert_eq!(ledger.display_retry_at_key(hash.as_str(), 0), None);
+    }
+
+    #[test]
+    fn failure_history_and_key_bytes_are_bounded() {
+        let ledger = MissingBodyLedger::default();
+        for index in 0..10_240 {
+            let hash = BlobHash::new(format!("{index:064x}"));
+            ledger.try_begin(&hash, 0).expect("admitted").fail();
+        }
+        assert_eq!(ledger.len(), MISSING_BODY_LEDGER_LIMIT);
+        let oversized = BlobHash::new("あ".repeat(100));
+        assert!(ledger.try_begin(&oversized, 0).is_none());
+        assert!(!ledger.request_manual_retry(&oversized));
+        assert_eq!(ledger.len(), MISSING_BODY_LEDGER_LIMIT);
+    }
+
+    #[test]
+    fn scoped_failure_keys_keep_distinct_authorization_and_target() {
+        let first = display_retry_key("reply", "private-epoch-a", "post");
+        assert_ne!(first, display_retry_key("reply", "private-epoch-b", "post"));
+        assert_ne!(
+            first,
+            display_retry_key("reply", "private-epoch-a", "other-post")
+        );
+        assert!(display_retry_key("session", &"scope".repeat(1_000), "id").len() <= 256);
     }
 
     #[test]

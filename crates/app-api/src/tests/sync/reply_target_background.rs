@@ -40,7 +40,7 @@ async fn a_missing_reply_target_is_reflected_in_the_background_without_docs_read
     let source = Some((&replica, topic.as_str()));
 
     // 背景の反映が走り出す前に、view の生成が docs を読まないことを確かめる(permit を取らせない)。
-    let permits = app.services.reply_target_checks.permits();
+    let permits = app.services.missing_body_ledger.fetch_permits();
     let held = permits
         .acquire_many(crate::service::hydration_limits::BACKGROUND_CHECK_MAX_CONCURRENT as u32)
         .await
@@ -126,7 +126,81 @@ async fn background_reflection_of_a_reply_target_is_spaced_per_target() {
         .filter(|(_, query)| *query == DocQuery::Exact(envelope_key.clone()))
         .count();
     assert_eq!(reads, 1, "one background read per target and interval");
-    assert_eq!(app.services.reply_target_checks.len(), 1);
+    assert_eq!(app.services.missing_body_ledger.len(), 1);
+}
+
+#[tokio::test]
+async fn manual_card_retry_reopens_an_exhausted_missing_reply_target() {
+    let docs_sync = Arc::new(CountingDocsSync::default());
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(StaticTransport::new(PeerSnapshot::default()));
+    let keys = generate_keys();
+    let topic = TopicId::new("kukuri:topic:reply-manual-retry");
+    let replica = topic_replica_id(topic.as_str());
+    let parent = signed_post(&keys, &topic, "the parent", ObjectVisibility::Public, None);
+    let reply = super::range_reconcile::put_post_at(
+        docs_sync.as_ref(),
+        &replica,
+        &keys,
+        &topic,
+        parent.created_at + 1,
+        "the reply",
+        Some(&parent),
+    )
+    .await;
+    super::range_reconcile::project(store.as_ref(), &reply, &replica).await;
+    let app = app_service_from_dependencies(
+        store.clone(),
+        store,
+        transport.clone(),
+        transport,
+        docs_sync.clone(),
+        Arc::new(MemoryBlobService::default()),
+        keys,
+    );
+    let key = crate::service::hydration_limits::display_retry_key(
+        "reply",
+        replica.as_str(),
+        parent.id.as_str(),
+    );
+    let pending = app
+        .retry_post_elements(reply.object_id.as_str(), Some(parent.id.as_str()), false)
+        .await
+        .expect("automatic retry")
+        .expect("reply card");
+    assert!(pending.reply_preview.is_none());
+    assert!(
+        app.services
+            .missing_body_ledger
+            .try_begin_key(&key, Utc::now().timestamp_millis())
+            .is_none(),
+        "an absent parent observes the shared cooldown"
+    );
+    for _ in 0..3 {
+        app.services
+            .missing_body_ledger
+            .try_begin_key(&key, i64::MAX)
+            .expect("retry slot")
+            .fail();
+    }
+    write_object_entries(
+        docs_sync.as_ref(),
+        &replica,
+        Some(&parent),
+        &honest_header(&parent),
+    )
+    .await;
+    let view = app
+        .retry_post_elements(reply.object_id.as_str(), Some(parent.id.as_str()), true)
+        .await
+        .expect("manual retry")
+        .expect("reply card");
+    assert_eq!(
+        view.reply_preview
+            .as_ref()
+            .map(|preview| preview.content.as_str()),
+        Some("the parent")
+    );
 }
 
 // 取得側の反映(#1277): 遡ったページの行でも、返信先が手元の docs にあれば、その取得で preview が出る
@@ -342,6 +416,7 @@ async fn profile_view_recovers_the_visible_reply_target_body() {
 struct RemoteBodyBlobService {
     inner: MemoryBlobService,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
+    reject_admission: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 本文の提供元を test から復旧できる blob service。返信先の projection が `content: None` で
@@ -601,6 +676,19 @@ async fn a_visible_reply_target_with_a_missing_body_recovers_after_its_provider_
 
 #[async_trait]
 impl BlobService for RemoteBodyBlobService {
+    async fn prepare_retry_fetch<'a>(
+        &'a self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::PreparedRetryFetch<'a>> {
+        if self
+            .reject_admission
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("shared network capacity is full");
+        }
+        let hash = hash.clone();
+        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+    }
     async fn fetch_local_blob(
         &self,
         _hash: &kukuri_core::BlobHash,
@@ -704,7 +792,7 @@ async fn the_listing_does_not_wait_for_a_remote_body_of_the_reply_target() {
     super::range_reconcile::project(store.as_ref(), &reply, &replica).await;
 
     // 背景の反映を止めておき、取得の経路の blob の取得を数える。
-    let permits = app.services.reply_target_checks.permits();
+    let permits = app.services.missing_body_ledger.fetch_permits();
     let held = permits
         .acquire_many(crate::service::hydration_limits::BACKGROUND_CHECK_MAX_CONCURRENT as u32)
         .await
@@ -728,16 +816,36 @@ async fn the_listing_does_not_wait_for_a_remote_body_of_the_reply_target() {
     assert!(page.items.iter().all(|item| item.reply_preview.is_none()));
     drop(held);
 
+    blobs
+        .reject_admission
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cursor = TimelineCursor {
+        created_at: reply.created_at + 1,
+        object_id: EnvelopeId::from("f".repeat(64).as_str()),
+    };
+    app.list_timeline(topic.as_str(), Some(cursor.clone()), 1)
+        .await
+        .expect("older page while network admission is rejected");
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        app.services.missing_body_ledger.attempts(&BlobHash::new(
+            crate::service::hydration_limits::display_retry_key(
+                "reply",
+                replica.as_str(),
+                parent_header.object_id.as_str()
+            )
+        )),
+        0,
+        "rejected admission must refund the reply retry"
+    );
+    assert_eq!(blobs.fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    blobs
+        .reject_admission
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
     // 容量が戻った後の次の需要だけが、remote 本文の背景取得を開始する。
     let _ = app
-        .list_timeline(
-            topic.as_str(),
-            Some(TimelineCursor {
-                created_at: reply.created_at + 1,
-                object_id: EnvelopeId::from("f".repeat(64).as_str()),
-            }),
-            1,
-        )
+        .list_timeline(topic.as_str(), Some(cursor), 1)
         .await
         .expect("older page after capacity returns");
     timeout(Duration::from_secs(10), async {

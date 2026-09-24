@@ -1,19 +1,9 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import type { PostView } from '@/lib/api';
+import { DisplayRetryContext } from '@/lib/displayRetryScheduler';
 
 import { PostReloadContext } from './postReloadContext';
-
-const AUTOMATIC_REPLY_RETRY_DELAYS_MS = [
-  0,
-  5_000,
-  30_000,
-  120_000,
-  600_000,
-  600_000,
-  600_000,
-  600_000,
-];
 
 function reloadScopeKey(post: PostView) {
   const topicId = post.published_topic_id ?? post.origin_topic_id ?? '';
@@ -32,6 +22,7 @@ export function usePostReload({
   recoverMissingReply: boolean;
 }) {
   const reloadPost = useContext(PostReloadContext);
+  const retryScheduler = useContext(DisplayRetryContext);
   const reloadPostRef = useRef(reloadPost);
   const sourcePostRef = useRef(sourcePost);
   const cardRef = useRef<HTMLElement | null>(null);
@@ -45,10 +36,8 @@ export function usePostReload({
   const post = reloadedPost?.source === sourcePost ? reloadedPost.value : sourcePost;
   const reloadAvailable =
     reloadPost !== null && !adultContentGated && mediaState !== 'gated';
-  const automaticReplyObjectId =
-    recoverMissingReply && post.reply_preview?.content_status === 'Missing'
-      ? post.reply_preview.object_id
-      : null;
+  const automaticPending = post.content_status === 'Missing' ||
+    (recoverMissingReply && Boolean(post.reply_to) && post.reply_preview?.content_status !== 'Available');
   const sourceScopeKey = reloadScopeKey(sourcePost);
 
   useLayoutEffect(() => {
@@ -60,69 +49,59 @@ export function usePostReload({
     const card = cardRef.current;
     if (
       !reloadAvailable ||
-      !automaticReplyObjectId ||
+      !automaticPending ||
+      !retryScheduler ||
       !card ||
       typeof IntersectionObserver === 'undefined'
     ) {
       return;
     }
-
-    let cancelled = false;
-    let started = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const wait = (delayMs: number) =>
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, delayMs);
-      });
-    const retryVisibleReply = async () => {
-      for (const delayMs of AUTOMATIC_REPLY_RETRY_DELAYS_MS) {
-        if (delayMs > 0) await wait(delayMs);
-        if (cancelled) return;
-        const reloadAtStart = reloadPostRef.current;
-        const postAtStart = sourcePostRef.current;
-        if (!reloadAtStart || reloadInFlightRef.current) continue;
-        reloadInFlightRef.current = true;
-        setReloadPending(true);
-        try {
-          const updated = await reloadAtStart(postAtStart, automaticReplyObjectId, false);
-          const currentSourcePost = sourcePostRef.current;
-          if (
-            cancelled ||
-            reloadPostRef.current !== reloadAtStart ||
-            reloadScopeKey(currentSourcePost) !== sourceScopeKey
-          ) {
-            return;
-          }
-          if (updated) {
-            setReloadedPost({ source: currentSourcePost, value: updated });
-            if (updated.reply_preview?.content_status === 'Available') return;
-          }
-        } catch {
-          // Automatic recovery remains quiet and follows the finite backoff schedule.
-        } finally {
-          reloadInFlightRef.current = false;
-          if (!cancelled) setReloadPending(false);
-        }
+    let intersecting = false;
+    let release: (() => void) | null = null;
+    const run = async () => {
+      const reloadAtStart = reloadPostRef.current;
+      if (!reloadAtStart || reloadInFlightRef.current) return null;
+      reloadInFlightRef.current = true;
+      setReloadPending(true);
+      try {
+        return await reloadAtStart(sourcePostRef.current, null, false);
+      } catch {
+        return null;
+      } finally {
+        reloadInFlightRef.current = false;
+        setReloadPending(false);
+      }
+    };
+    const receive = (updated: PostView | null) => {
+      const currentSourcePost = sourcePostRef.current;
+      if (!updated || reloadScopeKey(currentSourcePost) !== sourceScopeKey) return false;
+      setReloadedPost({ source: currentSourcePost, value: updated });
+      return updated.content_status === 'Available' &&
+        (!recoverMissingReply || !updated.reply_to || updated.reply_preview?.content_status === 'Available');
+    };
+    const update = () => {
+      if (intersecting && document.visibilityState !== 'hidden') {
+        release ??= retryScheduler.subscribe(`${sourceScopeKey}\0elements`, run, receive);
+      } else {
+        release?.();
+        release = null;
       }
     };
     const observer = new IntersectionObserver(
       (entries) => {
-        if (!started && entries.some((entry) => entry.isIntersecting)) {
-          started = true;
-          observer.disconnect();
-          void retryVisibleReply();
-        }
+        intersecting = entries.some((entry) => entry.isIntersecting);
+        update();
       },
       { rootMargin: '120px' }
     );
     observer.observe(card);
+    document.addEventListener('visibilitychange', update);
     return () => {
-      cancelled = true;
       observer.disconnect();
-      if (timer !== null) clearTimeout(timer);
-      setReloadPending(false);
+      document.removeEventListener('visibilitychange', update);
+      release?.();
     };
-  }, [automaticReplyObjectId, reloadAvailable, reloadPost, sourceScopeKey]);
+  }, [automaticPending, reloadAvailable, retryScheduler, recoverMissingReply, sourceScopeKey]);
 
   const runReload = useCallback(
     async (bodyObjectId?: string | null) => {
@@ -140,6 +119,10 @@ export function usePostReload({
           sourcePostRef.current === sourcePostAtStart
         ) {
           setReloadedPost({ source: sourcePostAtStart, value: updated });
+          if (updated.content_status === 'Available' &&
+              (!recoverMissingReply || !updated.reply_to || updated.reply_preview?.content_status === 'Available')) {
+            retryScheduler?.forget(`${sourceScopeKey}\0elements`);
+          }
         }
       } catch {
         setReloadFailed(true);
@@ -148,7 +131,8 @@ export function usePostReload({
         setReloadPending(false);
       }
     },
-    [post, reloadAvailable, reloadPending, reloadPost, sourcePost]
+    [post, reloadAvailable, reloadPending, reloadPost, sourcePost, recoverMissingReply,
+      retryScheduler, sourceScopeKey]
   );
 
   return {

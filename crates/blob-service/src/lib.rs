@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -13,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 pub use kukuri_iroh_node::remote_fetch::DisplayBlobFetch;
+pub type PreparedRetryFetch<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
 
 pub const DISPLAY_FETCH_TIMEOUT: std::time::Duration = remote_fetch::REMOTE_FETCH_TOTAL_TIMEOUT;
 
@@ -34,6 +38,11 @@ pub enum BlobStatus {
 pub trait BlobService: Send + Sync {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
+    /// Reserve shared network capacity before the caller spends a retry attempt.
+    async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
+        let hash = hash.clone();
+        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+    }
     /// ローカルのbytesだけを読む。未対応の実装は取得不可とし、remoteへfallbackしない。
     async fn fetch_local_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -249,6 +258,17 @@ impl BlobService for MemoryBlobService {
 
 #[async_trait]
 impl BlobService for IrohBlobService {
+    async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
+        let fetch = self.prepare_display_fetch(hash).await?;
+        let service = self.clone();
+        Ok(Box::pin(async move {
+            let Some(bytes) = fetch.await? else {
+                return Ok(None);
+            };
+            let stored = service.put_blob(bytes, "application/octet-stream").await?;
+            service.fetch_local_blob(&stored.hash).await
+        }))
+    }
     async fn prepare_display_fetch(&self, hash: &BlobHash) -> Result<DisplayBlobFetch> {
         if let Some(bytes) = self.fetch_local_blob(hash).await? {
             return Ok(Box::pin(async move { Ok(Some(bytes)) }));
