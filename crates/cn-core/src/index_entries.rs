@@ -278,6 +278,20 @@ pub trait IndexEntryStore: Send + Sync {
     /// scope 全体を真実源から削除する。
     async fn remove_scope(&self, scope_kind: IndexScopeKind, scope_id: &str) -> Result<()>;
 
+    /// Keep a validated withdrawal across provider changes and remove any old indexed row.
+    async fn record_verified_withdrawal(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<()>;
+    async fn is_known_withdrawn(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<bool>;
+
     /// 投影 hit 候補 `(scope_id, object_id)` のうち、いま surfacing してよいものだけを返す
     /// （真実源に存在し、最新 verdict が `allow` かつ非 critical）。最新 verdict 由来の
     /// content advisory を同伴する（ADR 0025 §7.1）。
@@ -342,6 +356,41 @@ impl IndexEntryStore for PgIndexEntryStore {
         remove_index_scope(&self.pool, scope_kind, scope_id).await
     }
 
+    async fn record_verified_withdrawal(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO cn_index.known_post_withdrawals (scope_kind, scope_id, object_id)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(scope_kind.as_str())
+        .bind(scope_id)
+        .bind(object_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn is_known_withdrawn(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM cn_index.known_post_withdrawals
+             WHERE scope_kind = $1 AND scope_id = $2 AND object_id = $3)",
+        )
+        .bind(scope_kind.as_str())
+        .bind(scope_id)
+        .bind(object_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     async fn filter_surfaceable(
         &self,
         scope_kind: IndexScopeKind,
@@ -395,6 +444,7 @@ pub struct MemoryIndexEntryStore {
     entries: Arc<Mutex<MemoryEntryMap>>,
     prevented: Arc<Mutex<HashSet<String>>>,
     unsupported: Arc<Mutex<HashSet<(IndexScopeKind, String)>>>,
+    withdrawn: Arc<Mutex<HashSet<(IndexScopeKind, String, String)>>>,
 }
 
 impl MemoryIndexEntryStore {
@@ -418,6 +468,7 @@ impl MemoryIndexEntryStore {
             entries: Arc::new(Mutex::new(HashMap::new())),
             prevented: Arc::new(Mutex::new(HashSet::new())),
             unsupported: Arc::new(Mutex::new(HashSet::new())),
+            withdrawn: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -498,14 +549,19 @@ impl IndexEntryStore for MemoryIndexEntryStore {
                 entry.verdict_id
             );
         }
-        self.entries.lock().expect("entries mutex poisoned").insert(
-            (
-                entry.scope_kind,
-                entry.scope_id.clone(),
-                entry.object_id.clone(),
-            ),
-            entry.clone(),
+        let key = (
+            entry.scope_kind,
+            entry.scope_id.clone(),
+            entry.object_id.clone(),
         );
+        let withdrawn = self.withdrawn.lock().expect("withdrawn mutex poisoned");
+        if withdrawn.contains(&key) {
+            bail!("known withdrawn post cannot be indexed");
+        }
+        self.entries
+            .lock()
+            .expect("entries mutex poisoned")
+            .insert(key, entry.clone());
         Ok(())
     }
 
@@ -528,6 +584,35 @@ impl IndexEntryStore for MemoryIndexEntryStore {
             .expect("entries mutex poisoned")
             .retain(|(kind, id, _), _| !(*kind == scope_kind && id == scope_id));
         Ok(())
+    }
+
+    async fn record_verified_withdrawal(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<()> {
+        let key = (scope_kind, scope_id.to_string(), object_id.to_string());
+        let mut withdrawn = self.withdrawn.lock().expect("withdrawn mutex poisoned");
+        withdrawn.insert(key.clone());
+        self.entries
+            .lock()
+            .expect("entries mutex poisoned")
+            .remove(&key);
+        Ok(())
+    }
+
+    async fn is_known_withdrawn(
+        &self,
+        scope_kind: IndexScopeKind,
+        scope_id: &str,
+        object_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .withdrawn
+            .lock()
+            .expect("withdrawn mutex poisoned")
+            .contains(&(scope_kind, scope_id.to_string(), object_id.to_string())))
     }
 
     async fn filter_surfaceable(

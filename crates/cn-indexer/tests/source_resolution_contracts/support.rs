@@ -193,6 +193,27 @@ impl IndexEntryStore for ObservedEntries {
             .scope_removes += 1;
         self.inner.remove_scope(kind, scope).await
     }
+    async fn record_verified_withdrawal(
+        &self,
+        kind: IndexScopeKind,
+        scope: &str,
+        id: &str,
+    ) -> Result<()> {
+        self.trace
+            .lock()
+            .expect("source contract fixture mutex poisoned")
+            .entry_removes
+            .push(id.into());
+        self.inner.record_verified_withdrawal(kind, scope, id).await
+    }
+    async fn is_known_withdrawn(
+        &self,
+        kind: IndexScopeKind,
+        scope: &str,
+        id: &str,
+    ) -> Result<bool> {
+        self.inner.is_known_withdrawn(kind, scope, id).await
+    }
     async fn filter_surfaceable(
         &self,
         kind: IndexScopeKind,

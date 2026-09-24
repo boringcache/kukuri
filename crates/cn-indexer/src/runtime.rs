@@ -35,6 +35,7 @@ use crate::config::IndexerConfig;
 use crate::ingest::IngestPipeline;
 use crate::media_fetcher::BlobMediaFetcher;
 use crate::participant::IndexerParticipant;
+use crate::public_bucket_reader::PublicBucketReader;
 use crate::scheduler::PostFetchScheduler;
 use crate::state::IndexerRuntimeState;
 use crate::status::spawn_status_server;
@@ -200,7 +201,7 @@ async fn run(config: IndexerConfig) -> Result<()> {
                 issuer_node_id = %service.issuer_node_id(),
                 "safety scan service constructed"
             );
-            let (participant, docs_sync) = compose_ingest_stack(
+            let (participant, docs_sync, public_reader) = compose_ingest_stack(
                 &config,
                 pool,
                 cipher,
@@ -221,7 +222,8 @@ async fn run(config: IndexerConfig) -> Result<()> {
                     poll_interval: config.poll_interval,
                     ..WorkerConfig::default()
                 },
-            );
+            )
+            .with_public_bucket_reader(public_reader);
             let handle = worker.spawn();
             info!("cn-indexer is resident; ingest loop running");
 
@@ -298,7 +300,11 @@ async fn compose_ingest_stack(
     node: Arc<IrohDocsNode>,
     blob_service: Arc<dyn BlobService>,
     state: Arc<IndexerRuntimeState>,
-) -> Result<(IndexerParticipant, Arc<IrohDocsSync>)> {
+) -> Result<(
+    IndexerParticipant,
+    Arc<IrohDocsSync>,
+    Arc<PublicBucketReader>,
+)> {
     let docs_sync = Arc::new(IrohDocsSync::new(node));
     if !config.seed_peers.is_empty() {
         docs_sync
@@ -329,7 +335,14 @@ async fn compose_ingest_stack(
         projection.clone(),
     )
     .with_metrics(state)
+    .with_blob_service(blob_service.clone())
     .with_post_scheduler(post_scheduler, config.max_concurrent_posts);
+    let public_reader = Arc::new(PublicBucketReader::new(
+        pool.clone(),
+        docs_sync.clone(),
+        entries.clone(),
+        pipeline.clone(),
+    ));
     let participant = IndexerParticipant::new(
         pool,
         docs_sync.clone(),
@@ -340,7 +353,7 @@ async fn compose_ingest_stack(
     )
     .with_configured_seed_peers(config.seed_peers.clone())
     .with_blob_service(blob_service);
-    Ok((participant, docs_sync))
+    Ok((participant, docs_sync, public_reader))
 }
 
 fn init_tracing() {

@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::warn;
 
+use crate::page_read::{DOC_READ_ALPN, DocReadProtocol};
+
 #[cfg(test)]
 use iroh::tls::CaTlsConfig;
 
@@ -374,6 +376,7 @@ impl IrohDocsNode {
             }
         };
         let receive_binding = ReceiveBindingSlot::new(endpoint.id());
+        let page_read = DocReadProtocol::new(docs.sync.clone(), blobs.clone());
         let router = Router::builder(endpoint.clone())
             .accept(
                 iroh_blobs::ALPN,
@@ -382,6 +385,7 @@ impl IrohDocsNode {
             .accept(iroh_docs::ALPN, docs.protocol.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(RECEIVE_BINDING_ALPN, receive_binding.clone())
+            .accept(DOC_READ_ALPN, page_read)
             .spawn();
 
         let node = Arc::new(Self {

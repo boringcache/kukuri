@@ -5,6 +5,7 @@ mod keys;
 mod memory;
 
 mod notices;
+mod remote_source;
 mod replicas;
 #[cfg(test)]
 mod tests;
@@ -15,6 +16,7 @@ pub use buckets::{BUCKET_SECONDS_V1, BucketReplica, BucketScope, TimeBucket};
 pub use iroh_sync::IrohDocsSync;
 pub use keys::SharedReplicaKeyFamily;
 pub use memory::MemoryDocsSync;
+pub use remote_source::RemoteDocsSource;
 
 pub use replicas::{
     PostReplicaKind, author_replica_id, device_replica_id, post_replica_kind,

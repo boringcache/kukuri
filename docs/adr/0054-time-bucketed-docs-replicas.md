@@ -5,6 +5,9 @@
 Proposed（旧#1243、実装計画承認済み。現在は#1221 P2〜P4へ集約。
 各段階の実装・監査後に採用状態を更新する）
 
+2026-09-24の#1221 G3-3で有界ページ/対象ID取得（B）を採用した。以下の旧「常時同期」記述は
+識別・移行時の履歴であり、新bucket readerの完成形ではない。公開CN readerから順に切り替える。
+
 ## Context
 
 [ADR 0052 §7](0052-scale-independent-timeline-sync.md) の残る問題は、iroh-docs の同期が namespace の
@@ -88,6 +91,11 @@ iroh-docsの受信前filterと同一視しない。
 
 ### 4. lifecycle と #1224 の接点
 
+#1221の新しい公開bucket readerは、稼働中providerのローカルkey索引をQUICで件数/bytes/期限付きで読み、
+署名済みrecordを既存gateへ渡す。readerはnamespaceをimport/open/start_syncせず、1対象の読取りだけを
+保持する。legacy writerが使う旧namespace同期はwriter切替まで残すが、新形式定常経路へ持ち越さない。
+private/authorのreaderと保護cache/移行は未完了であり、この公開経路だけをR5全体の達成としない。
+
 - `LocalOnly`の読み取りはnamespaceをネットワークへ参加させない。ローカルopenとsync開始を別操作にする。
   secretの登録だけでもsyncを開始しない。remote要求はaudience/同意/成人向け取得guardを通してからownerへ渡す。
 - 要求はreplica ID、理由（表示中/書込み/遡り/背景確認）、scope、期限を持つleaseとする。
@@ -102,6 +110,10 @@ iroh-docsの受信前filterと同一視しない。
 - replica作業集合の実装が無い段階では新形式の本番書込みを有効化しない。#1224との統合contractを切替の前提にする。
 
 ### 5. 保存と回収
+
+CNが署名済み取り下げを検証した対象は、providerが変わっても古い投稿で再索引しないよう
+scope/object単位の抑制stateへ記録する。旧投稿を受け付け得る間は通常remote cacheの容量回収で
+この抑制を消さない。対象bucketを索引対象から外した後の有界な回収は#1221 R5.4の残件である。
 
 - 再取得可能なremote cacheはentry本体・索引・blob・projectionを含めて予算管理する。
   本人の投稿、bookmark、参加状態、未送信outboxは保護データ。保護データを自動削除して予算を達成しない。

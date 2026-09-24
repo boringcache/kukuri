@@ -23,6 +23,7 @@ pub mod ingest;
 pub mod media_fetcher;
 pub mod participant;
 pub mod projection;
+pub mod public_bucket_reader;
 pub mod query;
 pub mod relation_graph;
 pub mod relation_worker;

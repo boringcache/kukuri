@@ -9,10 +9,10 @@
 
 use anyhow::Result;
 use kukuri_cn_core::{
-    IndexScopeKind, NewIndexEntry, PgSafetyArtifactStore, SurfaceableEntry, TestDatabase,
-    connect_postgres, filter_surfaceable_objects, get_index_entry, get_scan_verdict,
-    initialize_database, remove_index_entry, remove_index_scope, update_scan_verdict_advisories,
-    upsert_index_entry, upsert_scan_verdict,
+    IndexEntryStore, IndexScopeKind, NewIndexEntry, PgIndexEntryStore, PgSafetyArtifactStore,
+    SurfaceableEntry, TestDatabase, connect_postgres, filter_surfaceable_objects, get_index_entry,
+    get_scan_verdict, initialize_database, remove_index_entry, remove_index_scope,
+    update_scan_verdict_advisories, upsert_index_entry, upsert_scan_verdict,
 };
 use kukuri_cn_safety::provider::{ProviderScanRequest, SubjectKind};
 use kukuri_cn_safety::{
@@ -28,6 +28,47 @@ use std::sync::Arc;
 
 const DEFAULT_ADMIN_DATABASE_URL: &str = "postgres://cn:cn_password@127.0.0.1:15432/cn";
 const TEST_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+#[tokio::test]
+async fn verified_withdrawal_prevents_a_later_stale_provider_upsert() -> Result<()> {
+    let Some(admin_url) = integration_test_admin_database_url() else {
+        return Ok(());
+    };
+    let database = TestDatabase::create(admin_url.as_str(), "cn_known_withdrawal").await?;
+    let pool = connect_postgres(database.database_url.as_str()).await?;
+    initialize_database(&pool).await?;
+    let allow = upsert_scan_verdict(
+        &pool,
+        SubjectKind::Post,
+        "post-1",
+        &verdict(SafetyAction::Allow, false, ReasonCode::NoKnownMatch),
+        &VerdictPersistMeta::default(),
+    )
+    .await?;
+    let candidate = entry("rust", "post-1", allow.id.as_str());
+    upsert_index_entry(&pool, &candidate).await?;
+    let store = PgIndexEntryStore::new(pool.clone());
+    store
+        .record_verified_withdrawal(IndexScopeKind::PublicTopic, "rust", "post-1")
+        .await?;
+    assert!(
+        store
+            .is_known_withdrawn(IndexScopeKind::PublicTopic, "rust", "post-1")
+            .await?
+    );
+    assert!(
+        get_index_entry(&pool, IndexScopeKind::PublicTopic, "rust", "post-1")
+            .await?
+            .is_none()
+    );
+    assert!(
+        upsert_index_entry(&pool, &candidate).await.is_err(),
+        "DB trigger must reject stale reinsert"
+    );
+    pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
 
 fn integration_test_admin_database_url() -> Option<String> {
     kukuri_test_support::gated_env_url(

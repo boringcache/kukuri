@@ -8,6 +8,7 @@
 
 mod network_work;
 mod node;
+mod page_read;
 pub mod remote_fetch;
 
 #[cfg(test)]
@@ -16,8 +17,19 @@ mod tests;
 pub use network_work::NetworkAdmissionError;
 pub type DisplayAdmissionError = NetworkAdmissionError;
 pub use node::IrohDocsNode;
+pub use page_read::{DOC_READ_ALPN, DocReadKey, DocReadQuery, DocReadRecord, DocReadResponse};
 
 impl IrohDocsNode {
+    pub async fn query_remote_docs(
+        &self,
+        peer: iroh::EndpointAddr,
+        replica: &kukuri_core::ReplicaId,
+        secret: &iroh_docs::NamespaceSecret,
+        query: DocReadQuery,
+    ) -> anyhow::Result<DocReadResponse> {
+        page_read::fetch(self.endpoint(), peer, replica.as_str(), secret, query).await
+    }
+
     pub async fn read_local_blob(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let hash = hash.parse::<iroh_blobs::Hash>()?;
         Ok(self

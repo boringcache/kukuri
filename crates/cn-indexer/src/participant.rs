@@ -306,12 +306,7 @@ impl IndexerParticipant {
         for scope in scopes {
             match self.ingest_scope(&scope).await {
                 Ok(summary) => {
-                    total.scanned += summary.scanned;
-                    total.indexed += summary.indexed;
-                    total.skipped_non_allow += summary.skipped_non_allow;
-                    total.deindexed += summary.deindexed;
-                    total.scans_fresh += summary.scans_fresh;
-                    total.scans_reused += summary.scans_reused;
+                    total.merge(summary);
                 }
                 Err(error) => warn!(
                     kind = scope.kind.as_str(),
