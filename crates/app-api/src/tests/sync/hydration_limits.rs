@@ -649,6 +649,9 @@ impl BlobService for HangingBlobService {
     }
 }
 
+#[path = "hydration_limits_cancel.rs"]
+mod hydration_limits_cancel;
+
 #[tokio::test]
 async fn shutdown_rejects_a_body_that_arrives_after_the_account_closes() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));

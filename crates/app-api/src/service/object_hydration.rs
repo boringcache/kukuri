@@ -36,7 +36,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
     post: VerifiedPost,
     body_fetch: BodyFetch,
     scope_generation: u64,
-) -> Result<()> {
+) -> Result<bool> {
     let projection_store = services.projection_store.as_ref();
     let blob_service = services.blob_service.as_ref();
     let header = post.header();
@@ -56,7 +56,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
                 Some(String::new()),
             ))
             .await?;
-        return Ok(());
+        return Ok(true);
     }
     let mut fetched_body = None;
     let content = match &header.payload_ref {
@@ -64,7 +64,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
         PayloadRef::BlobText { hash, .. } => match body_fetch {
             BodyFetch::LocalOnly => fetch_local_projection_blob_text(blob_service, hash).await,
             BodyFetch::Bounded => {
-                fetched_body = services
+                let Some(body) = services
                     .until_content_invalid(
                         topic,
                         channel,
@@ -76,7 +76,10 @@ pub(crate) async fn hydrate_object_projection_from_post(
                         ),
                     )
                     .await
-                    .flatten();
+                else {
+                    return Ok(false);
+                };
+                fetched_body = body;
                 fetched_body.as_ref().map(|body| body.text.clone())
             }
         },
@@ -86,15 +89,14 @@ pub(crate) async fn hydrate_object_projection_from_post(
         let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
         attachment_statuses.push((&attachment.hash, status));
     }
-    let remote_bytes = fetched_body
-        .as_ref()
-        .is_some_and(|body: &super::hydration_limits::BoundedBody| body.remote_bytes.is_some());
-    let _save_access = if remote_bytes {
+    let remote_request = body_fetch == BodyFetch::Bounded
+        && matches!(&header.payload_ref, PayloadRef::BlobText { .. });
+    let _save_access = if remote_request {
         Some(services.content_save_access.lock().await)
     } else {
         None
     };
-    if remote_bytes
+    if remote_request
         && !services
             .content_scope_is_current(topic, channel, scope_generation)
             .await
@@ -102,9 +104,9 @@ pub(crate) async fn hydrate_object_projection_from_post(
         if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
             attempt.defer();
         }
-        return Ok(());
+        return Ok(false);
     }
-    if remote_bytes
+    if remote_request
         && projection_store
             .get_post_withdrawal(&header.object_id)
             .await?
@@ -119,7 +121,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
         if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
             attempt.succeed();
         }
-        return Ok(());
+        return Ok(true);
     }
     if let PayloadRef::BlobText { hash, .. } = &header.payload_ref {
         if let Some(bytes) = fetched_body
@@ -149,7 +151,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
     if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
         attempt.succeed();
     }
-    Ok(())
+    Ok(true)
 }
 
 /// object id を 1 つ指定して、その投稿を projection へ反映する(#1239)。replica は走査しない。
@@ -261,6 +263,12 @@ pub(crate) async fn hydrate_object_in_topic_with(
     } else {
         0
     };
-    hydrate_object_projection_from_post(services, post, body_fetch, scope_generation).await?;
-    Ok(ObjectHydration::Hydrated)
+    Ok(
+        if hydrate_object_projection_from_post(services, post, body_fetch, scope_generation).await?
+        {
+            ObjectHydration::Hydrated
+        } else {
+            ObjectHydration::Missing
+        },
+    )
 }
