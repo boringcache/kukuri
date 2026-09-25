@@ -230,6 +230,19 @@ async fn bookmark_protects_shared_remote_hash_until_its_reference_is_removed() {
     .await
     .unwrap();
     assert_eq!(protected, 1);
+    // Dome pin copies this hash into the SDK store. The bookmark must keep its
+    // cache copy after the temporary Dome pin is released.
+    store
+        .remove_remote_content("blob", hash.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_remote_content("blob", hash.as_str())
+            .await
+            .unwrap(),
+        Some(b"body".to_vec())
+    );
     store.remove_bookmarked_post(&row.object_id).await.unwrap();
     let protected = sqlx::query_scalar::<_, i64>(
         "SELECT is_protected FROM remote_content_cache WHERE kind = 'blob' AND cache_key = ?1",
@@ -251,6 +264,17 @@ async fn bookmark_protects_shared_remote_hash_until_its_reference_is_removed() {
     .await
     .unwrap();
     assert_eq!(protected, 0);
+    store
+        .remove_remote_content("blob", hash.as_str())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_remote_content("blob", hash.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

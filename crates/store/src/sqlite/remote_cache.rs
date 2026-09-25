@@ -806,15 +806,15 @@ impl SqliteStore {
         .bind(key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(row) = row {
-            if row.get::<i64, _>("is_protected") == 0 {
-                sqlx::query(
-                    "UPDATE remote_content_cache_usage SET used_bytes = used_bytes - ?1 WHERE id = 1",
-                )
-                .bind(row.get::<i64, _>("charged_bytes"))
-                .execute(&mut *tx)
-                .await?;
-            }
+        if let Some(row) = row
+            && row.get::<i64, _>("is_protected") == 0
+        {
+            sqlx::query(
+                "UPDATE remote_content_cache_usage SET used_bytes = used_bytes - ?1 WHERE id = 1",
+            )
+            .bind(row.get::<i64, _>("charged_bytes"))
+            .execute(&mut *tx)
+            .await?;
             delete_cache_item(&mut tx, kind, key, &mut label_evictions).await?;
         }
         tx.commit().await?;
