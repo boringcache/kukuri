@@ -9,6 +9,8 @@ pub(super) struct ProbeOfferTransport {
     pub(super) stream_drops: Arc<AtomicUsize>,
     pub(super) stop_senders:
         std::sync::Mutex<Vec<tokio::sync::watch::Sender<kukuri_transport::ReceiveOfferStop>>>,
+    pub(super) resolve_gate: Option<Arc<(std::sync::atomic::AtomicBool, tokio::sync::Notify)>>,
+    pub(super) resolve_attempts: AtomicUsize,
 }
 
 struct CountedPendingOfferStream(Arc<AtomicUsize>);
@@ -32,6 +34,19 @@ impl Drop for CountedPendingOfferStream {
 
 #[async_trait]
 impl HintTransport for ProbeOfferTransport {
+    async fn resolve_receive_destination(
+        &self,
+        _recipient: &Pubkey,
+    ) -> Result<Option<EndpointAddr>> {
+        self.resolve_attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.resolve_gate {
+            while !gate.0.load(Ordering::SeqCst) {
+                gate.1.notified().await;
+            }
+        }
+        Ok(None)
+    }
+
     async fn subscribe_hints(&self, _topic: &TopicId) -> Result<HintStream> {
         Ok(Box::pin(futures_util::stream::empty()))
     }

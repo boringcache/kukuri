@@ -158,7 +158,15 @@ impl AppService {
             .await?;
         self.rebuild_author_relationships().await?;
         *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
-        self.build_author_social_view(target_pubkey.as_str()).await
+        let view = self
+            .build_author_social_view(target_pubkey.as_str())
+            .await?;
+        self.queue_public_notification_offer(
+            PublicNotificationSource::Follow { envelope },
+            BTreeSet::from([target_pubkey.as_str().to_string()]),
+        )
+        .await;
+        Ok(view)
     }
 
     pub async fn unfollow_author(&self, pubkey: &str) -> Result<AuthorSocialView> {

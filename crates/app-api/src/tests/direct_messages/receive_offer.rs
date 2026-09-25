@@ -3,7 +3,7 @@ use super::receive_offer_doubles::{OfferBlobService, ProbeOfferTransport};
 use kukuri_core::{ReceiveOfferReferenceV1, ReceiveOfferScopeV1, seal_receive_offer};
 use kukuri_transport::{EndpointAddr, ReceiveOfferEnvelope};
 
-fn offer_app(
+pub(super) fn offer_app(
     keys: KukuriKeys,
     store: Arc<MemoryStore>,
     transport: Arc<FakeTransport>,
@@ -20,7 +20,7 @@ fn offer_app(
     ))
 }
 
-fn offer_for(
+pub(super) fn offer_for(
     sender: &KukuriKeys,
     recipient: &KukuriKeys,
     scope: ReceiveOfferScopeV1,
@@ -251,7 +251,7 @@ async fn inline_dm_frame_requires_sender_bound_provider_before_blob_io() {
 }
 
 #[tokio::test]
-async fn account_receive_offer_rejects_unmutual_and_other_scopes_before_provider_io() {
+async fn account_receive_offer_rejects_unmutual_dm_and_private_scope_before_provider_io() {
     let sender = generate_keys();
     let recipient = generate_keys();
     let store = Arc::new(MemoryStore::default());
@@ -298,10 +298,12 @@ async fn account_receive_offer_rejects_unmutual_and_other_scopes_before_provider
     )
     .await
     .unwrap();
-    let (_, public) = offer_for(
+    let (_, private) = offer_for(
         &sender,
         &recipient,
-        ReceiveOfferScopeV1::PublicSource,
+        ReceiveOfferScopeV1::PrivateSource {
+            epoch_key_id: "22".repeat(32),
+        },
         hash,
         1,
     );
@@ -309,7 +311,7 @@ async fn account_receive_offer_rejects_unmutual_and_other_scopes_before_provider
         !AppService::ingest_account_receive_offer(
             &app.services,
             ReceiveOfferEnvelope {
-                offer: public,
+                offer: private,
                 received_at: Utc::now().timestamp_millis(),
                 source_peer: "untrusted relay".into(),
             },
@@ -715,11 +717,8 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
     let store = Arc::new(MemoryStore::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let transport = Arc::new(ProbeOfferTransport {
-        unsubscribes: AtomicUsize::new(0),
         subscribe_barrier: Some(barrier.clone()),
-        unsubscribe_barrier: None,
-        stream_drops: Arc::new(AtomicUsize::new(0)),
-        stop_senders: std::sync::Mutex::new(Vec::new()),
+        ..Default::default()
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),
@@ -755,11 +754,8 @@ async fn cancelled_shutdown_retries_the_account_route_lease_cleanup() {
     let store = Arc::new(MemoryStore::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let transport = Arc::new(ProbeOfferTransport {
-        unsubscribes: AtomicUsize::new(0),
-        subscribe_barrier: None,
         unsubscribe_barrier: Some(barrier.clone()),
-        stream_drops: Arc::new(AtomicUsize::new(0)),
-        stop_senders: std::sync::Mutex::new(Vec::new()),
+        ..Default::default()
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),

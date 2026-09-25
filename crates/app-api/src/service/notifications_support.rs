@@ -31,11 +31,38 @@ pub(crate) async fn notification_candidate_from_object_event(
     else {
         return Ok(None);
     };
-    let header = post.header();
-    if header.author.as_str() == local_author_pubkey {
+    if post.header().author.as_str() == local_author_pubkey {
         return Ok(None);
     }
-    let content = notification_text_from_payload_ref(blob_service, &header.payload_ref).await;
+    let reply_to_local = if let Some(reply_to_object_id) = post.header().reply_to.as_ref() {
+        projection_store
+            .get_object_projection(reply_to_object_id)
+            .await?
+            .as_ref()
+            .is_some_and(|row| row.author_pubkey == local_author_pubkey)
+    } else {
+        false
+    };
+    let content =
+        notification_text_from_payload_ref(blob_service, &post.header().payload_ref).await;
+    Ok(notification_candidate_from_verified_post(
+        local_author_pubkey,
+        &post,
+        content,
+        reply_to_local,
+    ))
+}
+
+pub(crate) fn notification_candidate_from_verified_post(
+    local_author_pubkey: &str,
+    post: &VerifiedPost,
+    content: Option<String>,
+    reply_to_local: bool,
+) -> Option<NotificationCandidate> {
+    let header = post.header();
+    if header.author.as_str() == local_author_pubkey {
+        return None;
+    }
     let repost_commentary = if header.object_kind == "repost" {
         normalize_repost_commentary(content.clone())
     } else {
@@ -46,18 +73,12 @@ pub(crate) async fn notification_candidate_from_object_event(
     } else {
         content.clone()
     };
-    if let Some(reply_to_object_id) = header.reply_to.as_ref()
-        && projection_store
-            .get_object_projection(reply_to_object_id)
-            .await?
-            .as_ref()
-            .is_some_and(|row| row.author_pubkey == local_author_pubkey)
-    {
-        return Ok(Some(NotificationCandidate {
+    if header.reply_to.is_some() && reply_to_local {
+        return Some(NotificationCandidate {
             kind: NotificationKind::Reply,
             actor_pubkey: header.author.as_str().to_string(),
             source_envelope_id: Some(header.envelope_id.clone()),
-            source_replica_id: Some(event.replica_id.clone()),
+            source_replica_id: Some(post.replica().clone()),
             topic_id: Some(header.topic_id.as_str().to_string()),
             channel_id: header
                 .channel_id
@@ -70,7 +91,7 @@ pub(crate) async fn notification_candidate_from_object_event(
             content_labels: Some(header.content_labels.clone()),
             created_at: header.created_at,
             received_at: Utc::now().timestamp_millis(),
-        }));
+        });
     }
     if header.channel_id.is_none()
         && let Some(repost_of) = header.repost_of.as_ref()
@@ -84,11 +105,11 @@ pub(crate) async fn notification_candidate_from_object_event(
                 normalize_optional_text(Some(repost_of.content.clone())),
             )
         };
-        return Ok(Some(NotificationCandidate {
+        return Some(NotificationCandidate {
             kind,
             actor_pubkey: header.author.as_str().to_string(),
             source_envelope_id: Some(header.envelope_id.clone()),
-            source_replica_id: Some(event.replica_id.clone()),
+            source_replica_id: Some(post.replica().clone()),
             topic_id: Some(header.topic_id.as_str().to_string()),
             channel_id: None,
             object_id: Some(header.object_id.clone()),
@@ -98,7 +119,7 @@ pub(crate) async fn notification_candidate_from_object_event(
             content_labels: Some(header.content_labels.clone()),
             created_at: header.created_at,
             received_at: Utc::now().timestamp_millis(),
-        }));
+        });
     }
     let mention_source = if header.object_kind == "repost" {
         repost_commentary
@@ -109,11 +130,11 @@ pub(crate) async fn notification_candidate_from_object_event(
         .as_deref()
         .is_some_and(|text| text_contains_pubkey_mention(text, local_author_pubkey))
     {
-        return Ok(Some(NotificationCandidate {
+        return Some(NotificationCandidate {
             kind: NotificationKind::Mention,
             actor_pubkey: header.author.as_str().to_string(),
             source_envelope_id: Some(header.envelope_id.clone()),
-            source_replica_id: Some(event.replica_id.clone()),
+            source_replica_id: Some(post.replica().clone()),
             topic_id: Some(header.topic_id.as_str().to_string()),
             channel_id: header
                 .channel_id
@@ -126,9 +147,9 @@ pub(crate) async fn notification_candidate_from_object_event(
             content_labels: Some(header.content_labels.clone()),
             created_at: header.created_at,
             received_at: Utc::now().timestamp_millis(),
-        }));
+        });
     }
-    Ok(None)
+    None
 }
 
 pub(crate) async fn notification_candidate_from_follow_event(
@@ -166,17 +187,29 @@ pub(crate) async fn notification_candidate_from_follow_event(
     let Some(edge) = parse_follow_edge(&envelope)? else {
         return Ok(None);
     };
+    Ok(notification_candidate_from_verified_follow(
+        local_author_pubkey,
+        &event.replica_id,
+        &edge,
+    ))
+}
+
+pub(crate) fn notification_candidate_from_verified_follow(
+    local_author_pubkey: &str,
+    replica: &ReplicaId,
+    edge: &FollowEdge,
+) -> Option<NotificationCandidate> {
     if edge.subject_pubkey.as_str() == local_author_pubkey
         || edge.target_pubkey.as_str() != local_author_pubkey
         || edge.status != FollowEdgeStatus::Active
     {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(NotificationCandidate {
+    Some(NotificationCandidate {
         kind: NotificationKind::Followed,
         actor_pubkey: edge.subject_pubkey.as_str().to_string(),
         source_envelope_id: Some(edge.envelope_id.clone()),
-        source_replica_id: Some(event.replica_id.clone()),
+        source_replica_id: Some(replica.clone()),
         topic_id: None,
         channel_id: None,
         object_id: None,
@@ -186,7 +219,7 @@ pub(crate) async fn notification_candidate_from_follow_event(
         content_labels: None,
         created_at: edge.updated_at,
         received_at: Utc::now().timestamp_millis(),
-    }))
+    })
 }
 
 pub(crate) async fn notification_text_from_payload_ref(
@@ -248,38 +281,17 @@ pub(crate) fn direct_message_notification_id(
 }
 
 pub(crate) fn text_contains_pubkey_mention(text: &str, pubkey: &str) -> bool {
-    let bytes = text.as_bytes();
-    let pubkey_bytes = pubkey.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'@' {
-            let start = index + 1;
-            let end = start + 64;
-            if end <= bytes.len() {
-                let candidate = &bytes[start..end];
-                let next_is_hex = bytes
-                    .get(end)
-                    .is_some_and(|value| char::from(*value).is_ascii_hexdigit());
-                if !next_is_hex
-                    && candidate.len() == 64
-                    && candidate
-                        .iter()
-                        .all(|value| char::from(*value).is_ascii_hexdigit())
-                    && candidate.len() == pubkey_bytes.len()
-                    && candidate
-                        .iter()
-                        .zip(pubkey_bytes.iter())
-                        .all(|(left, right)| {
-                            char::from(*left).eq_ignore_ascii_case(&char::from(*right))
-                        })
-                {
-                    return true;
-                }
-            }
-        }
-        index += 1;
-    }
-    false
+    pubkey_mentions(text).any(|candidate| candidate.eq_ignore_ascii_case(pubkey))
+}
+
+pub(crate) fn pubkey_mentions(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices('@').filter_map(|(at, _)| {
+        let rest = text.get(at + 1..)?;
+        let candidate = rest.get(..64)?;
+        (candidate.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && !rest.as_bytes().get(64).is_some_and(u8::is_ascii_hexdigit))
+        .then_some(candidate)
+    })
 }
 
 pub(crate) fn normalize_author_pubkey(pubkey: &str) -> Result<String> {

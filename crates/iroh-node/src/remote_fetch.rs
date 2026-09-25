@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kukuri_core::VerifiedReceiveOffer;
+use kukuri_core::{ReceiveOfferScopeV1, VerifiedReceiveOffer};
 use kukuri_transport::{
     EndpointAddr, PeerAddrBook, PeerConnectionStatus, PeerFetchFailure, RemoteFetchRetryState,
     RequestRateDecision, SharedRemoteFetchResult, fetch_receive_endpoint_binding,
@@ -128,25 +128,32 @@ pub async fn fetch_verified_receive_offer_payload(
             now_ms < binding.expires_at_ms() && now_ms < offer.expires_at_ms(),
             "receive offer or provider binding expired before payload request"
         );
-        let connection = timeout(
-            REMOTE_FETCH_CONNECT_TIMEOUT,
-            node.endpoint().connect(provider, iroh_blobs::ALPN),
-        )
-        .await
-        .context("receive offer provider connect timed out")??;
-        let close = CloseOfferConnection(connection.clone());
-        let bytes = timeout(
-            REMOTE_FETCH_TRANSFER_TIMEOUT,
-            fetch_ephemeral(
-                connection,
-                hash,
-                FetchMode::EphemeralBounded(max_bytes),
-                None,
-            ),
-        )
-        .await
-        .context("receive offer payload transfer timed out")??;
-        drop(close);
+        let cached = || async {
+            timeout(
+                REMOTE_FETCH_TRANSFER_TIMEOUT,
+                remote_blob::fetch(
+                    node.endpoint(),
+                    provider.clone(),
+                    hash,
+                    Some(max_bytes),
+                    None,
+                ),
+            )
+            .await
+            .context("receive offer cached payload transfer timed out")?
+            .and_then(|bytes| bytes.context("receive offer payload missing from provider"))
+        };
+        let bytes = if matches!(reference.scope, ReceiveOfferScopeV1::PublicSource) {
+            match cached().await {
+                Ok(bytes) => bytes,
+                Err(_) => fetch_offer_sdk_bytes(node.endpoint(), provider, hash, max_bytes).await?,
+            }
+        } else {
+            match fetch_offer_sdk_bytes(node.endpoint(), provider.clone(), hash, max_bytes).await {
+                Ok(bytes) => bytes,
+                Err(_) => cached().await?,
+            }
+        };
         anyhow::ensure!(
             bytes.len() as u64 == max_bytes,
             "receive offer payload size mismatch"
@@ -171,6 +178,34 @@ pub async fn fetch_verified_receive_offer_payload(
     };
     anyhow::ensure!(lease.finish(), "receive offer payload fetch scope ended");
     result
+}
+
+async fn fetch_offer_sdk_bytes(
+    endpoint: &iroh::Endpoint,
+    provider: EndpointAddr,
+    hash: iroh_blobs::Hash,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    let connection = timeout(
+        REMOTE_FETCH_CONNECT_TIMEOUT,
+        endpoint.connect(provider, iroh_blobs::ALPN),
+    )
+    .await
+    .context("receive offer provider connect timed out")??;
+    let close = CloseOfferConnection(connection.clone());
+    let bytes = timeout(
+        REMOTE_FETCH_TRANSFER_TIMEOUT,
+        fetch_ephemeral(
+            connection,
+            hash,
+            FetchMode::EphemeralBounded(max_bytes),
+            None,
+        ),
+    )
+    .await
+    .context("receive offer payload transfer timed out")??;
+    drop(close);
+    Ok(bytes)
 }
 
 fn current_time_ms() -> Result<i64> {
