@@ -20,6 +20,8 @@ export const MEDIA_FETCH_MANUAL_ATTEMPTS = 1;
 /// 台帳の上限。満杯なら取得中でない古い項目を一つ捨て、全件取得中なら新規を延期する。
 export const MEDIA_FETCH_LEDGER_LIMIT = DISPLAY_RETRY_LIMIT;
 export const MEDIA_FETCH_FAILURE_KEY_MAX_BYTES = 256;
+export const MEDIA_MEMORY_BUDGET_BYTES = 128 * 1024 * 1024;
+export type MediaResource = { url: string; memoryBytes: number; release: () => void };
 const encoder = new TextEncoder();
 
 function validKey(hash: string): boolean {
@@ -36,6 +38,9 @@ type LedgerEntry = {
   nextRetryAt: number | null;
   exhausted: boolean;
   lastStatus: string | null;
+  reservedBytes: number;
+  cancel?: () => void;
+  resource?: MediaResource;
 };
 
 export type MediaFetchDecision =
@@ -49,14 +54,16 @@ export type MediaFetchFailureOutcome =
 
 export class MediaFetchLedger {
   private readonly entries = new Map<string, LedgerEntry>();
+  private retainedBytes = 0;
+  private pendingBytes = 0;
 
   /// この hash を今取得してよいかを決める。`fetch` を返したときは試行を 1 回消費し、取得中にする。
-  decide(hash: string, status: string | null, now: number): MediaFetchDecision {
+  decide(hash: string, status: string | null, now: number, reserveBytes = 0): MediaFetchDecision {
     if (!validKey(hash)) {
       return { kind: 'skip' };
     }
     let entry = this.entries.get(hash);
-    if (entry && !entry.inFlight && status === 'Available' && entry.lastStatus !== 'Available') {
+    if (entry && !entry.inFlight && !entry.resource && status === 'Available' && entry.lastStatus !== 'Available') {
       // backend がローカルに揃ったと報告した。失敗の記録を引き継がずに取り直す。
       this.entries.delete(hash);
       entry = undefined;
@@ -72,18 +79,24 @@ export class MediaFetchLedger {
         nextRetryAt: null,
         exhausted: false,
         lastStatus: status,
+        reservedBytes: 0,
       };
       this.entries.set(hash, entry);
     }
     entry.lastStatus = status;
-    if (entry.inFlight || entry.exhausted) {
+    if (entry.inFlight || entry.exhausted || entry.resource) {
       return { kind: 'skip' };
     }
     if (entry.nextRetryAt !== null && entry.nextRetryAt > now) {
       return { kind: 'wait', retryAt: entry.nextRetryAt };
     }
+    if (reserveBytes < 0 || this.retainedBytes + this.pendingBytes + reserveBytes > MEDIA_MEMORY_BUDGET_BYTES) {
+      return { kind: 'skip' };
+    }
     entry.attempts += 1;
     entry.inFlight = true;
+    entry.reservedBytes = reserveBytes;
+    this.pendingBytes += reserveBytes;
     entry.nextRetryAt = null;
     // 挿入順を「最後に試行した順」に保つ(上限超過時に古いものから捨てるため)。
     this.entries.delete(hash);
@@ -91,8 +104,19 @@ export class MediaFetchLedger {
     return { kind: 'fetch', attempt: entry.attempts };
   }
 
-  succeed(hash: string): void {
-    this.entries.delete(hash);
+  succeed(hash: string, resource?: MediaResource): void {
+    const entry = this.entries.get(hash);
+    if (!entry) return;
+    this.pendingBytes -= entry.reservedBytes;
+    entry.reservedBytes = 0;
+    entry.cancel = undefined;
+    if (!resource) {
+      this.entries.delete(hash);
+      return;
+    }
+    entry.inFlight = false;
+    entry.resource = resource;
+    this.retainedBytes += resource.memoryBytes;
   }
 
   fail(hash: string, now: number): MediaFetchFailureOutcome {
@@ -100,6 +124,9 @@ export class MediaFetchLedger {
     if (!entry) {
       return { kind: 'exhausted' };
     }
+    this.pendingBytes -= entry.reservedBytes;
+    entry.reservedBytes = 0;
+    entry.cancel = undefined;
     entry.inFlight = false;
     if (entry.attempts >= entry.maxAttempts) {
       entry.exhausted = true;
@@ -118,7 +145,7 @@ export class MediaFetchLedger {
       return false;
     }
     const entry = this.entries.get(hash);
-    if (entry?.inFlight) {
+    if (entry?.inFlight || entry?.resource) {
       return false;
     }
     if (!entry && !this.makeRoom()) {
@@ -131,17 +158,40 @@ export class MediaFetchLedger {
       nextRetryAt: null,
       exhausted: false,
       lastStatus: entry?.lastStatus ?? null,
+      reservedBytes: 0,
     });
     return true;
   }
 
   /// gate の切替などで、この hash の記録を捨てる。取得中の結果は呼出元が epoch で無効にする。
   forget(hash: string): void {
+    const entry = this.entries.get(hash);
+    if (!entry) return;
+    entry.cancel?.();
+    entry.resource?.release();
+    this.pendingBytes -= entry.reservedBytes;
+    this.retainedBytes -= entry.resource?.memoryBytes ?? 0;
     this.entries.delete(hash);
   }
 
   clear(): void {
-    this.entries.clear();
+    for (const hash of this.entries.keys()) this.forget(hash);
+  }
+
+  trackCancel(hash: string, cancel: () => void): void {
+    const entry = this.entries.get(hash);
+    if (entry?.inFlight) entry.cancel = cancel;
+    else cancel();
+  }
+
+  demandHashes(): string[] {
+    return [...this.entries]
+      .filter(([, entry]) => entry.inFlight || entry.resource)
+      .map(([hash]) => hash);
+  }
+
+  get memoryBytes(): number {
+    return this.retainedBytes + this.pendingBytes;
   }
 
   isInFlight(hash: string): boolean {
@@ -161,7 +211,7 @@ export class MediaFetchLedger {
       return true;
     }
     for (const [hash, entry] of this.entries) {
-      if (!entry.inFlight) {
+      if (!entry.inFlight && !entry.resource) {
         this.entries.delete(hash);
         return true;
       }

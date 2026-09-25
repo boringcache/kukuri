@@ -185,8 +185,6 @@ export function DesktopShellPage({
   const draftSequenceRef = useRef(0);
   // 表示中 Column id(背景 Timeline refresh 用、Issue #765)。runtime 情報なので store には置かない。
   const visibleColumnIdsRef = useRef<string[]>([]);
-  const mediaFetchAttemptRef = useRef(new Map<string, number>());
-  const remoteObjectUrlRef = useRef(new Map<string, string>());
   const draftPreviewUrlRef = useRef(new Map<string, string>());
   const directMessageDraftPreviewUrlRef = useRef(new Map<string, string>());
   const loadTopicsRequestRef = useRef(new Map<string, number>());
@@ -221,15 +219,14 @@ export function DesktopShellPage({
     buildVideoDraftItem: buildComposerVideoDraftItem,
     gatedAdultMediaHashes,
     retryMediaFetch,
+    setMediaDemand,
     reloadPostElements,
   } = useDesktopShellData({
     api,
     translate,
     loadTopicsRequestRef,
-    remoteObjectUrlRef,
     draftPreviewUrlRef,
     directMessageDraftPreviewUrlRef,
-    mediaFetchAttemptRef,
     draftSequenceRef,
     visibleColumnIdsRef,
   });
@@ -912,7 +909,7 @@ export function DesktopShellPage({
   );
 
   return (
-    <PostRecoveryProviders mediaRetry={retryMediaFetch} postReload={reloadPostElements}>
+    <PostRecoveryProviders mediaRetry={retryMediaFetch} mediaDemand={setMediaDemand} postReload={reloadPostElements}>
       <div className='shell-phase1' data-workspace-layout='column'>
         <a className='shell-skip-link' href={`#${SHELL_WORKSPACE_ID}`}>
           {t('shell:workspace.skipToWorkspace')}

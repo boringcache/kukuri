@@ -258,6 +258,7 @@ impl ReactionBookmarkStore for SqliteStore {
             )?);
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         sqlx::query(
             r#"
             INSERT INTO bookmarked_posts (
@@ -323,10 +324,12 @@ impl ReactionBookmarkStore for SqliteStore {
             &refs,
             budget,
             &mut label_evictions,
+            &mut removed_files,
         )
         .await?;
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(())
     }
 
@@ -396,6 +399,7 @@ impl ReactionBookmarkStore for SqliteStore {
             )?);
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         sqlx::query(
             r#"
             DELETE FROM bookmarked_posts
@@ -411,10 +415,12 @@ impl ReactionBookmarkStore for SqliteStore {
             &[],
             budget,
             &mut label_evictions,
+            &mut removed_files,
         )
         .await?;
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(())
     }
 }

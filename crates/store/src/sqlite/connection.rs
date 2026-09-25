@@ -41,7 +41,7 @@ impl SqliteStore {
 
         run_store_migrations(&pool).await?;
 
-        Ok(Self::from_pool(pool))
+        Ok(Self::from_pool(pool, None))
     }
 
     pub async fn connect_file(path: impl AsRef<Path>) -> Result<Self> {
@@ -58,7 +58,9 @@ impl SqliteStore {
 
         run_store_migrations(&pool).await?;
 
-        Ok(Self::from_pool(pool))
+        let remote_cache_files = path.with_extension("remote-blobs");
+        tokio::fs::create_dir_all(&remote_cache_files).await?;
+        Ok(Self::from_pool(pool, Some(remote_cache_files)))
     }
 
     pub async fn connect_memory() -> Result<Self> {
@@ -95,17 +97,18 @@ impl SqliteStore {
                 source,
             })?;
         run_store_migrations(&pool).await?;
-        Ok(Self::from_pool(pool))
+        Ok(Self::from_pool(pool, None))
     }
 
     pub fn pool(&self) -> &Pool<Sqlite> {
         &self.pool
     }
 
-    fn from_pool(pool: Pool<Sqlite>) -> Self {
+    fn from_pool(pool: Pool<Sqlite>, remote_cache_files: Option<std::path::PathBuf>) -> Self {
         let (adult_label_evictions, _) = tokio::sync::broadcast::channel(64);
         Self {
             pool,
+            remote_cache_files,
             remote_cache_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             remote_cache_reserved: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             adult_label_evictions,

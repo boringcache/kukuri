@@ -5,6 +5,7 @@ import { Flag } from 'lucide-react';
 import { IconButton } from '@/components/ui/icon-button';
 
 import { MediaFetchFailure } from './MediaFetchFailure';
+import { MediaDemandObserver } from './MediaDemandObserver';
 import { type PostMediaView } from './types';
 
 type PostMediaProps = {
@@ -24,7 +25,7 @@ export function PostMedia({
   onOpenGatedDetails,
 }: PostMediaProps) {
   const { t } = useTranslation(['common', 'shell']);
-  const videoReportHash = media.kind === 'video' ? media.videoReportHash : null;
+  const videoReportHash = media.kind === 'video' ? media.videoReportHash ?? null : null;
 
   if (!media.kind) {
     return null;
@@ -84,11 +85,14 @@ export function PostMedia({
   // #1207: 自動取得が上限に達した。失敗した部分だけを置き換え、明示再試行を出す。
   if (media.state === 'unavailable') {
     return (
-      <MediaFetchFailure
-        hashes={media.retryHashes ?? []}
-        retrying={media.retrying ?? false}
-        testId={`media-fetch-failure-${media.objectId}`}
-      />
+      <>
+        <MediaDemandObserver hash={media.kind === 'video' ? videoReportHash : null} />
+        <MediaFetchFailure
+          hashes={media.retryHashes ?? []}
+          retrying={media.retrying ?? false}
+          testId={`media-fetch-failure-${media.objectId}`}
+        />
+      </>
     );
   }
 
@@ -99,6 +103,7 @@ export function PostMedia({
           media.state === 'loading' ? 'media-frame media-frame-loading' : 'media-frame media-frame-ready'
         }
       >
+        <MediaDemandObserver hash={media.kind === 'video' && !media.videoUnsupportedOnClient ? videoReportHash : null} />
         <div className='media-badges'>
           {media.kind === 'video' ? <span className='media-type-badge'>{t('media.video')}</span> : null}
           {media.extraAttachmentCount > 0 ? (

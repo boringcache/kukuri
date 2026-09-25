@@ -80,6 +80,19 @@ async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
             .expect("display does not cache"),
         None
     );
+    let display_path = receiver_dir.path().join("streamed-display.bin");
+    assert_eq!(
+        receiver
+            .fetch_blob_ephemeral_to_file(&stored.hash, &display_path)
+            .await
+            .expect("stream display bytes"),
+        Some(stored.bytes)
+    );
+    assert_eq!(
+        tokio::fs::read(display_path).await.unwrap(),
+        b"remote-only-attachment"
+    );
+    assert_eq!(receiver.fetch_local_blob(&stored.hash).await.unwrap(), None);
     let retry = receiver
         .prepare_retry_fetch(&stored.hash)
         .await

@@ -34,6 +34,8 @@ beforeEach(() => {
 afterEach(() => {
   mediaFetchRetryPolicy.retryDelaysMs = MEDIA_FETCH_RETRY_DELAYS_MS;
   vi.useRealTimers();
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  Reflect.deleteProperty(window, '__TAURI_EVENT_PLUGIN_INTERNALS__');
 });
 
 test('timeline image stops loading and shows the fetch failure after null responses in normal mode', async () => {
@@ -263,6 +265,41 @@ test('timeline image post renders actual preview when object-url payload is avai
 
   unmount();
   expect(revokeObjectUrl).toHaveBeenCalledWith(previewUrl);
+});
+
+test('native media preview uses a file URL and releases its lease on view exit', async () => {
+  Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {
+      convertFileSrc: (path: string) => `asset://localhost/${path}`,
+      transformCallback: () => 1,
+      invoke: async () => null,
+    },
+  });
+  Object.defineProperty(window, '__TAURI_EVENT_PLUGIN_INTERNALS__', {
+    configurable: true,
+    value: { unregisterListener: () => undefined },
+  });
+  const post = buildImagePost({ content: 'caption', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const getBlobMediaPayload = vi.fn(async () => null);
+  const releaseBlobMediaFile = vi.fn(async () => undefined);
+  api.getBlobMediaPayload = getBlobMediaPayload;
+  api.getBlobMediaFile = vi.fn(async (_hash, _mime, _sourceObjectId, requestId) => ({
+    path: 'kukuri-display/preview.png',
+    request_id: requestId,
+    bytes: 4096,
+  }));
+  api.releaseBlobMediaFile = releaseBlobMediaFile;
+
+  const { unmount } = render(<App api={api} />);
+  const preview = await within(getActiveColumn('Timeline')).findByTestId('media-preview-image-post');
+  expect(preview).toHaveAttribute('src', 'asset://localhost/kukuri-display/preview.png');
+  expect(getBlobMediaPayload).not.toHaveBeenCalled();
+  expect(releaseBlobMediaFile).not.toHaveBeenCalled();
+
+  unmount();
+  await waitFor(() => expect(releaseBlobMediaFile).toHaveBeenCalledWith(expect.any(String)));
 });
 
 test('thread pane reuses the same unavailable media renderer', async () => {

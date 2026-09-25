@@ -40,6 +40,7 @@ type UsePreviewableMediaAttachmentsArgs = {
   /// どの表示経路・どの投稿から現れてもプリフェッチしない(ADR 0046 §6.2)。同じ blob を
   /// advisory の無い投稿が参照していても、投稿単位ではなく hash 単位で止める。
   gatedMediaHashes: string[];
+  demandedMediaHashes: ReadonlySet<string>;
   /// #1056: タイムライン系の一括照会結果と照会中の subject。照会中の投稿の添付は表示設定に
   /// かかわらず取得しない(確定前に取得すると、ゲートや ephemeral 取得の判定より先に bytes が届く)。
   /// advisory が確定した投稿の添付は、表示設定 OFF の間は取得しない。
@@ -70,6 +71,7 @@ export function usePreviewableMediaAttachments({
   additionalTimelinePosts = EMPTY_POSTS,
   communityIndexResolvedPosts,
   gatedMediaHashes,
+  demandedMediaHashes,
   timelineContentAdvisories = EMPTY_ADVISORIES,
   timelineAdvisoryLookup = INACTIVE_LOOKUP,
   profileTimeline,
@@ -106,6 +108,9 @@ export function usePreviewableMediaAttachments({
           role: attachment.role,
           status: attachment.status,
         });
+        return;
+      }
+      if ((attachment.role === 'video_manifest' || mime.startsWith('video/')) && !demandedMediaHashes.has(hash)) {
         return;
       }
       if (attachments.get(hash)?.source_object_id && !sourceObjectId) return;
@@ -226,6 +231,7 @@ export function usePreviewableMediaAttachments({
     activeTimeline,
     additionalTimelinePosts,
     adultContentEnabled,
+    demandedMediaHashes,
     gatedMediaHashes,
     bookmarkedReactionAssets,
     timelineAdvisoryLookup,

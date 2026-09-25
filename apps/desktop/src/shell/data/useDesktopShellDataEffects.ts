@@ -10,16 +10,18 @@ import {
 import type {
   CommunityNodeNodeStatus,
   DesktopApi,
+  BlobMediaPayload,
   GameRoomView,
   SyncStatus,
 } from '@/lib/api';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import type { ShellChromeProjection } from '@/components/shell/types';
 
 import {
   createObjectUrlFromPayload,
   logMediaDebug,
 } from '@/shell/media';
-import { MediaFetchLedger } from '@/shell/data/mediaFetchLedger';
+import { MediaFetchLedger, type MediaResource } from '@/shell/data/mediaFetchLedger';
 import type { PreviewableMediaAttachment } from '@/shell/data/usePreviewableMediaAttachments';
 import {
   PUBLIC_CHANNEL_REF,
@@ -62,10 +64,8 @@ type UseDesktopShellDataEffectsArgs = {
   previewableMediaAttachments: PreviewableMediaAttachment[];
   /// #858: 表示設定 OFF の間にゲート対象となる成人向け添付 hash。
   gatedAdultMediaHashes: string[];
-  remoteObjectUrlRef: MutableRefObject<Map<string, string>>;
   draftPreviewUrlRef: MutableRefObject<Map<string, string>>;
   directMessageDraftPreviewUrlRef: MutableRefObject<Map<string, string>>;
-  mediaFetchAttemptRef: MutableRefObject<Map<string, number>>;
   visibleRefreshInFlightRef: MutableRefObject<boolean>;
   /// 表示中の Column id 列(DesktopShellColumnWorkspace の IntersectionObserver 由来)。
   visibleColumnIdsRef?: MutableRefObject<string[]>;
@@ -116,10 +116,8 @@ export function useDesktopShellDataEffects({
   selectedAuthorPubkey,
   previewableMediaAttachments,
   gatedAdultMediaHashes,
-  remoteObjectUrlRef,
   draftPreviewUrlRef,
   directMessageDraftPreviewUrlRef,
-  mediaFetchAttemptRef,
   visibleRefreshInFlightRef,
   visibleColumnIdsRef,
   loadTopics,
@@ -146,6 +144,7 @@ export function useDesktopShellDataEffects({
   // 変わるだけの再計算(3 秒 refresh・通知・advisory)では、失敗した hash を取り直さない。
   const mediaFetchLedgerRef = useRef(new MediaFetchLedger());
   const mediaFetchApiRef = useRef(api);
+  const mediaFetchAccountRef = useRef<string | null>(null);
   const mediaRetryTimerRef = useRef<number | null>(null);
   const [mediaRetryTick, setMediaRetryTick] = useState(0);
   // #1107: ゲートで取得を無効にした回数を hash ごとに持ち、ゲート前に始まった取得の結果は
@@ -185,13 +184,7 @@ export function useDesktopShellDataEffects({
     if (hashes.length === 0) return;
     for (const hash of hashes) {
       mediaGateEpochRef.current.set(hash, (mediaGateEpochRef.current.get(hash) ?? 0) + 1);
-      const url = remoteObjectUrlRef.current.get(hash);
-      if (url) {
-        URL.revokeObjectURL(url);
-        remoteObjectUrlRef.current.delete(hash);
-      }
       mediaFetchLedgerRef.current.forget(hash);
-      mediaFetchAttemptRef.current.delete(hash);
     }
     setMediaObjectUrls((current) => {
       let changed = false;
@@ -204,7 +197,7 @@ export function useDesktopShellDataEffects({
       }
       return changed ? next : current;
     });
-  }, [mediaFetchAttemptRef, remoteObjectUrlRef, setMediaObjectUrls]);
+  }, [setMediaObjectUrls]);
   // #858 / #1107: gate 後の取得結果も使わず、表示済み URL を解放する。
   useEffect(() => {
     gatedMediaHashesRef.current = new Set(gatedAdultMediaHashes);
@@ -214,12 +207,12 @@ export function useDesktopShellDataEffects({
   // when the bounded visible view drops the reference; a later view revalidates it.
   useEffect(() => {
     const visible = new Set(previewableMediaAttachments.map((attachment) => attachment.hash));
-    const stale = [...remoteObjectUrlRef.current.keys()].filter((hash) => !visible.has(hash));
+    const stale = mediaFetchLedgerRef.current.demandHashes().filter((hash) => !visible.has(hash));
     revokeMediaHashes(stale);
-  }, [previewableMediaAttachments, remoteObjectUrlRef, revokeMediaHashes]);
+  }, [previewableMediaAttachments, revokeMediaHashes]);
   const handleAdultLabelEvicted = useCallback(
-    (hash: string | null) => revokeMediaHashes(hash ? [hash] : remoteObjectUrlRef.current.keys()),
-    [remoteObjectUrlRef, revokeMediaHashes]
+    (hash: string | null) => revokeMediaHashes(hash ? [hash] : mediaFetchLedgerRef.current.demandHashes()),
+    [revokeMediaHashes]
   );
   // 非 active な Timeline Column が Bookmarks を表示しているか(bookmarks ロード gate 用、Issue #765)。
   const hasBookmarksTimelineColumn = useDesktopShellStore((state) =>
@@ -509,15 +502,12 @@ export function useDesktopShellDataEffects({
   ]);
 
   useEffect(() => {
-    const remoteObjectUrls = remoteObjectUrlRef.current;
+    const media = mediaFetchLedgerRef.current;
     const draftPreviewUrls = draftPreviewUrlRef.current;
     const directMessageDraftPreviewUrls = directMessageDraftPreviewUrlRef.current;
 
     return () => {
-      for (const url of remoteObjectUrls.values()) {
-        URL.revokeObjectURL(url);
-      }
-      remoteObjectUrls.clear();
+      media.clear();
       for (const url of draftPreviewUrls.values()) {
         URL.revokeObjectURL(url);
       }
@@ -527,7 +517,7 @@ export function useDesktopShellDataEffects({
       }
       directMessageDraftPreviewUrls.clear();
     };
-  }, [directMessageDraftPreviewUrlRef, draftPreviewUrlRef, remoteObjectUrlRef]);
+  }, [directMessageDraftPreviewUrlRef, draftPreviewUrlRef]);
 
   useEffect(() => {
     setGameDrafts((current) => {
@@ -583,11 +573,13 @@ export function useDesktopShellDataEffects({
 
   useEffect(() => {
     const ledger = mediaFetchLedgerRef.current;
-    if (mediaFetchApiRef.current !== api) {
+    if (mediaFetchApiRef.current !== api || mediaFetchAccountRef.current !== notificationAccount) {
       // api の差し替えは別の backend への接続を意味する。前の backend での失敗を引き継がない。
       mediaFetchApiRef.current = api;
+      mediaFetchAccountRef.current = notificationAccount;
       ledger.clear();
       mediaGateEpochRef.current.clear();
+      setMediaObjectUrls({});
     }
     const currentHashes = new Set(previewableMediaAttachments.map((attachment) => attachment.hash));
     for (const hash of mediaGateEpochRef.current.keys()) {
@@ -606,7 +598,9 @@ export function useDesktopShellDataEffects({
       if (typeof mediaObjectUrls[attachment.hash] === 'string') {
         continue;
       }
-      const decision = ledger.decide(attachment.hash, attachment.status ?? null, now);
+      const nativeFile = isTauriRuntime() && Boolean(api.getBlobMediaFile && api.releaseBlobMediaFile);
+      const reservedBytes = nativeFile ? 16 * 1024 * 1024 : Math.max(1, attachment.bytes) * 4;
+      const decision = ledger.decide(attachment.hash, attachment.status ?? null, now, reservedBytes);
       if (decision.kind === 'wait') {
         earliestRetryAt =
           earliestRetryAt === null ? decision.retryAt : Math.min(earliestRetryAt, decision.retryAt);
@@ -641,6 +635,7 @@ export function useDesktopShellDataEffects({
       const resultUsable = () =>
         mediaFetchMountedRef.current &&
         mediaFetchApiRef.current === api &&
+        mediaFetchAccountRef.current === notificationAccount &&
         (mediaGateEpochRef.current.get(attachment.hash) ?? 0) === gateEpoch &&
         !gatedMediaHashesRef.current.has(attachment.hash);
       // 失敗を台帳へ記録し、上限に達したときだけ取得不可を表示へ出す。
@@ -657,8 +652,7 @@ export function useDesktopShellDataEffects({
         );
       };
 
-      const nextAttempt = (mediaFetchAttemptRef.current.get(attachment.hash) ?? 0) + 1;
-      mediaFetchAttemptRef.current.set(attachment.hash, nextAttempt);
+      const nextAttempt = decision.attempt;
       logMediaDebug('info', 'remote media fetch start', {
         attempt: nextAttempt,
         hash: attachment.hash,
@@ -667,17 +661,49 @@ export function useDesktopShellDataEffects({
         status: attachment.status,
       });
 
-      const payloadRequest = attachment.source_object_id
-        ? api.getBlobMediaPayload(attachment.hash, attachment.mime, attachment.source_object_id)
-        : api.getBlobMediaPayload(attachment.hash, attachment.mime);
-      void payloadRequest
-        .then((payload) => {
+      const requestId = nativeFile
+        ? (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`)
+        : null;
+      if (requestId) {
+        ledger.trackCancel(attachment.hash, () => {
+          void api.releaseBlobMediaFile?.(requestId).catch(() => undefined);
+        });
+      }
+      const resourceRequest: Promise<{ kind: 'file'; resource: MediaResource } | { kind: 'payload'; payload: BlobMediaPayload } | null> = requestId && api.getBlobMediaFile
+        ? api.getBlobMediaFile(attachment.hash, attachment.mime, attachment.source_object_id, requestId)
+            .then((file) => file ? {
+              kind: 'file' as const,
+              resource: {
+                url: convertFileSrc(file.path),
+                memoryBytes: 0,
+                release: () => { void api.releaseBlobMediaFile?.(file.request_id).catch(() => undefined); },
+              },
+            } : null)
+        : api.getBlobMediaPayload(attachment.hash, attachment.mime, attachment.source_object_id)
+            .then((payload) => {
+              if (!payload) return null;
+              const bytes = Math.floor(payload.bytes_base64.length * 3 / 4);
+              if (bytes * 4 > reservedBytes) return null;
+              return { kind: 'payload' as const, payload };
+            });
+      void resourceRequest
+        .then((fetched) => {
           clearRetrying();
           if (!resultUsable()) {
+            if (fetched?.kind === 'file') fetched.resource.release();
             return;
           }
-          const nextUrl = payload ? createObjectUrlFromPayload(payload) : null;
-          if (!nextUrl) {
+          const resource = fetched?.kind === 'file' ? fetched.resource : fetched?.kind === 'payload'
+            ? (() => {
+              const url = createObjectUrlFromPayload(fetched.payload);
+              return {
+                url,
+                memoryBytes: Math.floor(fetched.payload.bytes_base64.length * 3 / 4),
+                release: () => URL.revokeObjectURL(url),
+              };
+            })()
+            : null;
+          if (!resource) {
             logMediaDebug('warn', 'remote media fetch missing', {
               attempt: nextAttempt,
               hash: attachment.hash,
@@ -691,26 +717,20 @@ export function useDesktopShellDataEffects({
 
           logMediaDebug('info', 'remote media fetch hit', {
             attempt: nextAttempt,
-            bytes_base64_length: payload?.bytes_base64.length ?? 0,
             hash: attachment.hash,
             mime: attachment.mime,
-            object_url: nextUrl,
+            object_url: resource.url,
             role: attachment.role,
             status: attachment.status,
           });
 
-          ledger.succeed(attachment.hash);
-          setMediaObjectUrls((current) => {
-            if (typeof current[attachment.hash] === 'string') {
-              URL.revokeObjectURL(nextUrl);
-              return current;
-            }
-            remoteObjectUrlRef.current.set(attachment.hash, nextUrl);
-            return {
-              ...current,
-              [attachment.hash]: nextUrl,
-            };
-          });
+          if (typeof storeApi.getState().mediaObjectUrls[attachment.hash] === 'string') {
+            resource.release();
+            ledger.succeed(attachment.hash);
+            return;
+          }
+          ledger.succeed(attachment.hash, resource);
+          setMediaObjectUrls((current) => ({ ...current, [attachment.hash]: resource.url }));
         })
         .catch((fetchError: unknown) => {
           clearRetrying();
@@ -744,13 +764,13 @@ export function useDesktopShellDataEffects({
     }
   }, [
     api,
-    mediaFetchAttemptRef,
     mediaObjectUrls,
     mediaRetryTick,
+    notificationAccount,
     previewableMediaAttachments,
-    remoteObjectUrlRef,
     setMediaObjectUrls,
     setMediaRetryingHashes,
+    storeApi,
   ]);
 
   useEffect(

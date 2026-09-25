@@ -201,6 +201,15 @@ async fn adult_labeled_media_payload_is_blocked_until_display_enabled() {
 
     // 既定 OFF: バイト列はローカルにあっても返さない。
     assert!(!app.adult_content_display_enabled());
+    let display_dir = tempfile::tempdir().unwrap();
+    let display_file = display_dir.path().join("gated-display.png");
+    assert!(
+        app.blob_media_file_for_post(&attachment_hash, Some(&object_id), &display_file)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!display_file.exists());
     assert!(
         app.blob_media_payload(attachment_hash.as_str(), "image/png")
             .await
@@ -216,6 +225,16 @@ async fn adult_labeled_media_payload_is_blocked_until_display_enabled() {
         .expect("enabled payload result")
         .expect("payload present after enabling");
     assert_eq!(payload.mime, "image/png");
+    assert_eq!(
+        app.blob_media_file_for_post(&attachment_hash, Some(&object_id), &display_file)
+            .await
+            .unwrap(),
+        Some(b"adult-labeled-image".len() as u64)
+    );
+    assert_eq!(
+        tokio::fs::read(&display_file).await.unwrap(),
+        b"adult-labeled-image"
+    );
 
     // OFF へ戻すと以後の取得は再び止まる。
     app.set_adult_content_display_enabled(false);

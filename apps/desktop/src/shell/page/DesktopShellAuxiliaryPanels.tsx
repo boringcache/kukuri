@@ -4,6 +4,7 @@ import { Settings } from 'lucide-react';
 import { AuthorAvatar } from '@/components/core/AuthorAvatar';
 import { AuthorDetailCard } from '@/components/core/AuthorDetailCard';
 import { MediaFetchFailure } from '@/components/core/MediaFetchFailure';
+import { MediaDemandObserver } from '@/components/core/MediaDemandObserver';
 import { PagedList } from '@/components/core/PagedList';
 import { AuthorTrustDisplayExceptionField } from '@/components/core/AuthorTrustDisplayExceptionField';
 import { CommunityNodeAdvisoryPanel } from '@/components/core/CommunityNodeAdvisoryPanel';
@@ -281,6 +282,7 @@ export function DesktopShellMessagesSurface({
                     : conversationPicture;
                   return (
                     <li key={message.message_id}>
+                      <MediaDemandObserver hash={video && !videoUnsupported ? video.hash : null} />
                       <article className='post-card'>
                         <div className='post-meta'>
                           <AuthorIdentityButton

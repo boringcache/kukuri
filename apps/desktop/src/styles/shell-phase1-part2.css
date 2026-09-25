@@ -173,6 +173,15 @@
   background: var(--surface-panel-muted);
 }
 
+.media-demand-marker {
+  display: block;
+  width: 1px;
+  height: 1px;
+  margin-bottom: -1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .media-frame-loading {
   background: var(--surface-media-loading);
 }

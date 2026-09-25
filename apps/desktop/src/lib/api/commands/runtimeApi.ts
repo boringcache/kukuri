@@ -3,6 +3,7 @@ import type {
   SessionDisplayRequest,
   AuthorSocialView,
   BlobMediaPayload,
+  BlobMediaFile,
   BookmarkedCustomReactionView,
   BookmarkedPostView,
   BookmarkedPostPageView,
@@ -1082,6 +1083,15 @@ export const runtimeApi: DesktopApi = {
         source_object_id: sourceObjectId ?? null,
       } satisfies GetBlobMediaRequest,
     });
+  }),
+  getBlobMediaFile: command('getBlobMediaFile', async (hash, mime, sourceObjectId, requestId) => {
+    return invokeDesktop<BlobMediaFile | null>('get_blob_media_file', {
+      request: { hash, mime, source_object_id: sourceObjectId ?? null } satisfies GetBlobMediaRequest,
+      requestId,
+    });
+  }),
+  releaseBlobMediaFile: command('releaseBlobMediaFile', async (requestId) => {
+    await invokeDesktop<void>('release_blob_media_file', { requestId });
   }),
   getBlobPreviewUrl: command('getBlobPreviewUrl', async (hash, mime, metaverseKind) => {
     return invokeDesktop<string | null>('get_blob_preview_url', {

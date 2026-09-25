@@ -24,6 +24,7 @@ pub(crate) use kukuri_desktop_runtime::{
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager};
+use crate::media_previews::MediaPreviewFiles;
 
 /// `manage` 済みのTauri stateでは共有hostの参照だけを保持する。
 /// account runtimeの所有・差し替え・停止は`ClientHost`へ集約し、このlockは
@@ -31,6 +32,7 @@ use tauri::{Emitter, Manager};
 pub(crate) struct DesktopState {
     host: std::sync::RwLock<Arc<ClientHost>>,
     pub(crate) app_data_dir: PathBuf,
+    pub(crate) media_previews: MediaPreviewFiles,
 }
 
 impl DesktopState {
@@ -44,6 +46,7 @@ impl DesktopState {
     }
 
     pub(crate) fn replace_host(&self, next: Arc<ClientHost>) -> Arc<ClientHost> {
+        self.media_previews.clear();
         std::mem::replace(&mut *self.host.write().expect("host lock poisoned"), next)
     }
 }
@@ -225,6 +228,9 @@ pub(crate) async fn build_desktop_state(
     Ok(DesktopState {
         host: std::sync::RwLock::new(host),
         app_data_dir,
+        media_previews: MediaPreviewFiles::new(
+            app_handle.path().app_cache_dir().ok().map(|dir| dir.join("kukuri-display")),
+        ),
     })
 }
 

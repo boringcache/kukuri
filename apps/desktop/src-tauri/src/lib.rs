@@ -1,5 +1,6 @@
 mod app_update;
 mod commands;
+mod media_previews;
 #[cfg(target_os = "linux")]
 mod deb_update;
 mod desktop_lifecycle;
@@ -470,6 +471,8 @@ pub fn run() {
             commands::community_node::set_channel_gossip_enabled,
             commands::community_node::get_local_peer_ticket,
             commands::posts::get_blob_media_payload,
+            commands::posts::get_blob_media_file,
+            commands::posts::release_blob_media_file,
             commands::posts::retry_post_elements,
             commands::posts::get_blob_preview_url,
             commands::posts::get_content_display_settings,

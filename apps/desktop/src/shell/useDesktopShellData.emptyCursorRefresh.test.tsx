@@ -33,10 +33,8 @@ function renderDataHook(api: DesktopApi) {
   const harness = createShellHookHarness();
   const refs = {
     loadTopicsRequestRef: { current: new Map<string, number>() },
-    remoteObjectUrlRef: { current: new Map<string, string>() },
     draftPreviewUrlRef: { current: new Map<string, string>() },
     directMessageDraftPreviewUrlRef: { current: new Map<string, string>() },
-    mediaFetchAttemptRef: { current: new Map<string, number>() },
     draftSequenceRef: { current: 0 },
   };
   const view = renderHook(

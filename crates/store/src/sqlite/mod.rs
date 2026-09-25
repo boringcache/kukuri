@@ -59,6 +59,7 @@ pub use remote_cache::{
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: Pool<Sqlite>,
+    remote_cache_files: Option<std::path::PathBuf>,
     remote_cache_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     remote_cache_reserved: std::sync::Arc<std::sync::atomic::AtomicU64>,
     adult_label_evictions: tokio::sync::broadcast::Sender<String>,

@@ -185,6 +185,7 @@ impl SqliteStore {
             )?);
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         for row in rows {
             let remote_row = remote
                 || sqlx::query_scalar::<_, i64>(
@@ -197,8 +198,14 @@ impl SqliteStore {
                     != 0;
             if remote_row {
                 anyhow::ensure!(
-                    self.charge_remote_projection(&mut tx, &row, budget, &mut label_evictions)
-                        .await?,
+                    self.charge_remote_projection(
+                        &mut tx,
+                        &row,
+                        budget,
+                        &mut label_evictions,
+                        &mut removed_files
+                    )
+                    .await?,
                     "remote projection cache capacity exceeded"
                 );
             }
@@ -310,6 +317,7 @@ impl SqliteStore {
         }
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(())
     }
 }

@@ -32,6 +32,124 @@ fn remote_post(object_id: &str) -> ObjectProjectionRow {
 }
 
 #[tokio::test]
+async fn cached_blob_copies_to_display_file_in_bounded_chunks() {
+    let store = SqliteStore::connect_memory().await.unwrap();
+    let bytes = vec![7u8; 2 * 1024 * 1024 + 13];
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert!(
+        store
+            .put_remote_content("blob", &hash, "blob", &bytes)
+            .await
+            .unwrap()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("display.bin");
+    assert_eq!(
+        store
+            .copy_remote_content_to_file("blob", &hash, &path)
+            .await
+            .unwrap(),
+        Some(bytes.len() as u64)
+    );
+    assert_eq!(tokio::fs::read(path).await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn file_backed_remote_blob_survives_restart_and_reclaim_removes_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("store.db");
+    let source = dir.path().join("source.bin");
+    let bytes = vec![17u8; 2 * 1024 * 1024 + 7];
+    tokio::fs::write(&source, &bytes).await.unwrap();
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let store = SqliteStore::connect_file(&database).await.unwrap();
+    store.put_remote_blob_file(&hash, &source).await.unwrap();
+    let cached_file = database.with_extension("remote-blobs").join(&hash);
+    assert!(cached_file.exists());
+    let display = dir.path().join("display.bin");
+    assert_eq!(
+        store
+            .copy_remote_content_to_file("blob", &hash, &display)
+            .await
+            .unwrap(),
+        Some(bytes.len() as u64)
+    );
+    assert_eq!(tokio::fs::read(&display).await.unwrap(), bytes);
+    store.close().await;
+
+    let reopened = SqliteStore::connect_file(&database).await.unwrap();
+    assert!(reopened.has_remote_content("blob", &hash).await.unwrap());
+    sqlx::query(
+        "UPDATE remote_content_cache SET last_used_at = 0 WHERE kind = 'blob' AND cache_key = ?1",
+    )
+    .bind(&hash)
+    .execute(reopened.pool())
+    .await
+    .unwrap();
+    assert_eq!(reopened.reclaim_remote_cache_step().await.unwrap(), 1);
+    assert!(!cached_file.exists());
+    assert_eq!(tokio::fs::read(display).await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn rolled_back_reclaim_keeps_the_file_backed_blob_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.bin");
+    let bytes = b"cached media";
+    tokio::fs::write(&source, bytes).await.unwrap();
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    let store = SqliteStore::connect_file(dir.path().join("store.db"))
+        .await
+        .unwrap();
+    store.put_remote_blob_file(&hash, &source).await.unwrap();
+    let mut tx = store.pool.begin().await.unwrap();
+    let mut labels = Vec::new();
+    let mut removed_files = Vec::new();
+    delete_cache_item(&mut tx, "blob", &hash, &mut labels, &mut removed_files)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(removed_files, vec![hash.clone()]);
+    assert_eq!(
+        store.get_remote_content("blob", &hash).await.unwrap(),
+        Some(bytes.to_vec())
+    );
+}
+
+#[tokio::test]
+async fn file_backed_media_over_128_mib_keeps_its_original_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("large-video.bin");
+    let length = 129 * 1024 * 1024u64;
+    tokio::fs::File::create(&source)
+        .await
+        .unwrap()
+        .set_len(length)
+        .await
+        .unwrap();
+    let mut hasher = blake3::Hasher::new();
+    let chunk = vec![0u8; 1024 * 1024];
+    for _ in 0..129 {
+        hasher.update(&chunk);
+    }
+    let hash = hasher.finalize().to_hex().to_string();
+    let store = SqliteStore::connect_file(dir.path().join("large.db"))
+        .await
+        .unwrap();
+    store.put_remote_blob_file(&hash, &source).await.unwrap();
+    let display = dir.path().join("display.mp4");
+    assert_eq!(
+        store
+            .copy_remote_content_to_file("blob", &hash, &display)
+            .await
+            .unwrap(),
+        Some(length)
+    );
+    assert_eq!(tokio::fs::metadata(display).await.unwrap().len(), length);
+}
+
+#[tokio::test]
 async fn fresh_cache_reads_do_not_take_the_sqlite_writer_lock() {
     let dir = tempfile::tempdir().unwrap();
     let store = SqliteStore::connect_file(dir.path().join("remote-cache.db"))
@@ -212,7 +330,7 @@ async fn remote_projection_and_its_page_index_are_reclaimed_together() {
                 "blob",
                 "x",
                 "s",
-                b"v",
+                CachePayload::Bytes(b"v"),
                 None,
                 None,
                 100,
@@ -343,7 +461,14 @@ async fn remote_cache_reclaims_oldest_entries_with_two_entry_budget() {
         assert!(
             store
                 .put_remote_content_with_budget(
-                    "blob", key, "scope", &payload, None, None, budget, at
+                    "blob",
+                    key,
+                    "scope",
+                    CachePayload::Bytes(&payload),
+                    None,
+                    None,
+                    budget,
+                    at
                 )
                 .await
                 .unwrap()
@@ -353,7 +478,14 @@ async fn remote_cache_reclaims_oldest_entries_with_two_entry_budget() {
         assert!(
             store
                 .put_remote_content_with_budget(
-                    "blob", key, "scope", &payload, None, None, budget, at
+                    "blob",
+                    key,
+                    "scope",
+                    CachePayload::Bytes(&payload),
+                    None,
+                    None,
+                    budget,
+                    at
                 )
                 .await
                 .unwrap()
@@ -427,7 +559,7 @@ async fn remote_cache_reclaims_at_most_128_expired_items_per_write() {
                 "record",
                 &format!("item-{i}"),
                 "scope",
-                b"v",
+                CachePayload::Bytes(b"v"),
                 None,
                 None,
                 REMOTE_CACHE_CAPACITY_BYTES,
@@ -441,7 +573,7 @@ async fn remote_cache_reclaims_at_most_128_expired_items_per_write() {
             "record",
             "fresh",
             "scope",
-            b"v",
+            CachePayload::Bytes(b"v"),
             None,
             None,
             REMOTE_CACHE_CAPACITY_BYTES,
