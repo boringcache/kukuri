@@ -451,14 +451,14 @@ async fn reimporting_a_lost_neighbor_joins_it_again_without_leaving_the_topic() 
         .await
     };
     a_has_b(true).await.expect("a joins b");
-    // B does not know A, so after B leaves and subscribes again only A can
-    // restore the neighbor. A keeps its topic and joins the known peer again.
+    // B does not know A. Once A has lost B, B subscribes again without a peer,
+    // so only A can restore the neighbor: A keeps its topic and joins B again.
     transport_b
         .unsubscribe_hints(&topic)
         .await
         .expect("leave b");
-    let _stream_b = transport_b.subscribe_hints(&topic).await.expect("b again");
     a_has_b(false).await.expect("a loses b");
+    let _stream_b = transport_b.subscribe_hints(&topic).await.expect("b again");
     transport_a
         .import_ticket(&ticket_b)
         .await
