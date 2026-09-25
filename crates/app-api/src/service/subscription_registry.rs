@@ -17,6 +17,8 @@ pub(crate) struct SubscriptionRegistry {
     pub(crate) account_receive_offer_lease: Arc<std::sync::Mutex<Option<ReceiveOfferLease>>>,
     pub(crate) account_receive_offer_closed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) account_receive_offer_shutdown: Arc<tokio::sync::Notify>,
+    /// At most four transient public source offer publishers for this account.
+    pub(crate) public_notification_offer_tasks: Arc<Mutex<Vec<AbortOnDropTask>>>,
     /// One account-wide owner for due protected DM outbox work.
     pub(crate) dm_outbox_retry_task: Arc<Mutex<Option<AbortOnDropTask>>>,
     pub(crate) dm_outbox_retry_closed: Arc<std::sync::atomic::AtomicBool>,

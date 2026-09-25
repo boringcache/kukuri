@@ -51,6 +51,17 @@ impl AppService {
             task.abort();
             let _ = tokio::time::timeout(Duration::from_secs(2), task.wait()).await;
         }
+        let public_tasks = std::mem::take(
+            &mut *self
+                .subscription_registry
+                .public_notification_offer_tasks
+                .lock()
+                .await,
+        );
+        for task in public_tasks {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(2), task.wait()).await;
+        }
         if let Err(error) = self
             .unsubscribe_account_receive_offer_lease(&self.services.keys.public_key())
             .await
@@ -219,6 +230,9 @@ impl AppService {
         let sender = verified.sender().as_str();
         let topic = derive_direct_message_topic(services.keys.as_ref(), verified.sender())?;
         match &verified.reference().scope {
+            ReceiveOfferScopeV1::PublicSource => {
+                return Self::ingest_public_notification_offer(services, &verified).await;
+            }
             ReceiveOfferScopeV1::DirectMessageAck {
                 dm_id,
                 message_id,

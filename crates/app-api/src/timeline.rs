@@ -157,6 +157,13 @@ impl AppService {
                 },
             )
             .await?;
+        self.queue_public_repost_offer(
+            target_topic_id,
+            &envelope,
+            repost_object.repost_of.as_ref(),
+            normalized_commentary.as_deref(),
+        )
+        .await;
         Ok(envelope.id.0)
     }
 
@@ -778,6 +785,10 @@ impl AppService {
                     );
                 }
             }
+        }
+        if effective_channel_id.is_none() {
+            self.queue_public_post_offer(&write_replica, &envelope, content, parent.as_ref())
+                .await;
         }
         Ok(envelope.id.0)
     }

@@ -153,6 +153,7 @@ mod private_channels_support;
 mod profile_docs_support;
 mod profile_timeline_support;
 mod projection_support;
+mod public_notification_offer_support;
 mod reaction_hydration;
 pub(crate) use reaction_hydration::{
     hydrate_reaction_cache_for_target_bounded, hydrate_reaction_cache_from_key,
@@ -259,6 +260,7 @@ pub(crate) use projection_support::{
     private_channel_epoch_capabilities, private_channel_is_epoch_aware,
     private_channel_replica_for_epoch, profile_timeline_item_is_hidden,
 };
+pub(crate) use public_notification_offer_support::PublicNotificationSource;
 pub(crate) use reaction_integrity::{ReactionKey, VerifiedReaction, load_verified_reaction};
 pub(crate) use session_integrity::dome_instance_id;
 pub(crate) use session_integrity::{
