@@ -297,6 +297,7 @@ table remote_content_cache
   column cid=6 name=charged_bytes type=INTEGER notnull=1 default=None pk=0
   column cid=7 name=is_protected type=INTEGER notnull=1 default=Some("0") pk=0
   column cid=8 name=last_used_at type=INTEGER notnull=1 default=None pk=0
+  column cid=9 name=file_name type=TEXT notnull=0 default=None pk=0
 table remote_content_cache_protected_ref
   column cid=0 name=kind type=TEXT notnull=1 default=None pk=1
   column cid=1 name=cache_key type=TEXT notnull=1 default=None pk=2

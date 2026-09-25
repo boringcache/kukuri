@@ -129,8 +129,13 @@ fn exclusion_allowed(tauri: &str, kind: &str) -> bool {
             "commands::developer_logs::set_developer_mode_enabled"
                 | "commands::developer_logs::read_desktop_logs"
         ),
-        // #1174: GUIでviewport内に表示した公開投稿だけの一時link preview。
-        "gui_content_preview" => tauri == "commands::link_preview::fetch_link_preview",
+        // GUI表示中だけに所有する一時content previewとそのlease。
+        "gui_content_preview" => matches!(
+            tauri,
+            "commands::link_preview::fetch_link_preview"
+                | "commands::posts::get_blob_media_file"
+                | "commands::posts::release_blob_media_file"
+        ),
         // #1284: 表示中の投稿cardだけに作用する局所的な欠損blobの回復。
         "gui_content_recovery" => tauri == "commands::posts::retry_post_elements",
         "gui_visible_membership" => tauri == "commands::posts::bookmarked_post_ids",
@@ -176,9 +181,9 @@ fn baseline_inventory_is_classified_once() {
     );
     assert_eq!(
         manifest.scope_revision,
-        "2026-09-24-1221-r1-d-notification-page-v1"
+        "2026-09-25-1221-r1-c-media-display-v1"
     );
-    assert_eq!(manifest.entries.len(), 169);
+    assert_eq!(manifest.entries.len(), 171);
     check_inventory(&registrations(TAURI_SOURCE), &manifest.entries).expect("全入口の分類");
 }
 

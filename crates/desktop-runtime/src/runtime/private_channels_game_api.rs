@@ -1142,4 +1142,18 @@ impl DesktopRuntime {
             )
             .await
     }
+
+    pub async fn get_blob_media_file(
+        &self,
+        request: GetBlobMediaRequest,
+        path: &std::path::Path,
+    ) -> Result<Option<u64>> {
+        self.app_service
+            .blob_media_file_for_post(
+                request.hash.as_str(),
+                request.source_object_id.as_deref(),
+                path,
+            )
+            .await
+    }
 }

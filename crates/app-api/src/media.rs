@@ -1,5 +1,17 @@
 use crate::service::*;
 
+struct MediaSourceAccess {
+    object_id: EnvelopeId,
+    topic: String,
+    channel: String,
+    generation: u64,
+    adult_labeled: bool,
+}
+
+struct MediaAccess {
+    source: Option<MediaSourceAccess>,
+}
+
 impl AppService {
     /// #858: 成人向け表現の表示設定(既定 OFF)。desktop-runtime が永続値を起動時に
     /// 反映し、設定変更時にも呼ぶ。
@@ -51,169 +63,23 @@ impl AppService {
     ) -> Result<Option<BlobMediaPayload>> {
         let hash = hash.trim();
         if hash.is_empty() {
-            warn!(mime = %mime, "blob media payload fetch skipped because hash was blank");
             return Ok(None);
         }
-        info!(hash = %hash, mime = %mime, "blob media payload fetch requested");
         let blob_hash = kukuri_core::BlobHash::new(hash.to_string());
-        let source = if let Some(object_id) = source_object_id {
-            let object_id = EnvelopeId::from(object_id);
-            let Some(row) = self
-                .services
-                .projection_store
-                .get_object_projection(&object_id)
-                .await?
-            else {
-                return Ok(None);
-            };
-            if !row
-                .attachments
-                .iter()
-                .any(|attachment| attachment.hash == blob_hash)
-                || self
-                    .services
-                    .projection_store
-                    .get_post_withdrawal(&object_id)
-                    .await?
-                    .is_some()
-            {
-                return Ok(None);
-            }
-            let Some(generation) = self
-                .services
-                .active_content_scope_generation(&row.topic_id, &row.channel_id)
-                .await
-            else {
-                return Ok(None);
-            };
-            let adult_labeled = kukuri_core::has_adult_content_label(&row.content_labels);
-            Some((
-                object_id,
-                row.topic_id,
-                row.channel_id,
-                generation,
-                adult_labeled,
-            ))
-        } else {
-            None
-        };
-        // #858 fail-closed バックストップ: 成人向けラベル付き投稿の添付として観測済みの
-        // hash は、表示設定が OFF の間はネットワーク取得もローカル読み出しも行わない。
-        // ON の場合も ephemeral fetch でローカル blob store へ永続化しない(ADR 0046)。
-        // #1055: 投稿者の self-label に加えて、設定済み Community Node が発行した content
-        // advisory の対象 hash も同じゲートで扱う(ADR 0046 §6.2)。ラベル源は 2 つだが、
-        // 取得を止める判定点はここ 1 箇所のままにする。
-        let adult_labeled = self
-            .services
-            .projection_store
-            .is_adult_media_hash(&blob_hash)
+        let Some(access) = self
+            .media_access_for_post(&blob_hash, source_object_id)
             .await?
-            || self.is_advisory_media_hash(hash).await
-            || source
-                .as_ref()
-                .is_some_and(|(_, _, _, _, labeled)| *labeled);
-        if adult_labeled && !self.adult_content_display_enabled() {
-            info!(
-                hash = %hash,
-                mime = %mime,
-                "blob media payload fetch blocked: adult-labeled media while display is disabled"
-            );
+        else {
             return Ok(None);
-        }
-        let fetch_result = if let Some((_, topic, channel, generation, _)) = &source {
-            match self
-                .services
-                .until_content_invalid(
-                    topic,
-                    channel,
-                    *generation,
-                    self.services.blob_service.prepare_display_fetch(&blob_hash),
-                )
-                .await
-            {
-                Some(Ok(fetch)) => self
-                    .services
-                    .until_content_invalid(topic, channel, *generation, fetch)
-                    .await
-                    .unwrap_or(Ok(None)),
-                Some(Err(error)) => Err(error),
-                None => Ok(None),
-            }
-        } else {
-            self.services
-                .until_content_invalid(
-                    "",
-                    PUBLIC_CHANNEL_ID,
-                    0,
-                    self.services.blob_service.fetch_blob_ephemeral(&blob_hash),
-                )
-                .await
-                .unwrap_or(Ok(None))
         };
-        let bytes = match fetch_result {
-            Ok(Some(bytes)) => {
-                info!(
-                    hash = %hash,
-                    mime = %mime,
-                    byte_len = bytes.len(),
-                    "blob media payload fetch hit"
-                );
-                bytes
-            }
-            Ok(None) => {
-                warn!(hash = %hash, mime = %mime, "blob media payload fetch miss");
-                return Ok(None);
-            }
-            Err(error) => {
-                warn!(
-                    hash = %hash,
-                    mime = %mime,
-                    error = %error,
-                    "blob media payload fetch failed"
-                );
-                return Err(error);
-            }
+        let Some(bytes) = self.fetch_display_media_bytes(&blob_hash, &access).await? else {
+            return Ok(None);
         };
         let _save_access = self.services.content_save_access.lock().await;
-        let currently_adult = self
-            .services
-            .projection_store
-            .is_adult_media_hash(&blob_hash)
-            .await?
-            || self.is_advisory_media_hash(hash).await
-            || source
-                .as_ref()
-                .is_some_and(|(_, _, _, _, labeled)| *labeled);
-        if *self.services.content_closed.borrow()
-            || (currently_adult && !self.adult_content_display_enabled())
-        {
+        if !self.media_access_still_valid(&blob_hash, &access).await? {
             return Ok(None);
         }
-        if let Some((object_id, topic, channel, generation, _)) = source
-            && (!self
-                .services
-                .content_scope_is_current(&topic, &channel, generation)
-                .await
-                || self
-                    .services
-                    .projection_store
-                    .get_post_withdrawal(&object_id)
-                    .await?
-                    .is_some()
-                || !self
-                    .services
-                    .projection_store
-                    .get_object_projection(&object_id)
-                    .await?
-                    .is_some_and(|row| {
-                        row.topic_id == topic
-                            && row.channel_id == channel
-                            && row.attachments.iter().any(|a| a.hash == blob_hash)
-                    }))
-        {
-            return Ok(None);
-        }
-        if !currently_adult
+        if !self.media_is_adult(&blob_hash, &access).await?
             && self
                 .services
                 .blob_service
@@ -235,6 +101,205 @@ impl AppService {
             bytes_base64: BASE64_STANDARD.encode(bytes),
             mime: mime.to_string(),
         }))
+    }
+
+    pub async fn blob_media_file_for_post(
+        &self,
+        hash: &str,
+        source_object_id: Option<&str>,
+        path: &std::path::Path,
+    ) -> Result<Option<u64>> {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return Ok(None);
+        }
+        let blob_hash = kukuri_core::BlobHash::new(hash.to_string());
+        let Some(access) = self
+            .media_access_for_post(&blob_hash, source_object_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let fetch = self
+            .services
+            .blob_service
+            .fetch_blob_ephemeral_to_file(&blob_hash, path);
+        let result = if let Some(source) = &access.source {
+            self.services
+                .until_content_invalid(&source.topic, &source.channel, source.generation, fetch)
+                .await
+                .unwrap_or(Ok(None))
+        } else {
+            self.services
+                .until_content_invalid("", PUBLIC_CHANNEL_ID, 0, fetch)
+                .await
+                .unwrap_or(Ok(None))
+        }?;
+        let Some(length) = result else {
+            return Ok(None);
+        };
+        let _save_access = self.services.content_save_access.lock().await;
+        if !self.media_access_still_valid(&blob_hash, &access).await? {
+            return Ok(None);
+        }
+        if !self.media_is_adult(&blob_hash, &access).await?
+            && self
+                .services
+                .blob_service
+                .local_blob_status(&blob_hash)
+                .await?
+                == BlobStatus::Missing
+        {
+            self.services
+                .blob_service
+                .put_remote_blob_file(path, &blob_hash)
+                .await?;
+        }
+        Ok(Some(length))
+    }
+
+    async fn media_access_for_post(
+        &self,
+        hash: &kukuri_core::BlobHash,
+        source_object_id: Option<&str>,
+    ) -> Result<Option<MediaAccess>> {
+        let source = if let Some(object_id) = source_object_id {
+            let object_id = EnvelopeId::from(object_id);
+            let Some(row) = self
+                .services
+                .projection_store
+                .get_object_projection(&object_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            if !row
+                .attachments
+                .iter()
+                .any(|attachment| attachment.hash == *hash)
+                || self
+                    .services
+                    .projection_store
+                    .get_post_withdrawal(&object_id)
+                    .await?
+                    .is_some()
+            {
+                return Ok(None);
+            }
+            let Some(generation) = self
+                .services
+                .active_content_scope_generation(&row.topic_id, &row.channel_id)
+                .await
+            else {
+                return Ok(None);
+            };
+            Some(MediaSourceAccess {
+                object_id,
+                topic: row.topic_id,
+                channel: row.channel_id,
+                generation,
+                adult_labeled: kukuri_core::has_adult_content_label(&row.content_labels),
+            })
+        } else {
+            None
+        };
+        let access = MediaAccess { source };
+        if self.media_is_adult(hash, &access).await? && !self.adult_content_display_enabled() {
+            return Ok(None);
+        }
+        Ok(Some(access))
+    }
+
+    async fn media_is_adult(
+        &self,
+        hash: &kukuri_core::BlobHash,
+        access: &MediaAccess,
+    ) -> Result<bool> {
+        Ok(self
+            .services
+            .projection_store
+            .is_adult_media_hash(hash)
+            .await?
+            || self.is_advisory_media_hash(hash.as_str()).await
+            || access
+                .source
+                .as_ref()
+                .is_some_and(|source| source.adult_labeled))
+    }
+
+    async fn fetch_display_media_bytes(
+        &self,
+        hash: &kukuri_core::BlobHash,
+        access: &MediaAccess,
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(source) = &access.source {
+            match self
+                .services
+                .until_content_invalid(
+                    &source.topic,
+                    &source.channel,
+                    source.generation,
+                    self.services.blob_service.prepare_display_fetch(hash),
+                )
+                .await
+            {
+                Some(Ok(fetch)) => self
+                    .services
+                    .until_content_invalid(&source.topic, &source.channel, source.generation, fetch)
+                    .await
+                    .unwrap_or(Ok(None)),
+                Some(Err(error)) => Err(error),
+                None => Ok(None),
+            }
+        } else {
+            self.services
+                .until_content_invalid(
+                    "",
+                    PUBLIC_CHANNEL_ID,
+                    0,
+                    self.services.blob_service.fetch_blob_ephemeral(hash),
+                )
+                .await
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    async fn media_access_still_valid(
+        &self,
+        hash: &kukuri_core::BlobHash,
+        access: &MediaAccess,
+    ) -> Result<bool> {
+        if *self.services.content_closed.borrow()
+            || (self.media_is_adult(hash, access).await? && !self.adult_content_display_enabled())
+        {
+            return Ok(false);
+        }
+        let Some(source) = &access.source else {
+            return Ok(true);
+        };
+        Ok(self
+            .services
+            .content_scope_is_current(&source.topic, &source.channel, source.generation)
+            .await
+            && self
+                .services
+                .projection_store
+                .get_post_withdrawal(&source.object_id)
+                .await?
+                .is_none()
+            && self
+                .services
+                .projection_store
+                .get_object_projection(&source.object_id)
+                .await?
+                .is_some_and(|row| {
+                    row.topic_id == source.topic
+                        && row.channel_id == source.channel
+                        && row
+                            .attachments
+                            .iter()
+                            .any(|attachment| attachment.hash == *hash)
+                }))
     }
 
     pub async fn blob_preview_data_url(&self, hash: &str, mime: &str) -> Result<Option<String>> {

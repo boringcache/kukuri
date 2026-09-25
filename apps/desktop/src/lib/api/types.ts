@@ -257,6 +257,8 @@ export type DesktopLogSnapshot = {
   max_bytes: number;
 };
 
+export type BlobMediaFile = { path: string; request_id: string; bytes: number };
+
 export interface DesktopApi {
   createPost(
     topic: string,
@@ -629,6 +631,8 @@ export interface DesktopApi {
   setChannelGossipEnabled(topic: string, channelId: string, enabled: boolean): Promise<void>;
   getLocalPeerTicket(): Promise<string | null>;
   getBlobMediaPayload(hash: string, mime: string, sourceObjectId?: string): Promise<BlobMediaPayload | null>;
+  getBlobMediaFile?(hash: string, mime: string, sourceObjectId: string | undefined, requestId: string): Promise<BlobMediaFile | null>;
+  releaseBlobMediaFile?(requestId: string): Promise<void>;
   // #858: 成人向け表現の表示設定(既定 OFF)。
   getContentDisplaySettings(): Promise<ContentDisplaySettings>;
   setAdultContentDisplayEnabled(enabled: boolean): Promise<ContentDisplaySettings>;

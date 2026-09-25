@@ -81,6 +81,7 @@ export type PostMediaView = {
   }>;
   currentImageIndex?: number;
   videoPosterPreviewSrc?: string | null;
+  videoPosterHash?: string | null;
   videoPlaybackSrc?: string | null;
   // 動画添付を media として通報するときの識別子(video_manifest の blob ハッシュ。無ければ
   // poster のハッシュ)。観測元は `provenance` をそのまま使う(#697)。

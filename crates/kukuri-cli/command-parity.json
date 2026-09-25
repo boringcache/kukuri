@@ -1,6 +1,6 @@
 {
   "baseline": "d372c91bdc963bda07308a359fe3baeca8e06150",
-  "scope_revision": "2026-09-24-1221-r1-d-notification-page-v1",
+  "scope_revision": "2026-09-25-1221-r1-c-media-display-v1",
   "entries": [
     {"tauri":"commands::startup::get_desktop_startup_status","cli":"get_desktop_startup_status","inventory":"INV-1"},
     {"tauri":"commands::system_locale::get_system_locales","excluded":"os","reason":"#917: desktopの同意前UI言語を選ぶOS local read。UIを持たないCLIの業務commandには追加しない。"},
@@ -132,6 +132,8 @@
     {"tauri":"commands::community_node::set_channel_gossip_enabled","cli":"set_channel_gossip_enabled","inventory":"INV-7"},
     {"tauri":"commands::community_node::get_local_peer_ticket","cli":"get_local_peer_ticket","inventory":"INV-7"},
     {"tauri":"commands::posts::get_blob_media_payload","cli":"get_blob_media_payload","inventory":"INV-2"},
+    {"tauri":"commands::posts::get_blob_media_file","excluded":"gui_content_preview","reason":"#1221 R1-C: GUIの可視添付だけに使う一時ファイルとasset URL。CLIは既存のblob取得commandを使い、表示用leaseを持たない。"},
+    {"tauri":"commands::posts::release_blob_media_file","excluded":"gui_content_preview","reason":"#1221 R1-C: GUIの表示用一時ファイルleaseを解放する。CLIはasset URLを持たず、対応するleaseも生成しない。"},
     {"tauri":"commands::posts::get_blob_preview_url","cli":"get_blob_preview_url","inventory":"INV-2"},
     {"tauri":"commands::posts::get_content_display_settings","cli":"get_content_display_settings","inventory":"INV-2"},
     {"tauri":"commands::posts::set_adult_content_display_enabled","cli":"set_adult_content_display_enabled","inventory":"INV-2"},

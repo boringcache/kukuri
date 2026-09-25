@@ -30,6 +30,10 @@
         "object-src": "'none'",
         "base-uri": "'none'",
         "frame-ancestors": "'none'"
+      },
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCACHE/kukuri-display/**/*"]
       }
     }
   },

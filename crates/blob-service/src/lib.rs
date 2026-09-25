@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -54,6 +55,9 @@ pub trait BlobService: Send + Sync {
     async fn put_remote_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
         self.put_blob(data, mime).await
     }
+    async fn put_remote_blob_file(&self, _path: &Path, _hash: &BlobHash) -> Result<()> {
+        anyhow::bail!("file-backed remote blob cache is not supported")
+    }
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
     /// Reserve shared network capacity before the caller spends a retry attempt.
     async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
@@ -81,6 +85,15 @@ pub trait BlobService: Send + Sync {
     /// `fetch_blob` に委譲する（in-memory 実装等、恒久保存の概念が無い実装向け）。
     async fn fetch_blob_ephemeral(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
         self.fetch_blob(hash).await
+    }
+    /// Write display bytes in bounded chunks. Unsupported adapters must not
+    /// fall back to a whole-blob allocation on the desktop path.
+    async fn fetch_blob_ephemeral_to_file(
+        &self,
+        _hash: &BlobHash,
+        _path: &Path,
+    ) -> Result<Option<u64>> {
+        anyhow::bail!("streaming display fetch is not supported")
     }
     /// Bounded scan ingress. Implementations must reject before full allocation;
     /// an implementation without this contract is unavailable rather than an unbounded fallback.
@@ -215,6 +228,26 @@ impl IrohBlobService {
 
 #[async_trait]
 impl BlobService for MemoryBlobService {
+    async fn put_remote_blob_file(&self, path: &Path, hash: &BlobHash) -> Result<()> {
+        let bytes = tokio::fs::read(path).await?;
+        anyhow::ensure!(
+            blake3::hash(&bytes).to_hex().as_str() == hash.as_str(),
+            "remote blob hash mismatch"
+        );
+        self.put_blob(bytes, "application/octet-stream").await?;
+        Ok(())
+    }
+    async fn fetch_blob_ephemeral_to_file(
+        &self,
+        hash: &BlobHash,
+        path: &Path,
+    ) -> Result<Option<u64>> {
+        let Some(bytes) = self.fetch_local_blob(hash).await? else {
+            return Ok(None);
+        };
+        tokio::fs::write(path, &bytes).await?;
+        Ok(Some(bytes.len() as u64))
+    }
     async fn prepare_display_fetch(&self, hash: &BlobHash) -> Result<DisplayBlobFetch> {
         let bytes = self.fetch_local_blob(hash).await?;
         Ok(Box::pin(async move { Ok(bytes) }))
@@ -284,6 +317,51 @@ impl BlobService for MemoryBlobService {
 
 #[async_trait]
 impl BlobService for IrohBlobService {
+    async fn put_remote_blob_file(&self, path: &Path, hash: &BlobHash) -> Result<()> {
+        if tokio::fs::metadata(path).await?.len() > kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64
+        {
+            return Ok(());
+        }
+        let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
+        if self.node.blobs().blobs().has(parsed).await? {
+            return Ok(());
+        }
+        let cache = self
+            .remote_cache
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote cache is unavailable"))?;
+        cache.put_remote_blob_file(hash.as_str(), path).await
+    }
+    async fn fetch_blob_ephemeral_to_file(
+        &self,
+        hash: &BlobHash,
+        path: &Path,
+    ) -> Result<Option<u64>> {
+        use tokio::io::AsyncWriteExt;
+        let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
+        if let Some(cache) = &self.remote_cache
+            && let Some(length) = cache
+                .copy_remote_content_to_file("blob", hash.as_str(), path)
+                .await?
+        {
+            return Ok(Some(length));
+        }
+        if self.node.blobs().blobs().has(parsed).await? {
+            let mut reader = self.node.blobs().blobs().reader(parsed);
+            let mut file = tokio::fs::File::create(path).await?;
+            let length = tokio::io::copy(&mut reader, &mut file).await?;
+            file.flush().await?;
+            return Ok(Some(length));
+        }
+        remote_fetch::prepare_display_file_fetch(
+            &self.node,
+            &self.peers,
+            parsed,
+            path.to_path_buf(),
+        )
+        .await?
+        .await
+    }
     async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
         self.prepare_display_fetch(hash).await
     }

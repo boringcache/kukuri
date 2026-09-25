@@ -8,6 +8,12 @@ pub const REMOTE_CACHE_UNUSED_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub const REMOTE_CACHE_RECLAIM_STEP: usize = 128;
 const REMOTE_CACHE_TOUCH_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
+#[derive(Clone, Copy)]
+enum CachePayload<'a> {
+    Bytes(&'a [u8]),
+    File { name: &'a str, bytes: u64 },
+}
+
 pub struct RemoteCacheReservation {
     counter: Arc<AtomicU64>,
     bytes: u64,
@@ -38,7 +44,16 @@ async fn delete_cache_item(
     kind: &str,
     key: &str,
     label_evictions: &mut Vec<String>,
+    removed_files: &mut Vec<String>,
 ) -> Result<()> {
+    let file_name = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT file_name FROM remote_content_cache WHERE kind = ?1 AND cache_key = ?2",
+    )
+    .bind(kind)
+    .bind(key)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
     if kind == "projection" {
         let hashes = sqlx::query_scalar::<_, String>(
             "SELECT blob_hash FROM remote_adult_media_hash_refs WHERE object_id = ?1",
@@ -79,6 +94,9 @@ async fn delete_cache_item(
             .await?;
     if kind == "adult_marker" && deleted.rows_affected() != 0 {
         label_evictions.push(key.to_string());
+    }
+    if let Some(name) = file_name {
+        removed_files.push(name);
     }
     Ok(())
 }
@@ -219,6 +237,7 @@ impl SqliteStore {
         }
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -243,6 +262,7 @@ impl SqliteStore {
                 &row.get::<String, _>("kind"),
                 &row.get::<String, _>("cache_key"),
                 &mut label_evictions,
+                &mut removed_files,
             )
             .await?;
             used -= row.get::<i64, _>("charged_bytes");
@@ -254,6 +274,7 @@ impl SqliteStore {
             .await?;
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         if (used as u64).saturating_add(target) > REMOTE_CACHE_CAPACITY_BYTES as u64 {
             return Ok(false);
         }
@@ -268,6 +289,7 @@ impl SqliteStore {
         let _gate = self.remote_cache_gate.lock().await;
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -288,6 +310,7 @@ impl SqliteStore {
                 &row.get::<String, _>("kind"),
                 &row.get::<String, _>("cache_key"),
                 &mut label_evictions,
+                &mut removed_files,
             )
             .await?;
             reclaimed_bytes += row.get::<i64, _>("charged_bytes");
@@ -300,6 +323,7 @@ impl SqliteStore {
         .await?;
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(count)
     }
 
@@ -309,6 +333,7 @@ impl SqliteStore {
         row: &ObjectProjectionRow,
         budget: i64,
         label_evictions: &mut Vec<String>,
+        removed_files: &mut Vec<String>,
     ) -> Result<bool> {
         let charge = i64::try_from(serde_json::to_vec(row)?.len())? * 2 + 512;
         self.put_remote_content_in_tx(
@@ -316,13 +341,14 @@ impl SqliteStore {
             "projection",
             row.object_id.as_str(),
             row.source_replica_id.as_str(),
-            &[],
+            CachePayload::Bytes(&[]),
             None,
             None,
             budget,
             now_ms()?,
             Some(charge),
             label_evictions,
+            removed_files,
         )
         .await
     }
@@ -340,7 +366,7 @@ impl SqliteStore {
             kind,
             key,
             scope,
-            payload,
+            CachePayload::Bytes(payload),
             None,
             None,
             REMOTE_CACHE_CAPACITY_BYTES,
@@ -361,7 +387,7 @@ impl SqliteStore {
             "record",
             &cache_key,
             replica,
-            payload,
+            CachePayload::Bytes(payload),
             Some(key),
             Some(author),
             REMOTE_CACHE_CAPACITY_BYTES,
@@ -376,7 +402,7 @@ impl SqliteStore {
         kind: &str,
         key: &str,
         scope: &str,
-        payload: &[u8],
+        payload: CachePayload<'_>,
         record_key: Option<&str>,
         record_author: Option<&str>,
         budget: i64,
@@ -386,6 +412,7 @@ impl SqliteStore {
         let reserved = i64::try_from(self.remote_cache_reserved.load(Ordering::Acquire))?;
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         let admitted = self
             .put_remote_content_in_tx(
                 &mut tx,
@@ -399,34 +426,42 @@ impl SqliteStore {
                 now,
                 None,
                 &mut label_evictions,
+                &mut removed_files,
             )
             .await?;
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(admitted)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn put_remote_content_in_tx(
+    async fn put_remote_content_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Sqlite>,
         kind: &str,
         key: &str,
         scope: &str,
-        payload: &[u8],
+        payload: CachePayload<'_>,
         record_key: Option<&str>,
         record_author: Option<&str>,
         budget: i64,
         now: i64,
         charged_bytes: Option<i64>,
         label_evictions: &mut Vec<String>,
+        removed_files: &mut Vec<String>,
     ) -> Result<bool> {
         anyhow::ensure!(
             matches!(kind, "blob" | "record" | "projection" | "adult_marker"),
             "unknown remote cache kind"
         );
-        let charge = charged_bytes
-            .unwrap_or(i64::try_from(payload.len() + kind.len() + key.len() + scope.len())? + 64);
+        let payload_len = match payload {
+            CachePayload::Bytes(bytes) => bytes.len() as u64,
+            CachePayload::File { bytes, .. } => bytes,
+        };
+        let charge = charged_bytes.unwrap_or(
+            i64::try_from(payload_len)? + i64::try_from(kind.len() + key.len() + scope.len())? + 64,
+        );
         // The ledger row is the write lock shared by all cache writers.
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut **tx)
@@ -443,7 +478,7 @@ impl SqliteStore {
             return Ok(false);
         }
         let old = sqlx::query(
-            "SELECT charged_bytes, is_protected FROM remote_content_cache WHERE kind = ?1 AND cache_key = ?2",
+            "SELECT charged_bytes, is_protected, file_name FROM remote_content_cache WHERE kind = ?1 AND cache_key = ?2",
         )
         .bind(kind)
         .bind(key)
@@ -490,7 +525,14 @@ impl SqliteStore {
             let Some(victim) = victim else { break };
             let victim_kind: String = victim.get("kind");
             let victim_key: String = victim.get("cache_key");
-            delete_cache_item(tx, &victim_kind, &victim_key, label_evictions).await?;
+            delete_cache_item(
+                tx,
+                &victim_kind,
+                &victim_key,
+                label_evictions,
+                removed_files,
+            )
+            .await?;
             next_used -= victim.get::<i64, _>("charged_bytes");
             reclaimed += 1;
         }
@@ -503,11 +545,11 @@ impl SqliteStore {
         }
         sqlx::query(
             "INSERT INTO remote_content_cache \
-             (kind, cache_key, scope_key, record_key, record_author, payload, charged_bytes, is_protected, last_used_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             (kind, cache_key, scope_key, record_key, record_author, payload, file_name, charged_bytes, is_protected, last_used_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(kind, cache_key) DO UPDATE SET \
              scope_key = excluded.scope_key, record_key = excluded.record_key, \
-             record_author = excluded.record_author, payload = excluded.payload, \
+             record_author = excluded.record_author, payload = excluded.payload, file_name = excluded.file_name, \
              charged_bytes = excluded.charged_bytes, is_protected = excluded.is_protected, \
              last_used_at = excluded.last_used_at",
         )
@@ -516,12 +558,26 @@ impl SqliteStore {
         .bind(scope)
         .bind(record_key)
         .bind(record_author)
-        .bind(payload)
+        .bind(match payload {
+            CachePayload::Bytes(bytes) => Some(bytes),
+            CachePayload::File { .. } => None,
+        })
+        .bind(match payload {
+            CachePayload::Bytes(_) => None,
+            CachePayload::File { name, .. } => Some(name),
+        })
         .bind(charge)
         .bind(if protected { 1 } else { 0 })
         .bind(now)
         .execute(&mut **tx)
         .await?;
+        if let Some(name) = old
+            .as_ref()
+            .and_then(|row| row.get::<Option<String>, _>("file_name"))
+            && !matches!(payload, CachePayload::File { name: current, .. } if current == name)
+        {
+            removed_files.push(name);
+        }
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = ?1 WHERE id = 1")
             .bind(next_used)
             .execute(&mut **tx)
@@ -532,7 +588,7 @@ impl SqliteStore {
     pub async fn get_remote_content(&self, kind: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let now = now_ms()?;
         let row = sqlx::query(
-            "SELECT payload, last_used_at FROM remote_content_cache \
+            "SELECT payload, file_name, last_used_at FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2 \
              AND (is_protected = 1 OR last_used_at > ?3)",
         )
@@ -544,6 +600,9 @@ impl SqliteStore {
         let Some(row) = row else { return Ok(None) };
         if row.get::<i64, _>("last_used_at") <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
             self.touch_remote_content(kind, key, now).await?;
+        }
+        if let Some(name) = row.get::<Option<String>, _>("file_name") {
+            return Ok(tokio::fs::read(self.remote_blob_path(&name)?).await.ok());
         }
         Ok(Some(row.get("payload")))
     }
@@ -616,23 +675,29 @@ impl SqliteStore {
     pub async fn has_remote_content(&self, kind: &str, key: &str) -> Result<bool> {
         let now = now_ms()?;
         let row = sqlx::query(
-            "SELECT last_used_at, is_protected FROM remote_content_cache \
+            "SELECT last_used_at, is_protected, file_name FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2",
         )
         .bind(kind)
         .bind(key)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.is_some_and(|row| {
-            row.get::<i64, _>("is_protected") != 0
-                || row.get::<i64, _>("last_used_at") > now - REMOTE_CACHE_UNUSED_MS
-        }))
+        let Some(row) = row else { return Ok(false) };
+        if let Some(name) = row.get::<Option<String>, _>("file_name")
+            && tokio::fs::metadata(self.remote_blob_path(&name)?)
+                .await
+                .is_err()
+        {
+            return Ok(false);
+        }
+        Ok(row.get::<i64, _>("is_protected") != 0
+            || row.get::<i64, _>("last_used_at") > now - REMOTE_CACHE_UNUSED_MS)
     }
 
     pub async fn remote_content_len(&self, kind: &str, key: &str) -> Result<Option<u64>> {
         let now = now_ms()?;
         let row = sqlx::query(
-            "SELECT length(payload) AS bytes, last_used_at FROM remote_content_cache \
+            "SELECT length(payload) AS bytes, file_name, last_used_at FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2 \
              AND (is_protected = 1 OR last_used_at > ?3)",
         )
@@ -644,6 +709,12 @@ impl SqliteStore {
         if let Some(row) = row {
             if row.get::<i64, _>("last_used_at") <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
                 self.touch_remote_content(kind, key, now).await?;
+            }
+            if let Some(name) = row.get::<Option<String>, _>("file_name") {
+                return Ok(tokio::fs::metadata(self.remote_blob_path(&name)?)
+                    .await
+                    .ok()
+                    .map(|metadata| metadata.len()));
             }
             Ok(Some(u64::try_from(row.get::<i64, _>("bytes"))?))
         } else {
@@ -660,7 +731,7 @@ impl SqliteStore {
     ) -> Result<Option<Vec<u8>>> {
         anyhow::ensure!(limit <= 1024 * 1024, "remote cache chunk limit exceeded");
         let row = sqlx::query(
-            "SELECT substr(payload, ?3, ?4) AS chunk FROM remote_content_cache \
+            "SELECT substr(payload, ?3, ?4) AS chunk, file_name FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2",
         )
         .bind(kind)
@@ -669,7 +740,19 @@ impl SqliteStore {
         .bind(i64::try_from(limit)?)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|row| row.get("chunk")))
+        let Some(row) = row else { return Ok(None) };
+        if let Some(name) = row.get::<Option<String>, _>("file_name") {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let Ok(mut file) = tokio::fs::File::open(self.remote_blob_path(&name)?).await else {
+                return Ok(None);
+            };
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            let mut chunk = vec![0; limit];
+            let read = file.read(&mut chunk).await?;
+            chunk.truncate(read);
+            return Ok(Some(chunk));
+        }
+        Ok(Some(row.get("chunk")))
     }
 
     async fn add_remote_protected_ref(
@@ -716,6 +799,7 @@ impl SqliteStore {
         desired: &[(String, String)],
         budget: i64,
         label_evictions: &mut Vec<String>,
+        removed_files: &mut Vec<String>,
     ) -> Result<()> {
         let old = sqlx::query(
             "SELECT kind, cache_key FROM remote_content_cache_protected_ref WHERE ref_id = ?1",
@@ -783,7 +867,7 @@ impl SqliteStore {
                 .execute(&mut **tx)
                 .await?;
             } else {
-                delete_cache_item(tx, kind, key, label_evictions).await?;
+                delete_cache_item(tx, kind, key, label_evictions, removed_files).await?;
             }
         }
         for (kind, key) in desired.difference(&old) {
@@ -795,6 +879,7 @@ impl SqliteStore {
     pub async fn remove_remote_content(&self, kind: &str, key: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let mut label_evictions = Vec::new();
+        let mut removed_files = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -814,13 +899,16 @@ impl SqliteStore {
             .bind(row.get::<i64, _>("charged_bytes"))
             .execute(&mut *tx)
             .await?;
-            delete_cache_item(&mut tx, kind, key, &mut label_evictions).await?;
+            delete_cache_item(&mut tx, kind, key, &mut label_evictions, &mut removed_files).await?;
         }
         tx.commit().await?;
         self.publish_adult_label_evictions(label_evictions);
+        self.remove_remote_blob_files(removed_files).await?;
         Ok(())
     }
 }
+
+mod files;
 
 #[cfg(test)]
 mod tests;

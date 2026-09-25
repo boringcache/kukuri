@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 
 import {
   MEDIA_FETCH_LEDGER_LIMIT,
+  MEDIA_MEMORY_BUDGET_BYTES,
   MEDIA_FETCH_MAX_AUTO_ATTEMPTS,
   MEDIA_FETCH_RETRY_DELAYS_MS,
   MediaFetchLedger,
@@ -105,4 +106,29 @@ test('a full active ledger defers another hash and rejects oversized keys', () =
   expect(ledger.requestManualRetry('new-hash')).toBe(false);
   expect(ledger.size).toBe(MEDIA_FETCH_LEDGER_LIMIT);
   expect(ledger.decide('あ'.repeat(100), 'Missing', 0)).toEqual({ kind: 'skip' });
+});
+
+test('display demand owns reservations, cancellation, and URL release within 128 MiB', () => {
+  const ledger = new MediaFetchLedger();
+  const eightyMiB = 80 * 1024 * 1024;
+  expect(ledger.decide('visible-a', 'Missing', 0, eightyMiB).kind).toBe('fetch');
+  expect(ledger.decide('visible-b', 'Missing', 0, eightyMiB)).toEqual({ kind: 'skip' });
+  let cancelled = 0;
+  ledger.trackCancel('visible-a', () => { cancelled += 1; });
+  ledger.forget('visible-a');
+  expect(cancelled).toBe(1);
+  expect(ledger.memoryBytes).toBe(0);
+
+  expect(ledger.decide('visible-b', 'Missing', 0, eightyMiB).kind).toBe('fetch');
+  let released = 0;
+  ledger.succeed('visible-b', {
+    url: 'blob:visible-b',
+    memoryBytes: eightyMiB,
+    release: () => { released += 1; },
+  });
+  expect(ledger.memoryBytes).toBe(eightyMiB);
+  expect(ledger.decide('too-large', 'Missing', 0, MEDIA_MEMORY_BUDGET_BYTES - eightyMiB + 1)).toEqual({ kind: 'skip' });
+  ledger.clear();
+  expect(released).toBe(1);
+  expect(ledger.memoryBytes).toBe(0);
 });

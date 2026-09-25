@@ -5,3 +5,5 @@ import { createContext } from 'react';
 export type MediaRetryHandler = (hashes: readonly string[]) => void;
 
 export const MediaRetryContext = createContext<MediaRetryHandler | null>(null);
+export type MediaDemandHandler = (hash: string, visible: boolean) => void;
+export const MediaDemandContext = createContext<MediaDemandHandler | null>(null);

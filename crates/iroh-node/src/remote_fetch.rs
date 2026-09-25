@@ -40,6 +40,10 @@ async fn within_remote_fetch_budget<T>(future: impl Future<Output = T>) -> Optio
 /// 表示要求が所有する取得。共有walkと合流/切り離しをせず、取消で待機permitとQUIC streamもdropする。
 /// bytesの検証だけを行い、保存は表示権限を再確認する呼出元が所有する。
 pub type DisplayBlobFetch = std::pin::Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send>>;
+pub type DisplayBlobFileFetch = std::pin::Pin<Box<dyn Future<Output = Result<Option<u64>>> + Send>>;
+
+mod display_file;
+pub use display_file::prepare_display_file_fetch;
 
 pub async fn prepare_display_fetch(
     node: &Arc<IrohDocsNode>,
@@ -63,6 +67,7 @@ pub async fn prepare_display_fetch(
             hash,
             "local manifest unavailable",
             FetchMode::Ephemeral,
+            None,
         ));
         let result = tokio::select! {
             biased;
@@ -276,27 +281,71 @@ async fn fetch_ephemeral(
     mode: FetchMode,
     cache: Option<&kukuri_store::SqliteStore>,
 ) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fetch_ephemeral_into(
+        connection,
+        hash,
+        mode,
+        cache,
+        BlobOutput::Memory(&mut bytes),
+    )
+    .await?;
+    Ok(bytes)
+}
+
+async fn fetch_ephemeral_to_file(
+    connection: iroh::endpoint::Connection,
+    hash: iroh_blobs::Hash,
+    path: &std::path::Path,
+    cache: Option<&kukuri_store::SqliteStore>,
+) -> Result<u64> {
+    let mut file = tokio::fs::File::create(path).await?;
+    fetch_ephemeral_into(
+        connection,
+        hash,
+        FetchMode::Ephemeral,
+        cache,
+        BlobOutput::File(&mut file),
+    )
+    .await
+}
+
+enum BlobOutput<'a> {
+    Memory(&'a mut Vec<u8>),
+    File(&'a mut tokio::fs::File),
+}
+
+async fn fetch_ephemeral_into(
+    connection: iroh::endpoint::Connection,
+    hash: iroh_blobs::Hash,
+    mode: FetchMode,
+    cache: Option<&kukuri_store::SqliteStore>,
+    mut output: BlobOutput<'_>,
+) -> Result<u64> {
     use bao_tree::io::BaoContentItem;
     use futures_util::StreamExt;
     use iroh_blobs::get::request::{GetBlobItem, get_blob};
+    use tokio::io::AsyncWriteExt;
+
     let max_bytes = match mode {
         FetchMode::EphemeralBounded(limit) => limit,
         _ => u64::MAX,
     };
     let mut stream = get_blob(connection, hash);
-    let mut bytes = Vec::new();
+    let mut received = 0u64;
+    let mut hasher = blake3::Hasher::new();
     let mut reservation = cache.map(kukuri_store::SqliteStore::empty_remote_cache_reservation);
     while let Some(item) = stream.next().await {
         match item {
             GetBlobItem::Item(BaoContentItem::Leaf(leaf)) => {
-                if (bytes.len() as u64).saturating_add(leaf.data.len() as u64) > max_bytes {
+                let incoming = received.saturating_add(leaf.data.len() as u64);
+                if incoming > max_bytes {
                     return Err(BlobTooLarge { limit: max_bytes }.into());
                 }
                 anyhow::ensure!(
-                    leaf.offset == bytes.len() as u64,
+                    leaf.offset == received,
                     "non-contiguous ephemeral blob stream"
                 );
-                let incoming = (bytes.len() as u64).saturating_add(leaf.data.len() as u64);
                 if incoming > kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64 {
                     reservation = None;
                 } else if let (Some(cache), Some(reservation)) = (cache, reservation.as_mut())
@@ -314,10 +363,24 @@ async fn fetch_ephemeral(
                         return Err(RemoteCacheDeferred.into());
                     }
                 }
-                bytes.extend_from_slice(&leaf.data);
+                hasher.update(&leaf.data);
+                match &mut output {
+                    BlobOutput::Memory(bytes) => bytes.extend_from_slice(&leaf.data),
+                    BlobOutput::File(file) => file.write_all(&leaf.data).await?,
+                }
+                received = incoming;
             }
             GetBlobItem::Item(_) => {}
-            GetBlobItem::Done(_) => return Ok(bytes),
+            GetBlobItem::Done(_) => {
+                anyhow::ensure!(
+                    hasher.finalize().as_bytes() == hash.as_bytes(),
+                    "ephemeral blob hash mismatch"
+                );
+                if let BlobOutput::File(file) = &mut output {
+                    file.flush().await?;
+                }
+                return Ok(received);
+            }
             GetBlobItem::Error(error) => return Err(error.into()),
         }
     }
@@ -407,8 +470,17 @@ async fn fetch_bytes_with_cooldown_mode(
         let hash_text = hash_text.to_owned();
         let local_error = bounded_fetch_log_text(local_error, 4096);
         async move {
-            fetch_bytes_from_remote(&node, &peers, &subject, &hash_text, hash, local_error, mode)
-                .await
+            fetch_bytes_from_remote(
+                &node,
+                &peers,
+                &subject,
+                &hash_text,
+                hash,
+                local_error,
+                mode,
+                None,
+            )
+            .await
         }
     };
     let Some(result) = run_single_flight(
@@ -594,6 +666,7 @@ fn classify_blob_transfer(error: &iroh_blobs::get::GetError) -> BlobTransferFail
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_bytes_from_remote(
     node: &IrohDocsNode,
     peers: &PeerAddrBook,
@@ -602,6 +675,7 @@ async fn fetch_bytes_from_remote(
     hash: iroh_blobs::Hash,
     local_error: impl Display,
     mode: FetchMode,
+    file_path: Option<&std::path::Path>,
 ) -> Result<Option<Vec<u8>>> {
     let imported_peers = peers.ranked_peers().await;
     let mut had_transport_failure = false;
@@ -727,15 +801,27 @@ async fn fetch_bytes_from_remote(
                         FetchMode::Ephemeral | FetchMode::EphemeralBounded(_) => {
                             // ストアへ書き込まず、検証付きで memory へ直接取得する。
                             let transfer_started = Instant::now();
-                            match timeout(
-                                REMOTE_FETCH_TRANSFER_TIMEOUT,
-                                fetch_ephemeral(
-                                    conn,
-                                    hash,
-                                    mode,
-                                    node.remote_cache().map(AsRef::as_ref),
-                                ),
-                            )
+                            match timeout(REMOTE_FETCH_TRANSFER_TIMEOUT, async {
+                                match file_path {
+                                    Some(path) => fetch_ephemeral_to_file(
+                                        conn,
+                                        hash,
+                                        path,
+                                        node.remote_cache().map(AsRef::as_ref),
+                                    )
+                                    .await
+                                    .map(|_| Vec::new()),
+                                    None => {
+                                        fetch_ephemeral(
+                                            conn,
+                                            hash,
+                                            mode,
+                                            node.remote_cache().map(AsRef::as_ref),
+                                        )
+                                        .await
+                                    }
+                                }
+                            })
                             .await
                             {
                                 Ok(Ok(bytes)) => {
@@ -768,13 +854,29 @@ async fn fetch_bytes_from_remote(
                                             match timeout(
                                                 REMOTE_FETCH_CONNECT_TIMEOUT
                                                     + REMOTE_FETCH_TRANSFER_TIMEOUT,
-                                                remote_blob::fetch(
-                                                    node.endpoint(),
-                                                    peer.clone(),
-                                                    hash,
-                                                    limit,
-                                                    node.remote_cache().map(AsRef::as_ref),
-                                                ),
+                                                async {
+                                                    match file_path {
+                                                        Some(path) => remote_blob::fetch_to_file(
+                                                            node.endpoint(),
+                                                            peer.clone(),
+                                                            hash,
+                                                            path,
+                                                        )
+                                                        .await
+                                                        .map(|found| found.map(|_| Vec::new())),
+                                                        None => {
+                                                            remote_blob::fetch(
+                                                                node.endpoint(),
+                                                                peer.clone(),
+                                                                hash,
+                                                                limit,
+                                                                node.remote_cache()
+                                                                    .map(AsRef::as_ref),
+                                                            )
+                                                            .await
+                                                        }
+                                                    }
+                                                },
                                             )
                                             .await
                                             {

@@ -1,6 +1,7 @@
 //! Read a hash-addressed cached blob in bounded chunks without importing it
 //! into the legacy iroh-blobs store.
 
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -11,6 +12,7 @@ use iroh::endpoint::{Connection, Endpoint};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_blobs::Hash;
 use kukuri_store::SqliteStore;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
@@ -102,6 +104,50 @@ pub(crate) async fn fetch(
     max_bytes: Option<u64>,
     local_cache: Option<&SqliteStore>,
 ) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    let found = fetch_into(
+        endpoint,
+        peer,
+        hash,
+        max_bytes,
+        local_cache,
+        BlobOutput::Memory(&mut bytes),
+    )
+    .await?;
+    Ok(found.map(|_| bytes))
+}
+
+pub(crate) async fn fetch_to_file(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    hash: Hash,
+    path: &Path,
+) -> Result<Option<u64>> {
+    let mut file = tokio::fs::File::create(path).await?;
+    fetch_into(
+        endpoint,
+        peer,
+        hash,
+        None,
+        None,
+        BlobOutput::File(&mut file),
+    )
+    .await
+}
+
+enum BlobOutput<'a> {
+    Memory(&'a mut Vec<u8>),
+    File(&'a mut tokio::fs::File),
+}
+
+async fn fetch_into(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    hash: Hash,
+    max_bytes: Option<u64>,
+    local_cache: Option<&SqliteStore>,
+    mut output: BlobOutput<'_>,
+) -> Result<Option<u64>> {
     let connection = endpoint.connect(peer, REMOTE_BLOB_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
     send.write_all(hash.to_string().as_bytes()).await?;
@@ -130,15 +176,24 @@ pub(crate) async fn fetch(
     {
         return Err(RemoteCacheDeferred.into());
     }
-    let mut bytes = Vec::new();
-    while (bytes.len() as u64) < length {
-        let mut chunk = vec![0; CHUNK_BYTES.min(usize::try_from(length - bytes.len() as u64)?)];
+    let mut received = 0u64;
+    let mut hasher = blake3::Hasher::new();
+    while received < length {
+        let mut chunk = vec![0; CHUNK_BYTES.min(usize::try_from(length - received)?)];
         recv.read_exact(&mut chunk).await?;
-        bytes.extend_from_slice(&chunk);
+        hasher.update(&chunk);
+        match &mut output {
+            BlobOutput::Memory(bytes) => bytes.extend_from_slice(&chunk),
+            BlobOutput::File(file) => file.write_all(&chunk).await?,
+        }
+        received += u64::try_from(chunk.len())?;
     }
-    ensure!(Hash::new(&bytes) == hash, "cached blob hash mismatch");
+    ensure!(
+        hasher.finalize().as_bytes() == hash.as_bytes(),
+        "cached blob hash mismatch"
+    );
     connection.close(0u32.into(), b"cached blob complete");
-    Ok(Some(bytes))
+    Ok(Some(length))
 }
 
 #[cfg(test)]
@@ -172,6 +227,51 @@ mod tests {
             .await?,
             Some(bytes.to_vec())
         );
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("display.bin");
+        assert_eq!(
+            fetch_to_file(
+                requester.endpoint(),
+                provider.endpoint().addr(),
+                hash,
+                &path
+            )
+            .await?,
+            Some(bytes.len() as u64)
+        );
+        assert_eq!(tokio::fs::read(path).await?, bytes);
+        provider.shutdown().await?;
+        requester.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_backed_cache_reprovides_without_loading_the_legacy_store() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let provider = IrohDocsNode::memory().await?;
+        let requester = IrohDocsNode::memory().await?;
+        let cache = Arc::new(SqliteStore::connect_file(dir.path().join("cache.db")).await?);
+        provider.install_remote_cache(cache.clone())?;
+        let bytes = vec![5u8; 2 * 1024 * 1024 + 7];
+        let source = dir.path().join("source.bin");
+        tokio::fs::write(&source, &bytes).await?;
+        let hash = Hash::new(&bytes);
+        cache
+            .put_remote_blob_file(&hash.to_string(), &source)
+            .await?;
+        assert!(!provider.blobs().blobs().has(hash).await?);
+        let display = dir.path().join("display.bin");
+        assert_eq!(
+            fetch_to_file(
+                requester.endpoint(),
+                provider.endpoint().addr(),
+                hash,
+                &display
+            )
+            .await?,
+            Some(bytes.len() as u64)
+        );
+        assert_eq!(tokio::fs::read(display).await?, bytes);
         provider.shutdown().await?;
         requester.shutdown().await?;
         Ok(())

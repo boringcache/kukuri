@@ -10,6 +10,8 @@ async function installUnavailableMediaScenario(
 ) {
   await page.addInitScript(
     ({ developerModeKey, developerMode, mediaHash, rejectInitialFetch }) => {
+      const mediaWindow = window as typeof window & { __KUKURI_MEDIA_FETCH_ATTEMPTS__?: number };
+      mediaWindow.__KUKURI_MEDIA_FETCH_ATTEMPTS__ = 0;
       window.localStorage.setItem(developerModeKey, developerMode ? 'true' : 'false');
       let desktopApi: typeof window.__KUKURI_DESKTOP__;
       Object.defineProperty(window, '__KUKURI_DESKTOP__', {
@@ -58,6 +60,7 @@ async function installUnavailableMediaScenario(
             };
           };
           value.getBlobMediaPayload = async (_hash, mime) => {
+            mediaWindow.__KUKURI_MEDIA_FETCH_ATTEMPTS__ = (mediaWindow.__KUKURI_MEDIA_FETCH_ATTEMPTS__ ?? 0) + 1;
             if (window.sessionStorage.getItem('issue-814-recovered') === 'true') {
               return { bytes_base64: 'ZmFrZS1pbWFnZQ==', mime };
             }
@@ -81,9 +84,18 @@ async function installUnavailableMediaScenario(
 
 // #1221 R3-B: 初回と5/30/120秒後の計4回を、実時間を待たず時計を進めて確認する。
 async function exhaustAutomaticMediaFetch(page: Page) {
-  for (const delay of [6_000, 31_000, 121_000]) {
+  for (const [index, delay] of [6_000, 31_000, 121_000].entries()) {
     await page.clock.runFor(delay);
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { __KUKURI_MEDIA_FETCH_ATTEMPTS__?: number }).__KUKURI_MEDIA_FETCH_ATTEMPTS__ ?? 0))
+      .toBeGreaterThanOrEqual(index + 2);
   }
+}
+
+async function showMediaCard(page: Page) {
+  await page.locator('[data-post-object-id="browser-unavailable"]').scrollIntoViewIfNeeded();
+  await page.clock.runFor(100);
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __KUKURI_MEDIA_FETCH_ATTEMPTS__?: number }).__KUKURI_MEDIA_FETCH_ATTEMPTS__ ?? 0))
+    .toBeGreaterThan(0);
 }
 
 test('normal mode replaces unavailable media with the fetch failure and a retry control', async ({
@@ -95,12 +107,11 @@ test('normal mode replaces unavailable media with the fetch failure and a retry 
     rejectInitialFetch: false,
   });
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
+  await showMediaCard(page);
 
   await expect(page.locator('[data-post-object-id="browser-unavailable"]')).toBeVisible();
   await expect(page.getByText('browser-unavailable-envelope')).toHaveCount(0);
-  await expect(page.getByText('image/png')).toHaveCount(0);
   await expect(page.getByTestId('text-skeleton-browser-unavailable')).toHaveCount(0);
-  await expect(page.getByTestId('media-skeleton-browser-unavailable')).toHaveCount(0);
   await expect(page.getByText('Content unavailable.')).toHaveCount(0);
   await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable')).toBeVisible();
 
@@ -120,6 +131,7 @@ test('developer mode reports a rejected fetch and an existing refresh can recove
   });
   await page.clock.install();
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
+  await showMediaCard(page);
 
   await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable')).toBeVisible();
   await exhaustAutomaticMediaFetch(page);
@@ -133,6 +145,7 @@ test('developer mode reports a rejected fetch and an existing refresh can recove
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
 
   await expect(page.getByText('Recovered body')).toBeVisible();
+  await showMediaCard(page);
   await expect(page.getByTestId('media-preview-browser-unavailable')).toBeVisible();
   await expect(page.getByText('Content unavailable.')).toHaveCount(0);
   await expect(page.getByText('Failed to load.')).toHaveCount(0);

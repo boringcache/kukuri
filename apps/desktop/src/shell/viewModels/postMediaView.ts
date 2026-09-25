@@ -138,6 +138,7 @@ export function buildPostMediaView(
         )
       : 0,
     videoPosterPreviewSrc,
+    videoPosterHash: videoPoster?.hash ?? null,
     videoPlaybackSrc,
     videoReportHash:
       mediaKind === 'video' ? (videoManifest?.hash ?? videoPoster?.hash ?? null) : null,

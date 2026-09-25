@@ -1,16 +1,18 @@
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { DisplayRetryContext, DisplayRetryScheduler } from '@/lib/displayRetryScheduler';
 
-import { MediaRetryContext, type MediaRetryHandler } from './mediaRetryContext';
+import { MediaDemandContext, MediaRetryContext, type MediaDemandHandler, type MediaRetryHandler } from './mediaRetryContext';
 import { PostReloadContext, type PostReload } from './postReloadContext';
 
 export function PostRecoveryProviders({
   children,
   mediaRetry,
+  mediaDemand,
   postReload,
 }: {
   children: ReactNode;
   mediaRetry: MediaRetryHandler;
+  mediaDemand?: MediaDemandHandler;
   postReload: PostReload;
 }) {
   // Backend handler replacement starts a new account-scoped retry history.
@@ -20,7 +22,9 @@ export function PostRecoveryProviders({
   return (
     <DisplayRetryContext.Provider value={retryScheduler}>
       <MediaRetryContext.Provider value={mediaRetry}>
-        <PostReloadContext.Provider value={postReload}>{children}</PostReloadContext.Provider>
+        <MediaDemandContext.Provider value={mediaDemand ?? null}>
+          <PostReloadContext.Provider value={postReload}>{children}</PostReloadContext.Provider>
+        </MediaDemandContext.Provider>
       </MediaRetryContext.Provider>
     </DisplayRetryContext.Provider>
   );

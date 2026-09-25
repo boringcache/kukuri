@@ -21,6 +21,7 @@ import { useConnectivityStatusRefresh } from '@/shell/data/useConnectivityStatus
 import { useAdultGatedMediaHashes } from '@/shell/data/useAdultGatedMediaHashes';
 import { useCommunityNodeRecovery } from '@/shell/actions/useCommunityNodeRecovery';
 import { useDesktopShellDataEffects } from '@/shell/data/useDesktopShellDataEffects';
+import { useMediaVisibilityDemand } from '@/shell/data/useMediaVisibilityDemand';
 import {
   activeWorkspaceScope,
   columnIdentityId,
@@ -66,10 +67,8 @@ type UseDesktopShellDataArgs = {
   api: DesktopApi;
   translate: (key: string, options?: Record<string, unknown>) => string;
   loadTopicsRequestRef: MutableRefObject<Map<string, number>>;
-  remoteObjectUrlRef: MutableRefObject<Map<string, string>>;
   draftPreviewUrlRef: MutableRefObject<Map<string, string>>;
   directMessageDraftPreviewUrlRef: MutableRefObject<Map<string, string>>;
-  mediaFetchAttemptRef: MutableRefObject<Map<string, number>>;
   draftSequenceRef: MutableRefObject<number>;
   /// 表示中(viewport 内)の Column id 列。背景 Timeline Column の定期 refresh(Issue #765)に使う。
   visibleColumnIdsRef?: MutableRefObject<string[]>;
@@ -84,14 +83,13 @@ export function useDesktopShellData({
   api,
   translate,
   loadTopicsRequestRef,
-  remoteObjectUrlRef,
   draftPreviewUrlRef,
   directMessageDraftPreviewUrlRef,
-  mediaFetchAttemptRef,
   draftSequenceRef,
   visibleColumnIdsRef,
 }: UseDesktopShellDataArgs) {
   const storeApi = useDesktopShellStoreApi();
+  const { demandedMediaHashes, setMediaDemand } = useMediaVisibilityDemand();
   const state = useDesktopShellStore(useShallow(selectShellDataSlice));
   const {
     trackedTopics,
@@ -410,6 +408,7 @@ export function useDesktopShellData({
     additionalTimelinePosts: advisoryLookupPosts,
     communityIndexResolvedPosts,
     gatedMediaHashes: gatedAdultMediaHashes,
+    demandedMediaHashes,
     timelineContentAdvisories,
     timelineAdvisoryLookup,
     profileTimeline,
@@ -988,10 +987,8 @@ export function useDesktopShellData({
     selectedAuthorPubkey,
     previewableMediaAttachments,
     gatedAdultMediaHashes,
-    remoteObjectUrlRef,
     draftPreviewUrlRef,
     directMessageDraftPreviewUrlRef,
-    mediaFetchAttemptRef,
     visibleRefreshInFlightRef,
     visibleColumnIdsRef,
     loadTopics,
@@ -1079,6 +1076,7 @@ export function useDesktopShellData({
   });
 
   return {
+    setMediaDemand,
     gatedAdultMediaHashes,
     retryMediaFetch,
     reloadPostElements,
