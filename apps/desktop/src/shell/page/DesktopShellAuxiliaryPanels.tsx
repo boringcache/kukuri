@@ -282,6 +282,8 @@ export function DesktopShellMessagesSurface({
                     : conversationPicture;
                   return (
                     <li key={message.message_id}>
+                      <MediaDemandObserver hash={image?.hash ?? null} />
+                      <MediaDemandObserver hash={poster?.hash ?? null} />
                       <MediaDemandObserver hash={video && !videoUnsupported ? video.hash : null} />
                       <article className='post-card'>
                         <div className='post-meta'>

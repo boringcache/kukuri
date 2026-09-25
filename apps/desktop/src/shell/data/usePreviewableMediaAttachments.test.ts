@@ -62,7 +62,7 @@ function renderAttachments(
       activeTimeline: overrides.activeTimeline ?? [],
       activePublicTimeline: [],
       gatedMediaHashes: overrides.gatedMediaHashes ?? [],
-      demandedMediaHashes: overrides.demandedMediaHashes ?? new Set(),
+      demandedMediaHashes: overrides.demandedMediaHashes ?? new Set([INDEX_IMAGE_HASH, TIMELINE_IMAGE_HASH]),
       timelineContentAdvisories: overrides.timelineContentAdvisories,
       timelineAdvisoryLookup: overrides.timelineAdvisoryLookup,
       communityIndexResolvedPosts: overrides.communityIndexResolvedPosts ?? [],
@@ -84,7 +84,7 @@ function renderAttachments(
 }
 
 describe('usePreviewableMediaAttachments', () => {
-  test('defers video bytes until that visible attachment has demand', () => {
+  test('fetches post image, poster, and video only while their card has demand', () => {
     const videoHash = 'c'.repeat(64);
     const posterHash = 'd'.repeat(64);
     const post = imagePost('video-post', posterHash);
@@ -92,9 +92,13 @@ describe('usePreviewableMediaAttachments', () => {
       { hash: videoHash, mime: 'video/mp4', bytes: 256 * 1024 * 1024, role: 'video_manifest', status: 'Available' },
       { hash: posterHash, mime: 'image/png', bytes: 2048, role: 'video_poster', status: 'Available' },
     ];
-    expect(renderAttachments({ activeTimeline: [post] })).toEqual([posterHash]);
-    expect(renderAttachments({ activeTimeline: [post], demandedMediaHashes: new Set([videoHash]) }))
+    expect(renderAttachments({ activeTimeline: [post] })).toEqual([]);
+    expect(renderAttachments({ activeTimeline: [post], demandedMediaHashes: new Set([posterHash]) }))
+      .toEqual([posterHash]);
+    expect(renderAttachments({ activeTimeline: [post], demandedMediaHashes: new Set([posterHash, videoHash]) }))
       .toEqual([posterHash, videoHash]);
+    expect(renderAttachments({ activeTimeline: [imagePost('image-post', INDEX_IMAGE_HASH)], demandedMediaHashes: new Set() }))
+      .toEqual([]);
   });
   // #1052: 「見つける」の解決済み投稿もタイムラインと同じプリフェッチ対象にする。
   test('includes attachments from resolved community index posts', () => {

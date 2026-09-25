@@ -174,12 +174,7 @@
 }
 
 .media-demand-marker {
-  display: block;
-  width: 1px;
-  height: 1px;
-  margin-bottom: -1px;
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 
 .media-frame-loading {

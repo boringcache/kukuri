@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
@@ -32,8 +32,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   mediaFetchRetryPolicy.retryDelaysMs = MEDIA_FETCH_RETRY_DELAYS_MS;
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
   Reflect.deleteProperty(window, '__TAURI_EVENT_PLUGIN_INTERNALS__');
 });
@@ -300,6 +302,46 @@ test('native media preview uses a file URL and releases its lease on view exit',
 
   unmount();
   await waitFor(() => expect(releaseBlobMediaFile).toHaveBeenCalledWith(expect.any(String)));
+});
+
+test('scrolling an image card out of view releases its native file URL', async () => {
+  let visibilityChanged: IntersectionObserverCallback | null = null;
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      if (target.classList.contains('media-frame')) visibilityChanged = this.callback;
+    }
+    disconnect() {}
+  });
+  Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {
+      convertFileSrc: (path: string) => `asset://localhost/${path}`,
+      transformCallback: () => 1,
+      invoke: async () => null,
+    },
+  });
+  Object.defineProperty(window, '__TAURI_EVENT_PLUGIN_INTERNALS__', {
+    configurable: true,
+    value: { unregisterListener: () => undefined },
+  });
+  const post = buildImagePost({ content: 'caption', content_status: 'Available' });
+  const api = createDesktopMockApi({ seedPosts: { 'kukuri:topic:general': [post] } });
+  const releaseBlobMediaFile = vi.fn(async () => undefined);
+  api.getBlobMediaFile = vi.fn(async (_hash, _mime, _sourceObjectId, requestId) => ({
+    path: 'kukuri-display/preview.png', request_id: requestId, bytes: 4096,
+  }));
+  api.releaseBlobMediaFile = releaseBlobMediaFile;
+
+  const { unmount } = render(<App api={api} />);
+  await within(getActiveColumn('Timeline')).findByTestId('media-skeleton-image-post');
+  expect(api.getBlobMediaFile).not.toHaveBeenCalled();
+  act(() => visibilityChanged?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+  await within(getActiveColumn('Timeline')).findByTestId('media-preview-image-post');
+  act(() => visibilityChanged?.([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
+  await waitFor(() => expect(releaseBlobMediaFile).toHaveBeenCalledOnce());
+  expect(within(getActiveColumn('Timeline')).queryByTestId('media-preview-image-post')).not.toBeInTheDocument();
+  unmount();
 });
 
 test('thread pane reuses the same unavailable media renderer', async () => {

@@ -91,7 +91,7 @@ export function usePreviewableMediaAttachments({
     const attachments = new Map<string, PreviewableMediaAttachment>();
     const gatedHashes = new Set(gatedMediaHashes);
 
-    const tryAddAttachment = (attachment: AttachmentView | null, sourceObjectId?: string) => {
+    const tryAddAttachment = (attachment: AttachmentView | null, sourceObjectId?: string, demandOnly = false) => {
       if (!attachment) {
         return;
       }
@@ -110,7 +110,7 @@ export function usePreviewableMediaAttachments({
         });
         return;
       }
-      if ((attachment.role === 'video_manifest' || mime.startsWith('video/')) && !demandedMediaHashes.has(hash)) {
+      if (demandOnly && !demandedMediaHashes.has(hash)) {
         return;
       }
       if (attachments.get(hash)?.source_object_id && !sourceObjectId) return;
@@ -156,7 +156,7 @@ export function usePreviewableMediaAttachments({
           selectVideoPoster(post),
           selectVideoManifest(post),
         ]) {
-          tryAddAttachment(attachment, post.object_id);
+          tryAddAttachment(attachment, post.object_id, true);
         }
       }
       for (const reaction of post.reaction_summary ?? []) {
@@ -179,7 +179,7 @@ export function usePreviewableMediaAttachments({
         selectVideoPosterAttachment(message.attachments),
         selectVideoManifestAttachment(message.attachments),
       ]) {
-        tryAddAttachment(attachment);
+        tryAddAttachment(attachment, undefined, true);
       }
     }
 

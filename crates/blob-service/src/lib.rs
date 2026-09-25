@@ -318,6 +318,10 @@ impl BlobService for MemoryBlobService {
 #[async_trait]
 impl BlobService for IrohBlobService {
     async fn put_remote_blob_file(&self, path: &Path, hash: &BlobHash) -> Result<()> {
+        if tokio::fs::metadata(path).await?.len() > kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64
+        {
+            return Ok(());
+        }
         let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
         if self.node.blobs().blobs().has(parsed).await? {
             return Ok(());

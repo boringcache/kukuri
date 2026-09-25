@@ -6,7 +6,7 @@ export function MediaDemandObserver({ hash }: { hash: string | null }) {
   const marker = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
-    if (!hash || !demand || !marker.current) return;
+    if (!hash || !demand || !marker.current?.parentElement) return;
     let active = false;
     const setVisible = (visible: boolean) => {
       if (active === visible) return;
@@ -18,7 +18,7 @@ export function MediaDemandObserver({ hash }: { hash: string | null }) {
       return () => setVisible(false);
     }
     const observer = new IntersectionObserver(([entry]) => setVisible(Boolean(entry?.isIntersecting)));
-    observer.observe(marker.current);
+    observer.observe(marker.current.parentElement);
     return () => {
       observer.disconnect();
       setVisible(false);

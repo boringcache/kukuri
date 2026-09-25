@@ -86,11 +86,11 @@
     },
     {
       "lines": 1016,
-      "path": "apps/desktop/src/shell/presentation.test.ts"
+      "path": "apps/desktop/src/shell/page/DesktopShellAuxiliaryPanels.tsx"
     },
     {
-      "lines": 1014,
-      "path": "apps/desktop/src/shell/page/DesktopShellAuxiliaryPanels.tsx"
+      "lines": 1016,
+      "path": "apps/desktop/src/shell/presentation.test.ts"
     },
     {
       "lines": 1004,

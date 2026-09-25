@@ -11,6 +11,41 @@ use crate::tests::loopback_ticket;
 use crate::{BlobService, BlobStatus, IrohBlobService};
 
 #[tokio::test]
+async fn remote_display_file_larger_than_cache_budget_remains_displayable() {
+    let dir = tempdir().unwrap();
+    let node = IrohDocsNode::persistent_with_config(dir.path(), TransportNetworkConfig::loopback())
+        .await
+        .unwrap();
+    let cache = std::sync::Arc::new(
+        kukuri_store::SqliteStore::connect_file(dir.path().join("account.db"))
+            .await
+            .unwrap(),
+    );
+    let service = IrohBlobService::with_account_store(node.clone(), cache.clone());
+    let display = dir.path().join("large-display.mp4");
+    tokio::fs::File::create(&display)
+        .await
+        .unwrap()
+        .set_len(kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64 + 1)
+        .await
+        .unwrap();
+    let hash = kukuri_core::BlobHash::new("a".repeat(64));
+
+    service.put_remote_blob_file(&display, &hash).await.unwrap();
+    assert_eq!(
+        tokio::fs::metadata(&display).await.unwrap().len(),
+        kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64 + 1
+    );
+    assert!(
+        !cache
+            .has_remote_content("blob", hash.as_str())
+            .await
+            .unwrap()
+    );
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn local_blob_status_does_not_fetch_or_persist_remote_blob() {
     // #1152: 表示用の状態確認はローカルの有無だけを返し、remote peer が持つ blob を
     // 取得・永続化しない(`blob_status` は remote 取得で確かめるため挙動が異なる)。

@@ -26,6 +26,9 @@ export function PostMedia({
 }: PostMediaProps) {
   const { t } = useTranslation(['common', 'shell']);
   const videoReportHash = media.kind === 'video' ? media.videoReportHash ?? null : null;
+  const imageHash = media.kind === 'image' ? media.imageGalleryItems?.[media.currentImageIndex ?? 0]?.hash ?? null : null;
+  const videoHash = media.kind === 'video' && !media.videoUnsupportedOnClient && videoReportHash !== media.videoPosterHash
+    ? videoReportHash : null;
 
   if (!media.kind) {
     return null;
@@ -86,7 +89,9 @@ export function PostMedia({
   if (media.state === 'unavailable') {
     return (
       <>
-        <MediaDemandObserver hash={media.kind === 'video' ? videoReportHash : null} />
+        <MediaDemandObserver hash={imageHash} />
+        <MediaDemandObserver hash={media.videoPosterHash ?? null} />
+        <MediaDemandObserver hash={videoHash} />
         <MediaFetchFailure
           hashes={media.retryHashes ?? []}
           retrying={media.retrying ?? false}
@@ -103,7 +108,9 @@ export function PostMedia({
           media.state === 'loading' ? 'media-frame media-frame-loading' : 'media-frame media-frame-ready'
         }
       >
-        <MediaDemandObserver hash={media.kind === 'video' && !media.videoUnsupportedOnClient ? videoReportHash : null} />
+        <MediaDemandObserver hash={imageHash} />
+        <MediaDemandObserver hash={media.videoPosterHash ?? null} />
+        <MediaDemandObserver hash={videoHash} />
         <div className='media-badges'>
           {media.kind === 'video' ? <span className='media-type-badge'>{t('media.video')}</span> : null}
           {media.extraAttachmentCount > 0 ? (

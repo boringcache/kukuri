@@ -5,20 +5,22 @@ import { MediaDemandContext } from './mediaRetryContext';
 
 afterEach(() => vi.unstubAllGlobals());
 
-test('video demand exists only while its marker is visible', () => {
+test('video demand follows visibility of the whole containing card', () => {
   let notify: IntersectionObserverCallback | null = null;
   const disconnect = vi.fn();
+  const observe = vi.fn();
   vi.stubGlobal('IntersectionObserver', class {
     constructor(callback: IntersectionObserverCallback) { notify = callback; }
-    observe() {}
+    observe(target: Element) { observe(target); }
     disconnect() { disconnect(); }
   });
   const demand = vi.fn();
   const view = render(
     <MediaDemandContext.Provider value={demand}>
-      <MediaDemandObserver hash='video-hash' />
+      <div data-testid='video-card'><MediaDemandObserver hash='video-hash' /></div>
     </MediaDemandContext.Provider>
   );
+  expect(observe).toHaveBeenCalledWith(view.getByTestId('video-card'));
   act(() => notify?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
   expect(demand).toHaveBeenCalledWith('video-hash', true);
   act(() => notify?.([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
