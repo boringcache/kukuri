@@ -2,75 +2,75 @@ workspace = "boringcache/kukuri"
 
 [entries.rust-static-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-rust-static-registry"
+tag = "kukuri-linux-6f506d4e-rust-static-registry"
 
 [entries.rust-static-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-rust-static-git"
+tag = "kukuri-linux-6f506d4e-rust-static-git"
 
 [entries.rust-static-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-rust-static-target"
+tag = "kukuri-linux-6f506d4e-rust-static-target"
 
 [entries.rust-tests-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-rust-tests-registry"
+tag = "kukuri-linux-6f506d4e-rust-tests-registry"
 
 [entries.rust-tests-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-rust-tests-git"
+tag = "kukuri-linux-6f506d4e-rust-tests-git"
 
 [entries.rust-tests-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-rust-tests-target"
+tag = "kukuri-linux-6f506d4e-rust-tests-target"
 
 [entries.desktop-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-desktop-registry"
+tag = "kukuri-linux-6f506d4e-desktop-registry"
 
 [entries.desktop-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-desktop-git"
+tag = "kukuri-linux-6f506d4e-desktop-git"
 
 [entries.desktop-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-desktop-target"
+tag = "kukuri-linux-6f506d4e-desktop-target"
 
 [entries.cn-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-cn-registry"
+tag = "kukuri-linux-6f506d4e-cn-registry"
 
 [entries.cn-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-cn-git"
+tag = "kukuri-linux-6f506d4e-cn-git"
 
 [entries.cn-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-cn-target"
+tag = "kukuri-linux-6f506d4e-cn-target"
 
 [entries.cn-e2e-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-cn-e2e-registry"
+tag = "kukuri-linux-6f506d4e-cn-e2e-registry"
 
 [entries.cn-e2e-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-cn-e2e-git"
+tag = "kukuri-linux-6f506d4e-cn-e2e-git"
 
 [entries.cn-e2e-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-cn-e2e-target"
+tag = "kukuri-linux-6f506d4e-cn-e2e-target"
 
 [entries.harness-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-scoped-20260925-harness-registry"
+tag = "kukuri-linux-6f506d4e-harness-registry"
 
 [entries.harness-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-scoped-20260925-harness-git"
+tag = "kukuri-linux-6f506d4e-harness-git"
 
 [entries.harness-target]
 path = "target"
-tag = "kukuri-linux-scoped-20260925-harness-target"
+tag = "kukuri-linux-6f506d4e-harness-target"
 
 [profiles.linux-rust-static]
 entries = ["rust-static-registry", "rust-static-git", "rust-static-target"]

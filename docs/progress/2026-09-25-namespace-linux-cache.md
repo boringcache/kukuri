@@ -1,7 +1,7 @@
 # Linux cache comparison
 
 Status: Namespace is connected to this repository. Running the full Linux comparison.
-Source: kukuri-app/kukuri `ff491fa12f84e021ead2ac2ad13a60718eac7361`.
+Source: kukuri-app/kukuri `6f506d4ead06652dbbe7411635bcf2c9ab8efa16`.
 Branch: `linux-cache-trial` in `boringcache/kukuri`.
 
 The first experiment compares BoringCache directory caches with Namespace Rust
@@ -21,9 +21,10 @@ Acceptance criteria:
 - AC-3: A cold run publishes directory caches; a separate warm run of the same
   commit requires restored cache state on fresh runners. Report setup, restore,
   build/test, save, job duration, queue time, and available storage evidence.
-  Failed or missing-cache samples are not performance wins. Then advance through
-  first-parent commits `6f506d4e` and `3fa85b53`, publishing each real commit build
-  without same-source rolling reruns.
+  Failed or missing-cache samples are not performance wins. The initial base `ff491fa1` failed browser and backup tests under both
+  cache providers. The trial now uses the next real upstream commit `6f506d4e`,
+  which includes media-observer and database-close fixes. `3fa85b53` remains
+  available for a subsequent real commit build.
 - INVAR-1: Keep all eight upstream Linux job workloads and omit Windows.
 - INVAR-2: Do not change signed-release workflows, upstream code, account plans,
   or existing Namespace profiles.
@@ -68,3 +69,8 @@ community-node share one group. Other workloads have separate tags, so an
 unrelated job cannot replace their dependency directories during a parallel save.
 The initial full run was cancelled after this configuration issue was found;
 the replacement cold run uses fresh tags.
+
+The corrected cold run at `ff491fa1` passed six jobs; browser and Rust tests
+failed in upstream tests under both providers. Rust test caches were not saved,
+so no complete warm claim is possible at that base. After advancing to
+`6f506d4e`, both providers use new cache tags for a fresh cold/warm pair.

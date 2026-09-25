@@ -36,7 +36,7 @@ jobs:
   linux-rust-static:
     name: Namespace linux-rust-static ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-static"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-rust-static"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -129,7 +129,7 @@ jobs:
   linux-rust-tests:
     name: Namespace linux-rust-tests ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-tests"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-rust-tests"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -212,7 +212,7 @@ jobs:
   linux-desktop-ui:
     name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-desktop-ui ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-desktop"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -307,7 +307,7 @@ jobs:
     # 1 run あたりの vCPU × 分はほぼ同じまま所要時間が半分になる。cache-tag は据え置き。
     name: Namespace linux-desktop-browser ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-desktop"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -415,7 +415,7 @@ jobs:
   linux-cn:
     name: Namespace linux-cn ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-cn"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -491,7 +491,7 @@ jobs:
   linux-cn-e2e:
     name: Namespace linux-cn-e2e ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn-e2e"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-cn-e2e"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -563,7 +563,7 @@ jobs:
   linux-smoke:
     name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-smoke ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-harness"]') }}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -643,7 +643,7 @@ jobs:
   linux-community-node:
     name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-community-node ${{ inputs.phase }}
     if: github.repository == 'boringcache/kukuri'
-    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-6f506d4e-harness"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
