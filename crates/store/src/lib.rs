@@ -20,9 +20,12 @@ pub use models::{
     TimelineCursor, VERIFIED_OBJECT_PROJECTION_VERSION, VERIFIED_REACTION_PROJECTION_VERSION,
     VERIFIED_SESSION_PROJECTION_VERSION, adult_media_hashes_for_row,
 };
-pub use sqlite::{SqliteStore, StoreStartupError};
+pub use sqlite::{
+    REMOTE_CACHE_CAPACITY_BYTES, REMOTE_CACHE_RECLAIM_STEP, RemoteCacheReservation, SqliteStore,
+    StoreStartupError,
+};
 pub use traits::{
-    BlobCacheStore, ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
+    ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
     NOTIFICATION_DISPATCH_PAGE_SIZE, NOTIFICATION_PAGE_SIZE, NotificationStore,
     ObjectProjectionStore, PostWithdrawalStore, ProjectionStore, ReactionBookmarkStore,
     SocialProjectionStore, Store,

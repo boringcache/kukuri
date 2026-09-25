@@ -119,6 +119,16 @@ pub enum ReplicaNotice {
 
 #[async_trait]
 pub trait DocsSync: Send + Sync {
+    /// Commit the exact record already read by a demand lease after the caller
+    /// verifies its signed content and scope under its save guard.
+    async fn persist_verified_record(
+        &self,
+        _replica: &ReplicaId,
+        _key: &str,
+        _author: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// 保存済みpublic replicaのexact keyだけを読む。namespaceの作成、sync、subscribeを行わない。
     /// author指定は1名の索引、結果は最大8件。未対応adapterは通常queryへfallbackしない。
     async fn query_local_source(

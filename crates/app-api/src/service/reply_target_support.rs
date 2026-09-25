@@ -621,14 +621,14 @@ async fn reflect_reply_target_with(
         if let Some(bytes) = remote_bytes
             && let PayloadRef::BlobText { hash, .. } = &post.header().payload_ref
         {
-            let stored = services.blob_service.put_blob(bytes, "text/plain").await?;
+            let stored = services
+                .blob_service
+                .put_remote_blob(bytes, "text/plain")
+                .await?;
             anyhow::ensure!(stored.hash == *hash, "reply target body hash changed");
         }
         row
     };
-    services
-        .projection_store
-        .put_object_projection(row.clone())
-        .await?;
+    services.put_post_projection(row.clone()).await?;
     Ok(ReplyTargetReflection::Reflected(Box::new(row)))
 }

@@ -172,10 +172,6 @@ impl AppService {
         persist_custom_reaction_asset_doc(self.services.docs_sync.as_ref(), &asset, &envelope)
             .await?;
         self.services.store.put_envelope(envelope).await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored_blob.hash, BlobCacheStatus::Available)
-            .await?;
         *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
         Ok(custom_reaction_asset_view_from_doc(&asset))
     }

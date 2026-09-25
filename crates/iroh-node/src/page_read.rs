@@ -2,7 +2,7 @@
 //! Only deterministic public topic buckets are served; this protocol never starts docs sync.
 
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -15,6 +15,7 @@ use iroh_docs::store::{Query, SortBy, SortDirection};
 use iroh_docs::sync::SignedEntry;
 use iroh_docs::{NamespaceId, NamespaceSecret};
 use irpc::channel::mpsc;
+use kukuri_store::SqliteStore;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
@@ -143,6 +144,7 @@ impl Request {
 pub(crate) struct DocReadProtocol {
     sync: SyncHandle,
     blobs: BlobStore,
+    remote_cache: Arc<OnceLock<Arc<SqliteStore>>>,
     permits: Arc<Semaphore>,
 }
 
@@ -153,10 +155,15 @@ impl std::fmt::Debug for DocReadProtocol {
 }
 
 impl DocReadProtocol {
-    pub(crate) fn new(sync: SyncHandle, blobs: BlobStore) -> Self {
+    pub(crate) fn new(
+        sync: SyncHandle,
+        blobs: BlobStore,
+        remote_cache: Arc<OnceLock<Arc<SqliteStore>>>,
+    ) -> Self {
         Self {
             sync,
             blobs,
+            remote_cache,
             permits: Arc::new(Semaphore::new(8)),
         }
     }
@@ -230,9 +237,17 @@ impl DocReadProtocol {
                 }
             }
             DocReadQuery::Exact { key, limit, author } => {
-                let builder = match author {
-                    Some(author) => Query::author(author.parse()?).key_exact(key),
-                    None => Query::key_exact(key),
+                let cached = match self.remote_cache.get() {
+                    Some(cache) => {
+                        cache
+                            .get_remote_records(&request.replica, &key, author.as_deref(), limit)
+                            .await?
+                    }
+                    None => Vec::new(),
+                };
+                let builder = match author.as_deref() {
+                    Some(author) => Query::author(author.parse()?).key_exact(&key),
+                    None => Query::key_exact(&key),
                 };
                 let stream = self
                     .local_entries(
@@ -242,7 +257,12 @@ impl DocReadProtocol {
                             .limit(limit as u64)
                             .build(),
                     )
-                    .await?;
+                    .await;
+                let stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) if !cached.is_empty() => Vec::new(),
+                    Err(error) => return Err(error),
+                };
                 let mut records = Vec::new();
                 for entry in stream {
                     ensure!(
@@ -264,6 +284,28 @@ impl DocReadProtocol {
                         content_len: entry.content_len(),
                         docs_author: entry.author_bytes().to_string(),
                     });
+                }
+                if records.len() < limit {
+                    for bytes in cached.into_iter().take(limit - records.len()) {
+                        let record: DocReadRecord = serde_json::from_slice(&bytes)?;
+                        ensure!(
+                            record.key == key
+                                && record.value.len() <= MAX_RECORD_BYTES
+                                && author
+                                    .as_ref()
+                                    .is_none_or(|author| record.docs_author == author.as_str())
+                                && record.content_len == record.value.len() as u64
+                                && iroh_blobs::Hash::new(&record.value).to_string()
+                                    == record.content_hash,
+                            "cached docs record is invalid"
+                        );
+                        if !records
+                            .iter()
+                            .any(|existing| existing.docs_author == record.docs_author)
+                        {
+                            records.push(record);
+                        }
+                    }
                 }
                 DocReadResponse::Records(records)
             }

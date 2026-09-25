@@ -9,6 +9,11 @@ content advisory（ADR 0028 §8.6）を第 2 の源**として合成する。adv
 「CN advisory はスコープ外」は失効注記で後継を示す。自己申告の必須化、表示設定の既定 OFF、ラベル無し
 コンテンツの fail-open、`content_labels` の署名保護は変更しない。
 
+**2026-09-25 改訂**（#1221 R5-A）: remoteのラベル根拠は投稿projectionの参照または期限付き表示cacheへ結び、
+無期限のhash台帳にしない。最後の根拠を回収したhashの表示済みURLは破棄し、元投稿を再検証できない
+添付は再検証まで非表示にする（ユーザー判断A）。本人の保護投稿に結び付く根拠と旧保存分は通常remote
+cacheの回収から除外し、旧保存分の整理はR5-Iで行う。
+
 ## Context
 - Issue #858(Parent #853 Phase A)。無償 Preview 公開の利用者保護ブロッカーとして、Community Node の利用有無に依存せず、初回起動時に 18 歳以上である旨の自己申告を必須にし、成人向け表現を明示的に許可するまで安全に非表示とする。
 - 現行実装には成人向けを示すクライアント可視のラベルが存在しない。CN 側の NSFW 判定(ADR 0028)は index からの除外(`SafetyPolicy::on_high_confidence_nsfw` 既定 `Exclude`)であり、ラベルとして client へ配信されない。ADR 0025 §2.3 / ADR 0028 §2.6 は成人向け・暴力表現のサムネイル代替表示を client UI 設計に委譲している。
@@ -35,9 +40,10 @@ content advisory（ADR 0028 §8.6）を第 2 の源**として合成する。adv
 ### 4. 取得・キャッシュ制御
 - 表示設定 OFF の間、成人向けラベル付き投稿の添付メディアについて、バイト列の取得・プリフェッチ・キャッシュ・デコードを行わない。
   - frontend: プリフェッチ対象から成人向けラベル付き添付を除外する。
-  - Rust: `blob_media_payload` は、対象 hash が成人向けラベル付き投稿の添付として観測済み(projection 由来の `adult_media_hashes`)かつ設定 OFF の場合、blob 取得を行わず `None` を返す(fail-closed バックストップ)。
+  - Rust: `blob_media_payload` は、対象 hash が成人向けラベル付き投稿の添付として保持中のprojection・表示cache・保護記録から観測済みで、設定 OFF の場合、blob 取得を行わず `None` を返す。元投稿のprojectionが回収され再検証できない要求も、bytes取得前に `None` を返す。
 - 表示設定 ON で成人向けメディアを取得する場合は ephemeral fetch(`fetch_blob_ephemeral`)を使い、ローカル blob store(`blobs.db`)へ永続化しない。
 - 設定を OFF へ戻した場合、以後の取得を停止し、frontend の in-memory object URL(デコード済み表示)を破棄する。ephemeral fetch のためディスク上に成人向けメディアのキャッシュ残余は発生しない(ラベル付与前に通常経路で取得済みの blob は本 ADR の対象外)。
+- remoteのラベル根拠を回収した場合も、該当hashの表示済みobject URLを破棄する。通知を取りこぼしたときは全remote URLを破棄し、次の表示需要で元投稿を再検証する。
 
 ### 5. 表示
 - 成人向けラベル付き投稿は、タイムライン一覧・スレッド詳細・引用/埋め込み・返信プレビュー・検索結果解決・ブックマーク・プロフィールタイムライン・object-backed 通知の各表示経路で一貫して代替表示にする。メディアはプレースホルダー(取得もデコードもしない)、テキストと通知 preview は安全な代替文言にする。

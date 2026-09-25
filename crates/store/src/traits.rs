@@ -8,7 +8,7 @@ use kukuri_core::{
 };
 
 use crate::models::{
-    AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkCursor, BookmarkedCustomReactionRow,
+    AuthorRelationshipProjectionRow, BookmarkCursor, BookmarkedCustomReactionRow,
     BookmarkedPostRow, ContentObservationRow, DirectMessageConversationRow,
     DirectMessageMessageRow, DirectMessageOutboxCursor, DirectMessageOutboxPage,
     DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
@@ -64,6 +64,9 @@ pub trait Store: Send + Sync {
 #[async_trait]
 pub trait ObjectProjectionStore: Send + Sync {
     async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()>;
+    async fn put_remote_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projection(row).await
+    }
     async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
         put_object_projections_one_by_one(self, rows).await
     }
@@ -325,29 +328,6 @@ where
     Ok(relationships)
 }
 
-/// blob の取得状態(実装: sqlite/bookmarks.rs。意味的に独立させた最小 trait)。
-#[async_trait]
-pub trait BlobCacheStore: Send + Sync {
-    async fn mark_blob_status(&self, hash: &BlobHash, status: BlobCacheStatus) -> Result<()>;
-    async fn mark_blob_statuses(&self, rows: Vec<(BlobHash, BlobCacheStatus)>) -> Result<()> {
-        mark_blob_statuses_one_by_one(self, rows).await
-    }
-}
-
-/// `mark_blob_statuses` の既定動作: 1 件ずつ `mark_blob_status` を呼ぶ。
-pub(crate) async fn mark_blob_statuses_one_by_one<S>(
-    store: &S,
-    rows: Vec<(BlobHash, BlobCacheStatus)>,
-) -> Result<()>
-where
-    S: BlobCacheStore + ?Sized,
-{
-    for (hash, status) in rows {
-        store.mark_blob_status(&hash, status).await?;
-    }
-    Ok(())
-}
-
 /// リアクション cache / カスタムリアクション / ブックマーク(実装: sqlite/bookmarks.rs)。
 #[async_trait]
 pub trait ReactionBookmarkStore: Send + Sync {
@@ -541,7 +521,6 @@ pub trait ProjectionStore:
     + PostWithdrawalStore
     + LiveGameProjectionStore
     + SocialProjectionStore
-    + BlobCacheStore
     + ReactionBookmarkStore
     + DirectMessageStore
     + NotificationStore
@@ -554,7 +533,6 @@ impl<T> ProjectionStore for T where
         + PostWithdrawalStore
         + LiveGameProjectionStore
         + SocialProjectionStore
-        + BlobCacheStore
         + ReactionBookmarkStore
         + DirectMessageStore
         + NotificationStore

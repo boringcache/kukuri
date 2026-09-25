@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +17,7 @@ use iroh_docs::api::DocsApi;
 use iroh_docs::engine::{DefaultAuthorStorage, Engine};
 use iroh_docs::store::Store as DocsStore;
 use iroh_gossip::net::Gossip;
+use kukuri_store::SqliteStore;
 use kukuri_transport::{
     ConnectMode, DhtDiscoveryOptions, RECEIVE_BINDING_ALPN, ReceiveBindingSlot,
     TransportNetworkConfig, TransportRelayConfig, build_endpoint_builder,
@@ -27,6 +28,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::page_read::{DOC_READ_ALPN, DocReadProtocol};
+use crate::remote_blob::{REMOTE_BLOB_ALPN, RemoteBlobProtocol};
 
 #[cfg(test)]
 use iroh::tls::CaTlsConfig;
@@ -178,6 +180,7 @@ pub struct IrohDocsNode {
     docs: DocsApi,
     docs_sync: SyncHandle,
     blobs: BlobStore,
+    remote_cache: Arc<OnceLock<Arc<SqliteStore>>>,
     fetch_peer_health: Arc<kukuri_transport::BlobPeerHealth>,
     receive_binding: ReceiveBindingSlot,
     pub(crate) network_work: Arc<crate::network_work::NetworkWorkRuntime>,
@@ -376,7 +379,10 @@ impl IrohDocsNode {
             }
         };
         let receive_binding = ReceiveBindingSlot::new(endpoint.id());
-        let page_read = DocReadProtocol::new(docs.sync.clone(), blobs.clone());
+        let remote_cache = Arc::new(OnceLock::new());
+        let page_read =
+            DocReadProtocol::new(docs.sync.clone(), blobs.clone(), remote_cache.clone());
+        let remote_blob = RemoteBlobProtocol::new(remote_cache.clone());
         let router = Router::builder(endpoint.clone())
             .accept(
                 iroh_blobs::ALPN,
@@ -386,6 +392,7 @@ impl IrohDocsNode {
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(RECEIVE_BINDING_ALPN, receive_binding.clone())
             .accept(DOC_READ_ALPN, page_read)
+            .accept(REMOTE_BLOB_ALPN, remote_blob)
             .spawn();
 
         let node = Arc::new(Self {
@@ -397,6 +404,7 @@ impl IrohDocsNode {
             docs: docs.protocol.api().clone(),
             docs_sync: docs.sync,
             blobs,
+            remote_cache,
             fetch_peer_health: Arc::new(kukuri_transport::BlobPeerHealth::default()),
             receive_binding,
             network_work: Arc::new(crate::network_work::NetworkWorkRuntime::default()),
@@ -417,6 +425,16 @@ impl IrohDocsNode {
     /// not create a second in-memory or persistent docs store.
     pub fn docs_sync_handle(&self) -> SyncHandle {
         self.docs_sync.clone()
+    }
+
+    pub fn install_remote_cache(&self, cache: Arc<SqliteStore>) -> Result<()> {
+        self.remote_cache
+            .set(cache)
+            .map_err(|_| anyhow!("remote cache already installed"))
+    }
+
+    pub(crate) fn remote_cache(&self) -> Option<&Arc<SqliteStore>> {
+        self.remote_cache.get()
     }
 
     pub fn gossip(&self) -> &Gossip {

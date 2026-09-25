@@ -1,25 +1,6 @@
 use super::*;
 
 #[async_trait]
-impl BlobCacheStore for MemoryStore {
-    async fn mark_blob_status(&self, hash: &BlobHash, status: BlobCacheStatus) -> Result<()> {
-        self.blob_statuses
-            .write()
-            .await
-            .insert(hash.as_str().to_string(), status);
-        Ok(())
-    }
-
-    async fn mark_blob_statuses(&self, rows: Vec<(BlobHash, BlobCacheStatus)>) -> Result<()> {
-        let mut statuses = self.blob_statuses.write().await;
-        for (hash, status) in rows {
-            statuses.insert(hash.as_str().to_string(), status);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
 impl ReactionBookmarkStore for MemoryStore {
     async fn upsert_reaction_cache(&self, row: ReactionProjectionRow) -> Result<()> {
         self.reaction_projection_rows.write().await.insert(

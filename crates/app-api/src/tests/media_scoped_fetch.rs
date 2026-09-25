@@ -52,6 +52,55 @@ async fn create_post_with_image_attachment_surfaces_attachment_metadata() {
 }
 
 #[tokio::test]
+async fn expired_projection_blocks_media_bytes_until_source_is_revalidated() {
+    let store = Arc::new(SqliteStore::connect_memory().await.unwrap());
+    let app = AppService::new(
+        store.clone(),
+        Arc::new(FakeTransport::new("expired-media", FakeNetwork::default())),
+    );
+    let object_id = app
+        .create_post_with_attachments(
+            "kukuri:topic:expired-media",
+            "caption",
+            None,
+            vec![PendingAttachment {
+                mime: "image/png".into(),
+                bytes: b"cached-image".to_vec(),
+                role: AssetRole::ImageOriginal,
+            }],
+        )
+        .await
+        .unwrap();
+    let row = store
+        .get_object_projection(&EnvelopeId::from(object_id.as_str()))
+        .await
+        .unwrap()
+        .unwrap();
+    let hash = row.attachments[0].hash.as_str().to_string();
+    store.put_remote_object_projection(row).await.unwrap();
+    assert!(
+        app.blob_media_payload_for_post(&hash, "image/png", Some(&object_id))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query(
+        "UPDATE remote_content_cache SET last_used_at = 0 \
+         WHERE kind = 'projection' AND cache_key = ?1",
+    )
+    .bind(&object_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(
+        app.blob_media_payload_for_post(&hash, "image/png", Some(&object_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn private_post_media_requires_current_channel_membership() {
     let app = AppService::new(
         Arc::new(MemoryStore::default()),

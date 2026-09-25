@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use kukuri_blob_service::RemoteCacheDeferred;
 use kukuri_core::BlobHash;
 use tokio::sync::Semaphore;
 
@@ -328,11 +329,14 @@ pub(crate) async fn fetch_projection_blob_text_bounded(
         .ok()?;
     // 共有network枠の受付後にだけ試行を数える。abort時はattemptのDropで失敗を記録する。
     let attempt = missing_bodies.try_begin(hash, Utc::now().timestamp_millis())?;
-    let bytes = tokio::time::timeout_at(deadline, fetch)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten();
+    let bytes = match tokio::time::timeout_at(deadline, fetch).await {
+        Ok(Err(error)) if error.is::<RemoteCacheDeferred>() => {
+            attempt.defer();
+            return None;
+        }
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) | Err(_) => None,
+    };
     match bytes {
         Some(bytes) => Some(BoundedBody {
             text: String::from_utf8_lossy(&bytes).to_string(),

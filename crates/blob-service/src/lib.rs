@@ -15,8 +15,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 pub use kukuri_iroh_node::remote_fetch::DisplayBlobFetch;
+pub use kukuri_iroh_node::remote_fetch::RemoteCacheDeferred;
 pub type PreparedRetryFetch<'a> =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
+
+#[derive(Debug)]
+struct DisplayFetchUnsupported;
+
+impl std::fmt::Display for DisplayFetchUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancellable display fetch is not supported")
+    }
+}
+
+impl std::error::Error for DisplayFetchUnsupported {}
 
 pub const DISPLAY_FETCH_TIMEOUT: std::time::Duration = remote_fetch::REMOTE_FETCH_TOTAL_TIMEOUT;
 
@@ -37,11 +49,22 @@ pub enum BlobStatus {
 #[async_trait]
 pub trait BlobService: Send + Sync {
     async fn put_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
+    /// Store verified remote content in the reclaimable cache. In-memory adapters
+    /// have no separate protected store, so their default uses the ordinary write.
+    async fn put_remote_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
+        self.put_blob(data, mime).await
+    }
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>>;
     /// Reserve shared network capacity before the caller spends a retry attempt.
     async fn prepare_retry_fetch<'a>(&'a self, hash: &BlobHash) -> Result<PreparedRetryFetch<'a>> {
-        let hash = hash.clone();
-        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+        match self.prepare_display_fetch(hash).await {
+            Ok(fetch) => Ok(fetch),
+            Err(error) if error.is::<DisplayFetchUnsupported>() => {
+                let hash = hash.clone();
+                Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+            }
+            Err(error) => Err(error),
+        }
     }
     /// ローカルのbytesだけを読む。未対応の実装は取得不可とし、remoteへfallbackしない。
     async fn fetch_local_blob(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>> {
@@ -50,7 +73,7 @@ pub trait BlobService: Send + Sync {
     /// 表示要求のfutureが取得を所有する。drop後に取得を続けず、bytesを保存しない。
     /// 未対応の実装は共有fetchへfallbackしない。
     async fn prepare_display_fetch(&self, _hash: &BlobHash) -> Result<DisplayBlobFetch> {
-        anyhow::bail!("cancellable display fetch is not supported")
+        Err(DisplayFetchUnsupported.into())
     }
     /// scan 用の一時取得（#609）: remote から取得した bytes を**ローカルストアへ残さない**。
     ///
@@ -104,6 +127,7 @@ pub trait BlobService: Send + Sync {
 #[derive(Clone)]
 pub struct IrohBlobService {
     node: Arc<IrohDocsNode>,
+    remote_cache: Option<Arc<kukuri_store::SqliteStore>>,
     pinned: Arc<RwLock<HashSet<String>>>,
     // ピア台帳・接続候補・リトライ状態は kukuri-transport の共通実装(WP-H2)。
     // 台帳変化の bool は blob-service では使わない(レプリカへの配り直しが無いため)。
@@ -126,6 +150,7 @@ impl IrohBlobService {
         ));
         Self {
             node,
+            remote_cache: None,
             pinned: Arc::new(RwLock::new(HashSet::new())),
             peers,
             remote_fetch_retries: Arc::new(Mutex::new(RemoteFetchRetryState::default())),
@@ -155,9 +180,10 @@ impl IrohBlobService {
             node.endpoint().clone(),
             node.discovery(),
             node.fetch_peer_health(),
-            store,
+            store.clone(),
             "blob",
         ));
+        blobs.remote_cache = Some(store);
         blobs
     }
 
@@ -273,15 +299,14 @@ impl BlobService for IrohBlobService {
         .await
     }
     async fn fetch_local_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        let hash = iroh_blobs::Hash::from_str(hash.as_str())?;
-        Ok(self
-            .node
-            .blobs()
-            .blobs()
-            .get_bytes(hash)
-            .await
-            .ok()
-            .map(|bytes| bytes.to_vec()))
+        let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
+        if let Ok(bytes) = self.node.blobs().blobs().get_bytes(parsed).await {
+            return Ok(Some(bytes.to_vec()));
+        }
+        match &self.remote_cache {
+            Some(cache) => cache.get_remote_content("blob", hash.as_str()).await,
+            None => Ok(None),
+        }
     }
     async fn fetch_blob_ephemeral_bounded(
         &self,
@@ -340,20 +365,43 @@ impl BlobService for IrohBlobService {
         })
     }
 
+    async fn put_remote_blob(&self, data: Vec<u8>, mime: &str) -> Result<StoredBlob> {
+        let Some(cache) = &self.remote_cache else {
+            return self.put_blob(data, mime).await;
+        };
+        let hash = iroh_blobs::Hash::new(&data);
+        if data.len() as i64 <= kukuri_store::REMOTE_CACHE_CAPACITY_BYTES
+            && !self.node.blobs().blobs().has(hash).await?
+        {
+            anyhow::ensure!(
+                cache
+                    .put_remote_content("blob", &hash.to_string(), "blob", &data)
+                    .await?,
+                "remote blob cache capacity exceeded"
+            );
+        }
+        Ok(StoredBlob {
+            hash: BlobHash::new(hash.to_string()),
+            mime: mime.to_string(),
+            bytes: data.len() as u64,
+        })
+    }
+
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        let hash_text = hash.as_str().to_string();
-        let hash = iroh_blobs::Hash::from_str(hash.as_str())?;
-        match self.node.blobs().blobs().get_bytes(hash).await {
+        if self.remote_cache.is_some() {
+            return self.fetch_blob_ephemeral(hash).await;
+        }
+        let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
+        match self.node.blobs().blobs().get_bytes(parsed).await {
             Ok(bytes) => Ok(Some(bytes.to_vec())),
             Err(error) => {
-                // ループ本体(cooldown ゲート込み)は iroh-node の共通実装(WP-B14)。
                 remote_fetch::fetch_bytes_with_cooldown(
                     &self.node,
                     &self.peers,
                     &self.remote_fetch_retries,
                     "blob",
-                    hash_text.as_str(),
-                    hash,
+                    hash.as_str(),
+                    parsed,
                     error,
                 )
                 .await
@@ -362,6 +410,9 @@ impl BlobService for IrohBlobService {
     }
 
     async fn fetch_blob_ephemeral(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.fetch_local_blob(hash).await? {
+            return Ok(Some(bytes));
+        }
         let hash_text = hash.as_str().to_string();
         let hash = iroh_blobs::Hash::from_str(hash.as_str())?;
         match self.node.blobs().blobs().get_bytes(hash).await {
@@ -384,12 +435,21 @@ impl BlobService for IrohBlobService {
 
     async fn pin_blob(&self, hash: &BlobHash) -> Result<()> {
         let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
+        if let Some(cache) = &self.remote_cache
+            && !self.node.blobs().blobs().has(parsed).await?
+            && let Some(bytes) = cache.get_remote_content("blob", hash.as_str()).await?
+        {
+            self.node.blobs().blobs().add_bytes(bytes).await?;
+        }
         self.node
             .blobs()
             .tags()
             .set(metaverse_pin_tag(hash), parsed)
             .await?;
         self.pinned.write().await.insert(hash.as_str().to_string());
+        if let Some(cache) = &self.remote_cache {
+            cache.remove_remote_content("blob", hash.as_str()).await?;
+        }
         Ok(())
     }
 
@@ -418,11 +478,17 @@ impl BlobService for IrohBlobService {
             return Ok(BlobStatus::Pinned);
         }
         let iroh_hash = iroh_blobs::Hash::from_str(hash.as_str())?;
-        Ok(if self.node.blobs().blobs().has(iroh_hash).await? {
-            BlobStatus::Available
-        } else {
-            BlobStatus::Missing
-        })
+        let cached = match &self.remote_cache {
+            Some(cache) => cache.has_remote_content("blob", hash.as_str()).await?,
+            None => false,
+        };
+        Ok(
+            if self.node.blobs().blobs().has(iroh_hash).await? || cached {
+                BlobStatus::Available
+            } else {
+                BlobStatus::Missing
+            },
+        )
     }
 
     async fn import_peer_ticket(&self, ticket: &str) -> Result<()> {

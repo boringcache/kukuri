@@ -161,23 +161,47 @@ impl SqliteStore {
                 .await?,
             );
         }
-        object_projection_page_from_rows(rows, limit)
+        let mut page = object_projection_page_from_rows(rows, limit)?;
+        page.items = self.available_remote_projections(page.items).await?;
+        Ok(page)
     }
 }
 
-#[async_trait]
-impl ObjectProjectionStore for SqliteStore {
-    async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
-        self.put_object_projections(vec![row]).await
-    }
-
-    async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
+impl SqliteStore {
+    async fn put_object_projections_owned(
+        &self,
+        rows: Vec<ObjectProjectionRow>,
+        remote: bool,
+    ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
 
+        let _cache_gate = self.remote_cache_gate.lock().await;
+        let budget =
+            super::remote_cache::REMOTE_CACHE_CAPACITY_BYTES.saturating_sub(i64::try_from(
+                self.remote_cache_reserved
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )?);
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         for row in rows {
+            let remote_row = remote
+                || sqlx::query_scalar::<_, i64>(
+                    "SELECT EXISTS(SELECT 1 FROM remote_content_cache \
+                     WHERE kind = 'projection' AND cache_key = ?1)",
+                )
+                .bind(row.object_id.as_str())
+                .fetch_one(&mut *tx)
+                .await?
+                    != 0;
+            if remote_row {
+                anyhow::ensure!(
+                    self.charge_remote_projection(&mut tx, &row, budget, &mut label_evictions)
+                        .await?,
+                    "remote projection cache capacity exceeded"
+                );
+            }
             let payload_json = serde_json::to_string(&row.payload_ref)?;
             let attachments_json = serde_json::to_string(&row.attachments)?;
             let content_labels_json = serde_json::to_string(&row.content_labels)?;
@@ -241,20 +265,21 @@ impl ObjectProjectionStore for SqliteStore {
             .execute(&mut *tx)
             .await?;
 
-            // #858: 成人向けラベル付き投稿(引用 snapshot 含む)の添付 hash を
-            // 逆引きテーブルへ記録する(insert-only)。blob 取得ゲートの判定に使う。
-            for hash in adult_media_hashes_for_row(&row) {
-                sqlx::query(
-                    r#"
-                    INSERT INTO adult_media_hashes (blob_hash, marked_at)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(blob_hash) DO NOTHING
-                    "#,
-                )
-                .bind(hash)
-                .bind(row.derived_at)
-                .execute(&mut *tx)
-                .await?;
+            if remote_row {
+                self.sync_remote_adult_hash_refs(&mut tx, &row, &mut label_evictions)
+                    .await?;
+            } else {
+                // Own/protected projections keep their gate marker beyond remote cache eviction.
+                for hash in adult_media_hashes_for_row(&row) {
+                    sqlx::query(
+                        "INSERT INTO adult_media_hashes (blob_hash, marked_at, is_protected) \
+                         VALUES (?1, ?2, 1) ON CONFLICT(blob_hash) DO UPDATE SET is_protected = 1",
+                    )
+                    .bind(hash)
+                    .bind(row.derived_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
 
             sqlx::query(
@@ -284,7 +309,23 @@ impl ObjectProjectionStore for SqliteStore {
             .await?;
         }
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ObjectProjectionStore for SqliteStore {
+    async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projections(vec![row]).await
+    }
+
+    async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
+        self.put_object_projections_owned(rows, false).await
+    }
+
+    async fn put_remote_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projections_owned(vec![row], true).await
     }
 
     async fn get_object_projection(
@@ -306,7 +347,12 @@ impl ObjectProjectionStore for SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(row_to_object_projection).transpose()
+        let projection = row.map(row_to_object_projection).transpose()?;
+        Ok(self
+            .available_remote_projections(projection.into_iter().collect())
+            .await?
+            .into_iter()
+            .next())
     }
 
     async fn find_author_reposts_of(
@@ -342,33 +388,24 @@ impl ObjectProjectionStore for SqliteStore {
         .bind(i64::try_from(limit)?)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(row_to_object_projection).collect()
+        let projections = rows
+            .into_iter()
+            .map(row_to_object_projection)
+            .collect::<Result<Vec<_>>>()?;
+        self.available_remote_projections(projections).await
     }
 
     async fn mark_adult_media_hashes(&self, hashes: &[BlobHash]) -> Result<()> {
-        if hashes.is_empty() {
-            return Ok(());
-        }
-        let marked_at = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis(),
-        )?;
-        let mut tx = self.pool.begin().await?;
         for hash in hashes {
-            sqlx::query(
-                r#"
-                INSERT INTO adult_media_hashes (blob_hash, marked_at)
-                VALUES (?1, ?2)
-                ON CONFLICT(blob_hash) DO NOTHING
-                "#,
-            )
-            .bind(hash.as_str())
-            .bind(marked_at)
-            .execute(&mut *tx)
-            .await?;
+            if self.is_adult_media_hash(hash).await? {
+                continue;
+            }
+            anyhow::ensure!(
+                self.put_remote_content("adult_marker", hash.as_str(), "display", &[])
+                    .await?,
+                "adult media label cache capacity exceeded"
+            );
         }
-        tx.commit().await?;
         Ok(())
     }
 
@@ -381,7 +418,11 @@ impl ObjectProjectionStore for SqliteStore {
         .bind(hash.as_str())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.is_some())
+        Ok(row.is_some()
+            || self
+                .get_remote_content("adult_marker", hash.as_str())
+                .await?
+                .is_some())
     }
 
     async fn list_topic_timeline(
@@ -394,7 +435,9 @@ impl ObjectProjectionStore for SqliteStore {
             .build()
             .fetch_all(&self.pool)
             .await?;
-        object_projection_page_from_rows(rows, limit)
+        let mut page = object_projection_page_from_rows(rows, limit)?;
+        page.items = self.available_remote_projections(page.items).await?;
+        Ok(page)
     }
 
     async fn list_topic_timeline_in_channel(
@@ -414,7 +457,9 @@ impl ObjectProjectionStore for SqliteStore {
             .build()
             .fetch_all(&self.pool)
             .await?;
-        object_projection_page_from_rows(rows, limit)
+        let mut page = object_projection_page_from_rows(rows, limit)?;
+        page.items = self.available_remote_projections(page.items).await?;
+        Ok(page)
     }
 
     async fn list_thread(

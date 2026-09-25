@@ -36,6 +36,7 @@ pub(crate) async fn hydrate_object_projection_from_post(
     post: VerifiedPost,
     body_fetch: BodyFetch,
     scope_generation: u64,
+    remote_record: bool,
 ) -> Result<bool> {
     let projection_store = services.projection_store.as_ref();
     let blob_service = services.blob_service.as_ref();
@@ -50,8 +51,8 @@ pub(crate) async fn hydrate_object_projection_from_post(
         .await?
         .is_some()
     {
-        projection_store
-            .put_object_projection(projection_row_from_post(
+        services
+            .put_post_projection(projection_row_from_post(
                 &post.withdrawn(),
                 Some(String::new()),
             ))
@@ -84,13 +85,9 @@ pub(crate) async fn hydrate_object_projection_from_post(
             }
         },
     };
-    let mut attachment_statuses = Vec::with_capacity(header.attachments.len());
-    for attachment in &header.attachments {
-        let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
-        attachment_statuses.push((&attachment.hash, status));
-    }
-    let remote_request = body_fetch == BodyFetch::Bounded
-        && matches!(&header.payload_ref, PayloadRef::BlobText { .. });
+    let remote_request = remote_record
+        || (body_fetch == BodyFetch::Bounded
+            && matches!(&header.payload_ref, PayloadRef::BlobText { .. }));
     let _save_access = if remote_request {
         Some(services.content_save_access.lock().await)
     } else {
@@ -112,8 +109,8 @@ pub(crate) async fn hydrate_object_projection_from_post(
             .await?
             .is_some()
     {
-        projection_store
-            .put_object_projection(projection_row_from_post(
+        services
+            .put_post_projection(projection_row_from_post(
                 &post.withdrawn(),
                 Some(String::new()),
             ))
@@ -123,30 +120,26 @@ pub(crate) async fn hydrate_object_projection_from_post(
         }
         return Ok(true);
     }
-    if let PayloadRef::BlobText { hash, .. } = &header.payload_ref {
-        if let Some(bytes) = fetched_body
-            .as_mut()
-            .and_then(|body| body.remote_bytes.take())
-        {
-            let stored = blob_service.put_blob(bytes, "text/plain").await?;
-            anyhow::ensure!(stored.hash == *hash, "hydrated body hash changed");
-        }
-        projection_store
-            .mark_blob_status(
-                hash,
-                if content.is_some() {
-                    BlobCacheStatus::Available
-                } else {
-                    BlobCacheStatus::Missing
-                },
+    if remote_record {
+        services
+            .docs_sync
+            .persist_verified_record(
+                post.replica(),
+                post_envelope_key(&header.object_id).as_str(),
+                post.docs_author(),
             )
             .await?;
     }
-    for (hash, status) in attachment_statuses {
-        projection_store.mark_blob_status(hash, status).await?;
+    if let PayloadRef::BlobText { hash, .. } = &header.payload_ref
+        && let Some(bytes) = fetched_body
+            .as_mut()
+            .and_then(|body| body.remote_bytes.take())
+    {
+        let stored = blob_service.put_remote_blob(bytes, "text/plain").await?;
+        anyhow::ensure!(stored.hash == *hash, "hydrated body hash changed");
     }
-    projection_store
-        .put_object_projection(projection_row_from_post(&post, content))
+    services
+        .put_post_projection(projection_row_from_post(&post, content))
         .await?;
     if let Some(attempt) = fetched_body.and_then(|body| body.attempt) {
         attempt.succeed();
@@ -245,8 +238,10 @@ pub(crate) async fn hydrate_object_in_topic_with(
         policy,
     )
     .await?;
-    let scope_generation = if body_fetch == BodyFetch::Bounded
-        && matches!(&post.header().payload_ref, PayloadRef::BlobText { .. })
+    let remote_record = policy == DocFetchPolicy::LocalThenRemote;
+    let scope_generation = if remote_record
+        || (body_fetch == BodyFetch::Bounded
+            && matches!(&post.header().payload_ref, PayloadRef::BlobText { .. }))
     {
         let channel = post
             .header()
@@ -264,7 +259,14 @@ pub(crate) async fn hydrate_object_in_topic_with(
         0
     };
     Ok(
-        if hydrate_object_projection_from_post(services, post, body_fetch, scope_generation).await?
+        if hydrate_object_projection_from_post(
+            services,
+            post,
+            body_fetch,
+            scope_generation,
+            remote_record,
+        )
+        .await?
         {
             ObjectHydration::Hydrated
         } else {

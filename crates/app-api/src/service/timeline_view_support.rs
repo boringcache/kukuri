@@ -572,10 +572,15 @@ impl AppService {
                 .iter()
                 .map(|attachment| attachment.hash.clone())
                 .collect::<Vec<_>>();
-            self.services
+            if self
+                .services
                 .projection_store
                 .mark_adult_media_hashes(&hashes)
-                .await?;
+                .await
+                .is_err()
+            {
+                attachments.clear();
+            }
         }
         inherit_post_observation_for_attachments(&mut attachments, provenance.as_ref());
         Ok(PostView {
@@ -746,16 +751,19 @@ impl AppService {
             .await?
             .is_some();
         // #858: 引用 snapshot も取得ゲート用の hash 記録の対象にする。
+        let mut label_available = true;
         if kukuri_core::has_adult_content_label(&snapshot.content_labels) {
             let hashes = snapshot
                 .attachments
                 .iter()
                 .map(|attachment| attachment.hash.clone())
                 .collect::<Vec<_>>();
-            self.services
+            label_available = self
+                .services
                 .projection_store
                 .mark_adult_media_hashes(&hashes)
-                .await?;
+                .await
+                .is_ok();
         }
         let source_profile = profiles.get(snapshot.source_author_pubkey.as_str());
         let author = AuthorViewParts::new(source_profile, None);
@@ -772,7 +780,7 @@ impl AppService {
             } else {
                 snapshot.content
             },
-            attachments: if is_withdrawn {
+            attachments: if is_withdrawn || !label_available {
                 Vec::new()
             } else {
                 attachment_views_from_refs(

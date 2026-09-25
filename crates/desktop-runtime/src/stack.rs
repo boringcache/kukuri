@@ -24,7 +24,7 @@ use kukuri_transport::{
 #[cfg(test)]
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::discovery::{DiscoveryConfig, normalize_seed_peers};
 
@@ -204,6 +204,7 @@ reloadable_service! {
     #[async_trait]
     impl BlobService {
         async fn put_blob(data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
+        async fn put_remote_blob(data: Vec<u8>, mime: &str) -> Result<StoredBlob>;
         async fn fetch_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
         async fn fetch_local_blob(hash: &BlobHash) -> Result<Option<Vec<u8>>>;
         async fn prepare_display_fetch(hash: &BlobHash) -> Result<kukuri_blob_service::DisplayBlobFetch>;
@@ -234,6 +235,7 @@ pub(crate) struct SharedIrohStack {
     pub(crate) network_config: TransportNetworkConfig,
     pub(crate) dht_options: DhtDiscoveryOptions,
     candidate_store: Arc<SqliteStore>,
+    remote_cache_reaper: tokio::task::JoinHandle<()>,
     /// アカウントの署名鍵から導出した docs author の種(ADR 0053)。stack を作り直すたびに設定し直す。
     docs_author_seed: Mutex<Option<kukuri_core::DocsAuthorSeed>>,
     /// 再構築するendpointでも同じaccountだけを広告する。stack/account寿命に限定する。
@@ -312,6 +314,24 @@ impl SharedIrohStack {
         let transport = Arc::new(ReloadableTransport::new(current.transport.clone()));
         let docs_sync = Arc::new(ReloadableDocsSync::new(current.docs_sync.clone()));
         let blob_service = Arc::new(ReloadableBlobService::new(current.blob_service.clone()));
+        let reaper_store = candidate_store.clone();
+        let remote_cache_reaper = tokio::spawn(async move {
+            loop {
+                let full_step = match reaper_store.reclaim_remote_cache_step().await {
+                    Ok(reclaimed) => reclaimed == kukuri_store::REMOTE_CACHE_RECLAIM_STEP,
+                    Err(error) => {
+                        warn!(%error, "remote cache reclamation failed");
+                        false
+                    }
+                };
+                tokio::time::sleep(if full_step {
+                    std::time::Duration::from_millis(100)
+                } else {
+                    std::time::Duration::from_secs(60 * 60)
+                })
+                .await;
+            }
+        });
         Ok(Self {
             current: Mutex::new(Some(current)),
             generation: AtomicU64::new(0),
@@ -322,6 +342,7 @@ impl SharedIrohStack {
             network_config,
             dht_options,
             candidate_store,
+            remote_cache_reaper,
             docs_author_seed: Mutex::new(None),
             receive_binding_keys: Mutex::new(None),
             current_shut_down: AtomicBool::new(false),
@@ -528,6 +549,7 @@ impl SharedIrohStack {
     }
 
     pub(crate) async fn shutdown_checked(&self) -> Result<()> {
+        self.remote_cache_reaper.abort();
         if let Some(current) = self.current.lock().await.take() {
             current.transport.shutdown().await;
             current.docs_sync.shutdown().await;
@@ -556,6 +578,12 @@ impl SharedIrohStack {
             .node
             .endpoint()
             .clone()
+    }
+}
+
+impl Drop for SharedIrohStack {
+    fn drop(&mut self) {
+        self.remote_cache_reaper.abort();
     }
 }
 
@@ -591,6 +619,7 @@ impl BoundIrohStack {
             )
             .await?
         };
+        node.install_remote_cache(candidate_store.clone())?;
         let transport = Arc::new(
             IrohGossipTransport::from_shared_parts(
                 node.endpoint().clone(),

@@ -775,10 +775,6 @@ impl AppService {
             .blob_service
             .put_blob(input.bytes, input.mime_type.as_str())
             .await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored.hash, BlobCacheStatus::Available)
-            .await?;
         if stored.hash.as_str() != prospective_hash {
             anyhow::bail!("metaverse blob service returned an unexpected content hash");
         }

@@ -9,10 +9,12 @@ export function useRuntimeEventBridge(
   onSyncStatusChanged: (
     syncStatus: SyncStatus | null,
     communityNodeStatuses: CommunityNodeNodeStatus[] | null
-  ) => void
+  ) => void,
+  onAdultMediaLabelEvicted: (hash: string | null) => void
 ): void {
   const notificationCallbackRef = useRef(onNotificationStatusChanged);
   const syncStatusCallbackRef = useRef(onSyncStatusChanged);
+  const adultLabelCallbackRef = useRef(onAdultMediaLabelEvicted);
 
   useEffect(() => {
     notificationCallbackRef.current = onNotificationStatusChanged;
@@ -21,6 +23,10 @@ export function useRuntimeEventBridge(
   useEffect(() => {
     syncStatusCallbackRef.current = onSyncStatusChanged;
   }, [onSyncStatusChanged]);
+
+  useEffect(() => {
+    adultLabelCallbackRef.current = onAdultMediaLabelEvicted;
+  }, [onAdultMediaLabelEvicted]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -43,6 +49,9 @@ export function useRuntimeEventBridge(
                 event.payload.sync_status ?? null,
                 event.payload.community_node_statuses ?? null
               );
+              break;
+            case 'adult_media_label_evicted':
+              adultLabelCallbackRef.current(event.payload.hash ?? null);
               break;
           }
         }

@@ -72,7 +72,7 @@ pub(crate) use kukuri_docs_sync::{
 };
 pub(crate) use kukuri_metaverse_host::DomeSessionRuntime;
 pub(crate) use kukuri_store::{
-    AuthorRelationshipProjectionRow, BlobCacheStatus, BlobCacheStore, BookmarkedCustomReactionRow,
+    AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
     BookmarkedPostRow, DirectMessageConversationRow, DirectMessageMessageRow,
     DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
     DomeHostingProjectionRow, GameRoomProjectionRow, LiveSessionProjectionRow, MutedAuthorRow,
@@ -419,6 +419,16 @@ pub struct ServiceHandles {
 }
 
 impl ServiceHandles {
+    pub(crate) async fn put_post_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        if row.author_pubkey == self.keys.public_key_hex() {
+            self.projection_store.put_object_projection(row).await
+        } else {
+            self.projection_store
+                .put_remote_object_projection(row)
+                .await
+        }
+    }
+
     pub(crate) async fn active_content_scope_generation(
         &self,
         topic: &str,

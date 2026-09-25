@@ -12,13 +12,13 @@ use sqlx::{Pool, QueryBuilder, Row, Sqlite};
 
 use crate::models::adult_media_hashes_for_row;
 use crate::models::{
-    AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
-    BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
-    DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
-    DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
-    DomeConnectionProjectionRow, DomeHostingProjectionRow, GameRoomProjectionRow,
-    LiveSessionProjectionRow, MutedAuthorRow, NotificationCursor, NotificationRow,
-    ObjectProjectionRow, Page, PostWithdrawalRow, ReactionProjectionRow, TimelineCursor,
+    AuthorRelationshipProjectionRow, BookmarkedCustomReactionRow, BookmarkedPostRow,
+    ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT, DirectMessageConversationRow,
+    DirectMessageMessageRow, DirectMessageOutboxCursor, DirectMessageOutboxPage,
+    DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
+    DomeHostingProjectionRow, GameRoomProjectionRow, LiveSessionProjectionRow, MutedAuthorRow,
+    NotificationCursor, NotificationRow, ObjectProjectionRow, Page, PostWithdrawalRow,
+    ReactionProjectionRow, TimelineCursor,
 };
 use crate::pagination::{
     direct_message_page_from_rows, envelope_page_from_rows, object_projection_page_from_rows,
@@ -33,9 +33,9 @@ use crate::row_mapping::{
     row_to_muted_author, row_to_notification, row_to_object_projection, row_to_reaction_projection,
 };
 use crate::traits::{
-    BlobCacheStore, ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
-    NOTIFICATION_PAGE_SIZE, NotificationStore, ObjectProjectionStore, PostWithdrawalStore,
-    ReactionBookmarkStore, SocialProjectionStore, Store,
+    ContentObservationStore, DirectMessageStore, LiveGameProjectionStore, NOTIFICATION_PAGE_SIZE,
+    NotificationStore, ObjectProjectionStore, PostWithdrawalStore, ReactionBookmarkStore,
+    SocialProjectionStore, Store,
 };
 
 mod bookmarks;
@@ -47,14 +47,21 @@ mod notifications;
 mod observations;
 mod peer_candidates;
 pub(crate) mod projections;
+mod remote_cache;
 mod social;
 mod withdrawals;
 
 pub use connection::StoreStartupError;
+pub use remote_cache::{
+    REMOTE_CACHE_CAPACITY_BYTES, REMOTE_CACHE_RECLAIM_STEP, RemoteCacheReservation,
+};
 
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: Pool<Sqlite>,
+    remote_cache_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    remote_cache_reserved: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    adult_label_evictions: tokio::sync::broadcast::Sender<String>,
 }
 
 #[cfg(test)]

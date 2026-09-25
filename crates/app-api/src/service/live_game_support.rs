@@ -193,10 +193,6 @@ impl AppService {
                 },
             )
             .await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored.hash, BlobCacheStatus::Available)
-            .await?;
         self.collect_metaverse_blob_garbage(manifest.updated_at)
             .await?;
         Ok(DomePresetRefV1 {
@@ -337,10 +333,6 @@ impl AppService {
                     value: serde_json::to_value(&state)?,
                 },
             )
-            .await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored.hash, BlobCacheStatus::Available)
             .await?;
         Ok(state)
     }
@@ -698,10 +690,6 @@ impl AppService {
         persist_session_envelope(self.services.docs_sync.as_ref(), replica, &envelope).await?;
         persist_live_session_state(self.services.docs_sync.as_ref(), replica, verified.state())
             .await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored.hash, BlobCacheStatus::Available)
-            .await?;
         Ok(verified)
     }
 
@@ -746,10 +734,6 @@ impl AppService {
                 .map_err(|reason| anyhow::anyhow!("game room was rejected: {}", reason.as_str()))?;
         persist_session_envelope(self.services.docs_sync.as_ref(), replica, &envelope).await?;
         persist_game_room_state(self.services.docs_sync.as_ref(), replica, verified.state())
-            .await?;
-        self.services
-            .projection_store
-            .mark_blob_status(&stored.hash, BlobCacheStatus::Available)
             .await?;
         Ok(verified)
     }

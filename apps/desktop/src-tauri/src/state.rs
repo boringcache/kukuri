@@ -259,8 +259,19 @@ fn spawn_runtime_event_bridge(app_handle: &tauri::AppHandle, host: &Arc<ClientHo
     let mut rx = host.subscribe_events();
     let app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
-        while let Ok(event) = rx.recv().await {
-            let _ = app.emit("kukuri://runtime-event", &event);
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let _ = app.emit("kukuri://runtime-event", &event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = app.emit(
+                        "kukuri://runtime-event",
+                        &kukuri_desktop_runtime::RuntimeEvent::AdultMediaLabelEvicted { hash: None },
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 }

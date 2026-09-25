@@ -461,8 +461,16 @@ impl ClientHost {
         let sender = self.events.clone();
         let event_state = self.event_state.clone();
         *task = Some(tokio::spawn(async move {
-            while let Ok(event) = events.recv().await {
-                forward_host_event(&sender, &event_state, event);
+            loop {
+                match events.recv().await {
+                    Ok(event) => forward_host_event(&sender, &event_state, event),
+                    Err(broadcast::error::RecvError::Lagged(_)) => forward_host_event(
+                        &sender,
+                        &event_state,
+                        RuntimeEvent::AdultMediaLabelEvicted { hash: None },
+                    ),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         }));
     }

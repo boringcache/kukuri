@@ -11,7 +11,7 @@ use kukuri_core::{
 use tokio::sync::RwLock;
 
 use crate::models::{
-    AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkCursor, BookmarkedCustomReactionRow,
+    AuthorRelationshipProjectionRow, BookmarkCursor, BookmarkedCustomReactionRow,
     BookmarkedPostRow, ContentObservationRow, DIRECT_MESSAGE_OUTBOX_PAGE_LIMIT,
     DirectMessageConversationRow, DirectMessageMessageRow, DirectMessageOutboxCursor,
     DirectMessageOutboxPage, DirectMessageOutboxRow, DirectMessageTombstoneRow,
@@ -24,9 +24,9 @@ use crate::pagination::{
     apply_desc_direct_message_cursor, apply_desc_projection_cursor,
 };
 use crate::traits::{
-    BlobCacheStore, ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
-    NOTIFICATION_PAGE_SIZE, NotificationStore, ObjectProjectionStore, PostWithdrawalStore,
-    ReactionBookmarkStore, SocialProjectionStore, Store,
+    ContentObservationStore, DirectMessageStore, LiveGameProjectionStore, NOTIFICATION_PAGE_SIZE,
+    NotificationStore, ObjectProjectionStore, PostWithdrawalStore, ReactionBookmarkStore,
+    SocialProjectionStore, Store,
 };
 
 /// sqlite の live_presence_cache 主キー ON CONFLICT(topic_id, channel_id, session_id,
@@ -92,7 +92,6 @@ pub struct MemoryStore {
     muted_authors: Arc<RwLock<HashMap<String, MutedAuthorRow>>>,
     author_docs_authors: Arc<RwLock<HashMap<String, String>>>,
     live_presence: Arc<RwLock<HashMap<LivePresenceKey, LivePresenceValue>>>,
-    blob_statuses: Arc<RwLock<HashMap<String, BlobCacheStatus>>>,
     reaction_projection_rows: Arc<RwLock<MemoryReactionProjectionRows>>,
     bookmarked_custom_reactions: Arc<RwLock<HashMap<String, BookmarkedCustomReactionRow>>>,
     bookmarked_posts: Arc<RwLock<MemoryBookmarkedPosts>>,

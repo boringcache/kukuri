@@ -1,4 +1,5 @@
 use super::*;
+use kukuri_core::BlobHash;
 
 #[test]
 fn sync_status_changed_event_wire_shape_is_stable() {
@@ -15,6 +16,58 @@ fn sync_status_changed_event_wire_shape_is_stable() {
             "community_node_statuses": null,
         })
     );
+}
+
+#[test]
+fn adult_label_eviction_event_identifies_the_hash() {
+    assert_eq!(
+        serde_json::to_value(RuntimeEvent::AdultMediaLabelEvicted {
+            hash: Some("hash-1".into()),
+        })
+        .unwrap(),
+        serde_json::json!({"type": "adult_media_label_evicted", "hash": "hash-1"})
+    );
+}
+
+#[tokio::test]
+async fn reclaimed_adult_label_reaches_runtime_event_subscribers() {
+    let _resource = lock_test_resource(TestResource::CommunityNodeServer).await;
+    let dir = tempdir().unwrap();
+    let runtime = DesktopRuntime::new_with_config_and_identity(
+        dir.path().join("adult-label-event.db"),
+        TransportNetworkConfig::loopback(),
+        IdentityStorageMode::FileOnly,
+    )
+    .await
+    .unwrap();
+    let mut events = runtime.subscribe_events();
+    let hash = BlobHash::new("e".repeat(64));
+    kukuri_store::ObjectProjectionStore::mark_adult_media_hashes(
+        runtime.store.as_ref(),
+        std::slice::from_ref(&hash),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE remote_content_cache SET last_used_at = 0 \
+         WHERE kind = 'adult_marker' AND cache_key = ?1",
+    )
+    .bind(hash.as_str())
+    .execute(runtime.store.pool())
+    .await
+    .unwrap();
+    runtime.store.reclaim_remote_cache_step().await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event,
+        RuntimeEvent::AdultMediaLabelEvicted {
+            hash: Some(hash.as_str().to_string())
+        }
+    );
+    runtime.shutdown_checked().await.unwrap();
 }
 
 #[tokio::test]

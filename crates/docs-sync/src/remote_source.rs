@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 use async_trait::async_trait;
 use iroh::EndpointAddr;
 use kukuri_core::ReplicaId;
-use kukuri_iroh_node::{DocReadQuery, DocReadResponse};
+use kukuri_iroh_node::{DocReadQuery, DocReadRecord, DocReadResponse};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -58,6 +58,15 @@ impl RemoteDocsSource {
         if policy == DocFetchPolicy::LocalOnly {
             return Ok(Vec::new());
         }
+        if let (Some(cache), Some(author)) = (self.inner.remote_cache(), author) {
+            let cached = cache
+                .get_remote_records(replica.as_str(), key, Some(author), 1)
+                .await?;
+            if let Some(bytes) = cached.into_iter().next() {
+                let entry: DocReadRecord = serde_json::from_slice(&bytes)?;
+                return Ok(vec![checked_record(entry, key, Some(author))?]);
+            }
+        }
         let response = self
             .inner
             .query_remote_docs(
@@ -79,27 +88,7 @@ impl RemoteDocsSource {
         );
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            ensure!(entry.key == key, "remote docs provider changed exact key");
-            ensure!(
-                entry.value.len() <= 64 * 1024,
-                "remote docs record exceeded 64 KiB"
-            );
-            ensure!(
-                author.is_none_or(|author| entry.docs_author == author),
-                "remote docs provider changed docs author"
-            );
-            ensure!(
-                entry.content_len == entry.value.len() as u64
-                    && iroh_blobs::Hash::new(&entry.value).to_string() == entry.content_hash,
-                "remote docs record hash mismatch"
-            );
-            records.push(DocRecord {
-                key: entry.key,
-                value: entry.value,
-                content_hash: entry.content_hash,
-                content_len: entry.content_len,
-                docs_author: Some(entry.docs_author),
-            });
+            records.push(checked_record(entry, key, author)?);
         }
         let bytes = records
             .iter()
@@ -117,6 +106,34 @@ impl RemoteDocsSource {
     }
 }
 
+pub(crate) fn checked_record(
+    entry: DocReadRecord,
+    key: &str,
+    author: Option<&str>,
+) -> Result<DocRecord> {
+    ensure!(entry.key == key, "remote docs provider changed exact key");
+    ensure!(
+        entry.value.len() <= 64 * 1024,
+        "remote docs record exceeded 64 KiB"
+    );
+    ensure!(
+        author.is_none_or(|author| entry.docs_author == author),
+        "remote docs provider changed docs author"
+    );
+    ensure!(
+        entry.content_len == entry.value.len() as u64
+            && iroh_blobs::Hash::new(&entry.value).to_string() == entry.content_hash,
+        "remote docs record hash mismatch"
+    );
+    Ok(DocRecord {
+        key: entry.key,
+        value: entry.value,
+        content_hash: entry.content_hash,
+        content_len: entry.content_len,
+        docs_author: Some(entry.docs_author),
+    })
+}
+
 fn filter_records(records: &[DocRecord], author: Option<&str>, limit: usize) -> Vec<DocRecord> {
     records
         .iter()
@@ -128,6 +145,60 @@ fn filter_records(records: &[DocRecord], author: Option<&str>, limit: usize) -> 
 
 #[async_trait]
 impl DocsSync for RemoteDocsSource {
+    async fn persist_verified_record(
+        &self,
+        replica: &ReplicaId,
+        key: &str,
+        author: Option<&str>,
+    ) -> Result<()> {
+        let Some(cache) = self.inner.remote_cache() else {
+            return Ok(());
+        };
+        let record = self
+            .cache
+            .lock()
+            .await
+            .records
+            .get(key)
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|record| {
+                        author.is_some_and(|author| record.docs_author.as_deref() == Some(author))
+                    })
+                    .cloned()
+            });
+        let Some(record) = record else {
+            return Ok(());
+        };
+        let docs_author = record.docs_author.as_deref().expect("matched author");
+        if self
+            .inner
+            .read_local_source_owned(replica, key, Some(docs_author), 1)
+            .await
+            .is_ok_and(|local| {
+                local
+                    .iter()
+                    .any(|existing| existing.content_hash == record.content_hash)
+            })
+        {
+            return Ok(());
+        }
+        let payload = serde_json::to_vec(&DocReadRecord {
+            key: record.key.clone(),
+            value: record.value.clone(),
+            content_hash: record.content_hash.clone(),
+            content_len: record.content_len,
+            docs_author: docs_author.to_string(),
+        })?;
+        ensure!(
+            cache
+                .put_remote_record(replica.as_str(), key, docs_author, &payload)
+                .await?,
+            "remote record cache capacity exceeded"
+        );
+        Ok(())
+    }
     async fn open_replica(&self, replica: &ReplicaId) -> Result<()> {
         let _ = self.inner.replica_secret(replica).await?;
         Ok(())

@@ -9,6 +9,7 @@
 mod network_work;
 mod node;
 mod page_read;
+mod remote_blob;
 pub mod remote_fetch;
 
 #[cfg(test)]

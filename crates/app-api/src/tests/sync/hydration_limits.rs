@@ -587,6 +587,14 @@ struct HangingBlobService {
 
 #[async_trait]
 impl BlobService for HangingBlobService {
+    async fn prepare_retry_fetch<'a>(
+        &'a self,
+        hash: &BlobHash,
+    ) -> Result<kukuri_blob_service::PreparedRetryFetch<'a>> {
+        let hash = hash.clone();
+        Ok(Box::pin(async move { self.fetch_blob(&hash).await }))
+    }
+
     async fn prepare_display_fetch(
         &self,
         hash: &BlobHash,

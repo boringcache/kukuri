@@ -101,6 +101,9 @@ pub(crate) const GOSSIP_SUBSCRIPTION_STATE_KEY: &str = "registry";
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     NotificationStatusChanged,
+    AdultMediaLabelEvicted {
+        hash: Option<String>,
+    },
     SyncStatusChanged {
         sync_status: Option<Box<SyncStatus>>,
         community_node_statuses: Option<Vec<CommunityNodeNodeStatus>>,
@@ -443,11 +446,24 @@ impl DesktopRuntime {
         let (event_sender, _) = tokio::sync::broadcast::channel(64);
         let notification_event_task = {
             let notify = app_service.notification_inserted_notify();
+            let mut label_evictions = store.subscribe_adult_label_evictions();
             let sender = event_sender.clone();
             tokio::spawn(async move {
                 loop {
-                    notify.notified().await;
-                    let _ = sender.send(RuntimeEvent::NotificationStatusChanged);
+                    tokio::select! {
+                        _ = notify.notified() => {
+                            let _ = sender.send(RuntimeEvent::NotificationStatusChanged);
+                        }
+                        label = label_evictions.recv() => match label {
+                            Ok(hash) => {
+                                let _ = sender.send(RuntimeEvent::AdultMediaLabelEvicted { hash: Some(hash) });
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let _ = sender.send(RuntimeEvent::AdultMediaLabelEvicted { hash: None });
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                    }
                 }
             })
         };

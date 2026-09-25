@@ -3,7 +3,44 @@ use super::*;
 use tokio::sync::oneshot;
 
 impl IrohDocsSync {
-    pub(super) async fn read_local_source_owned(
+    pub(super) async fn read_cached_local_source(
+        &self,
+        replica: &ReplicaId,
+        key: &str,
+        author: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DocRecord>> {
+        let local = self
+            .read_local_source_owned(replica, key, author, limit)
+            .await;
+        let Some(cache) = self.remote_cache() else {
+            return local;
+        };
+        let cached = cache
+            .get_remote_records(replica.as_str(), key, author, limit.min(8))
+            .await?;
+        let mut records = match local {
+            Ok(records) => records,
+            Err(error) if cached.is_empty() => return Err(error),
+            Err(_) => Vec::new(),
+        };
+        for bytes in cached {
+            let entry = serde_json::from_slice(&bytes)?;
+            let record = crate::remote_source::checked_record(entry, key, author)?;
+            if !records
+                .iter()
+                .any(|existing| existing.docs_author == record.docs_author)
+            {
+                records.push(record);
+            }
+            if records.len() >= limit {
+                break;
+            }
+        }
+        Ok(records)
+    }
+
+    pub(crate) async fn read_local_source_owned(
         &self,
         replica: &ReplicaId,
         key: &str,
