@@ -1,8 +1,59 @@
 use anyhow::Result;
 use iroh_docs::{Capability, NamespaceSecret};
 use kukuri_core::ReplicaId;
+use kukuri_store::SqliteStore;
+use std::sync::Arc;
 
-use crate::{DocReadQuery, DocReadResponse, IrohDocsNode};
+use crate::{DocReadQuery, DocReadRecord, DocReadResponse, IrohDocsNode};
+
+#[tokio::test]
+async fn cached_remote_record_is_reprovided_without_local_namespace() -> Result<()> {
+    let provider = IrohDocsNode::memory().await?;
+    let requester = IrohDocsNode::memory().await?;
+    let cache = Arc::new(SqliteStore::connect_memory().await?);
+    provider.install_remote_cache(cache.clone())?;
+    let replica = ReplicaId::new("bucket::v1::topic::72757374::1");
+    let secret = NamespaceSecret::from_bytes(
+        blake3::hash(format!("kukuri-docs:{}", replica.as_str()).as_bytes()).as_bytes(),
+    );
+    let record = DocReadRecord {
+        key: "objects/post-1/envelope".into(),
+        value: b"signed envelope".to_vec(),
+        content_hash: iroh_blobs::Hash::new(b"signed envelope").to_string(),
+        content_len: 15,
+        docs_author: provider.docs().author_default().await?.to_string(),
+    };
+    anyhow::ensure!(
+        cache
+            .put_remote_record(
+                replica.as_str(),
+                &record.key,
+                &record.docs_author,
+                &serde_json::to_vec(&record)?,
+            )
+            .await?,
+        "fixture must fit"
+    );
+    let response = requester
+        .query_remote_docs(
+            provider.endpoint().addr(),
+            &replica,
+            &secret,
+            DocReadQuery::Exact {
+                key: record.key.clone(),
+                limit: 1,
+                author: Some(record.docs_author.clone()),
+            },
+        )
+        .await?;
+    let DocReadResponse::Records(records) = response else {
+        anyhow::bail!("expected records")
+    };
+    assert_eq!(records[0].value, record.value);
+    provider.shutdown().await?;
+    requester.shutdown().await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn real_peer_returns_only_requested_local_keys_and_records() -> Result<()> {

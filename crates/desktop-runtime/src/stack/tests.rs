@@ -253,6 +253,63 @@ async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
             .expect("remote fetch"),
         Some(b"candidate-ledger".to_vec())
     );
+    assert_eq!(
+        stack_a
+            .blob_service
+            .local_blob_status(&stored.hash)
+            .await
+            .expect("app-owned cache status"),
+        BlobStatus::Available
+    );
+    let legacy_reader = IrohBlobService::new(
+        stack_a
+            .current
+            .lock()
+            .await
+            .as_ref()
+            .expect("stack a")
+            .node
+            .clone(),
+    );
+    assert_eq!(
+        legacy_reader
+            .local_blob_status(&stored.hash)
+            .await
+            .expect("SDK store status"),
+        BlobStatus::Missing
+    );
+    let stack_c = SharedIrohStack::new(
+        &dir.path().join("stack-c"),
+        TransportNetworkConfig::loopback(),
+        &discovery_config,
+        &[],
+        DhtDiscoveryOptions::disabled(),
+        TransportRelayConfig::default(),
+        None,
+    )
+    .await
+    .expect("stack c");
+    let ticket_a = stack_a
+        .transport
+        .current()
+        .await
+        .export_ticket()
+        .await
+        .expect("export ticket a")
+        .expect("ticket a value");
+    stack_c
+        .blob_service
+        .import_peer_ticket(&ticket_a)
+        .await
+        .expect("import cached provider ticket");
+    assert_eq!(
+        stack_c
+            .blob_service
+            .fetch_blob(&stored.hash)
+            .await
+            .expect("fetch from cache-only provider"),
+        Some(b"candidate-ledger".to_vec())
+    );
 
     timeout(Duration::from_secs(30), stack_a.shutdown_checked())
         .await
@@ -262,6 +319,10 @@ async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
         .await
         .expect("stack b shutdown timeout")
         .expect("stack b shutdown");
+    timeout(Duration::from_secs(30), stack_c.shutdown_checked())
+        .await
+        .expect("stack c shutdown timeout")
+        .expect("stack c shutdown");
 }
 
 #[tokio::test]

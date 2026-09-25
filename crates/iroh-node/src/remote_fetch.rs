@@ -24,6 +24,7 @@ use tracing::{info, warn};
 
 use crate::IrohDocsNode;
 use crate::network_work::{FetchIdentity, FetchRequest, NetworkWorkRuntime};
+use crate::remote_blob;
 use kukuri_transport::work_admission::WorkPersistence;
 
 pub const REMOTE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -136,7 +137,12 @@ pub async fn fetch_verified_receive_offer_payload(
         let close = CloseOfferConnection(connection.clone());
         let bytes = timeout(
             REMOTE_FETCH_TRANSFER_TIMEOUT,
-            fetch_ephemeral(connection, hash, FetchMode::EphemeralBounded(max_bytes)),
+            fetch_ephemeral(
+                connection,
+                hash,
+                FetchMode::EphemeralBounded(max_bytes),
+                None,
+            ),
         )
         .await
         .context("receive offer payload transfer timed out")??;
@@ -197,6 +203,10 @@ pub struct BlobTooLarge {
     pub limit: u64,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("remote cache capacity temporarily unavailable")]
+pub struct RemoteCacheDeferred;
+
 impl std::fmt::Display for BlobTooLarge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "blob exceeds ephemeral byte limit {}", self.limit)
@@ -229,6 +239,7 @@ async fn fetch_ephemeral(
     connection: iroh::endpoint::Connection,
     hash: iroh_blobs::Hash,
     mode: FetchMode,
+    cache: Option<&kukuri_store::SqliteStore>,
 ) -> Result<Vec<u8>> {
     use bao_tree::io::BaoContentItem;
     use futures_util::StreamExt;
@@ -239,6 +250,7 @@ async fn fetch_ephemeral(
     };
     let mut stream = get_blob(connection, hash);
     let mut bytes = Vec::new();
+    let mut reservation = cache.map(kukuri_store::SqliteStore::empty_remote_cache_reservation);
     while let Some(item) = stream.next().await {
         match item {
             GetBlobItem::Item(BaoContentItem::Leaf(leaf)) => {
@@ -249,6 +261,24 @@ async fn fetch_ephemeral(
                     leaf.offset == bytes.len() as u64,
                     "non-contiguous ephemeral blob stream"
                 );
+                let incoming = (bytes.len() as u64).saturating_add(leaf.data.len() as u64);
+                if incoming > kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64 {
+                    reservation = None;
+                } else if let (Some(cache), Some(reservation)) = (cache, reservation.as_mut())
+                    && incoming > reservation.bytes()
+                {
+                    let target = incoming
+                        .div_ceil(1024 * 1024)
+                        .saturating_mul(1024 * 1024)
+                        .min(kukuri_store::REMOTE_CACHE_CAPACITY_BYTES as u64);
+                    let additional = target - reservation.bytes();
+                    if !cache
+                        .reserve_remote_cache_bytes(reservation, additional)
+                        .await?
+                    {
+                        return Err(RemoteCacheDeferred.into());
+                    }
+                }
                 bytes.extend_from_slice(&leaf.data);
             }
             GetBlobItem::Item(_) => {}
@@ -367,6 +397,7 @@ async fn fetch_bytes_with_cooldown_mode(
     };
     match result {
         Ok(bytes) => Ok(bytes.map(Arc::unwrap_or_clone)),
+        Err(error) if error.is::<RemoteCacheDeferred>() => Err(RemoteCacheDeferred.into()),
         Err(error) => match error.downcast_ref::<BlobTooLarge>() {
             // 呼び出し側(CN scan)が型で判定するため、合流した側にも同じ型で返す。
             Some(too_large) => Err(BlobTooLarge {
@@ -663,7 +694,12 @@ async fn fetch_bytes_from_remote(
                             let transfer_started = Instant::now();
                             match timeout(
                                 REMOTE_FETCH_TRANSFER_TIMEOUT,
-                                fetch_ephemeral(conn, hash, mode),
+                                fetch_ephemeral(
+                                    conn,
+                                    hash,
+                                    mode,
+                                    node.remote_cache().map(AsRef::as_ref),
+                                ),
                             )
                             .await
                             {
@@ -678,7 +714,9 @@ async fn fetch_bytes_from_remote(
                                     return Ok(Some(bytes));
                                 }
                                 Ok(Err(error)) => {
-                                    if error.is::<BlobTooLarge>() {
+                                    if error.is::<BlobTooLarge>()
+                                        || error.is::<RemoteCacheDeferred>()
+                                    {
                                         return Err(error);
                                     }
                                     match error
@@ -686,13 +724,45 @@ async fn fetch_bytes_from_remote(
                                         .map(classify_blob_transfer)
                                         .unwrap_or(BlobTransferFailure::Remote)
                                     {
-                                        BlobTransferFailure::Missing => {
-                                            attempt.failure(PeerFetchFailure::NotFound).await;
-                                            break;
-                                        }
-                                        BlobTransferFailure::Rejected => {
-                                            attempt.failure(PeerFetchFailure::Rejected).await;
-                                            break;
+                                        BlobTransferFailure::Missing
+                                        | BlobTransferFailure::Rejected => {
+                                            let limit = match mode {
+                                                FetchMode::EphemeralBounded(limit) => Some(limit),
+                                                _ => None,
+                                            };
+                                            match timeout(
+                                                REMOTE_FETCH_CONNECT_TIMEOUT
+                                                    + REMOTE_FETCH_TRANSFER_TIMEOUT,
+                                                remote_blob::fetch(
+                                                    node.endpoint(),
+                                                    peer.clone(),
+                                                    hash,
+                                                    limit,
+                                                    node.remote_cache().map(AsRef::as_ref),
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(Some(bytes))) => {
+                                                    attempt
+                                                        .success(transfer_started.elapsed())
+                                                        .await;
+                                                    return Ok(Some(bytes));
+                                                }
+                                                Ok(Err(cache_error))
+                                                    if cache_error.is::<BlobTooLarge>()
+                                                        || cache_error
+                                                            .is::<RemoteCacheDeferred>() =>
+                                                {
+                                                    return Err(cache_error);
+                                                }
+                                                _ => {
+                                                    attempt
+                                                        .failure(PeerFetchFailure::NotFound)
+                                                        .await;
+                                                    break;
+                                                }
+                                            }
                                         }
                                         BlobTransferFailure::Local => return Err(error),
                                         BlobTransferFailure::Remote => {

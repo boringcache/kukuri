@@ -64,6 +64,9 @@ pub trait Store: Send + Sync {
 #[async_trait]
 pub trait ObjectProjectionStore: Send + Sync {
     async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()>;
+    async fn put_remote_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projection(row).await
+    }
     async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
         put_object_projections_one_by_one(self, rows).await
     }

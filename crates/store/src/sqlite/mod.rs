@@ -47,14 +47,20 @@ mod notifications;
 mod observations;
 mod peer_candidates;
 pub(crate) mod projections;
+mod remote_cache;
 mod social;
 mod withdrawals;
 
 pub use connection::StoreStartupError;
+pub use remote_cache::{
+    REMOTE_CACHE_CAPACITY_BYTES, REMOTE_CACHE_RECLAIM_STEP, RemoteCacheReservation,
+};
 
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: Pool<Sqlite>,
+    remote_cache_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    remote_cache_reserved: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(test)]

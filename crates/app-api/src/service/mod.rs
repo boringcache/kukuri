@@ -419,6 +419,16 @@ pub struct ServiceHandles {
 }
 
 impl ServiceHandles {
+    pub(crate) async fn put_post_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        if row.author_pubkey == self.keys.public_key_hex() {
+            self.projection_store.put_object_projection(row).await
+        } else {
+            self.projection_store
+                .put_remote_object_projection(row)
+                .await
+        }
+    }
+
     pub(crate) async fn active_content_scope_generation(
         &self,
         topic: &str,

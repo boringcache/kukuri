@@ -86,7 +86,14 @@ impl AppService {
             else {
                 return Ok(None);
             };
-            Some((object_id, row.topic_id, row.channel_id, generation))
+            let adult_labeled = kukuri_core::has_adult_content_label(&row.content_labels);
+            Some((
+                object_id,
+                row.topic_id,
+                row.channel_id,
+                generation,
+                adult_labeled,
+            ))
         } else {
             None
         };
@@ -101,7 +108,10 @@ impl AppService {
             .projection_store
             .is_adult_media_hash(&blob_hash)
             .await?
-            || self.is_advisory_media_hash(hash).await;
+            || self.is_advisory_media_hash(hash).await
+            || source
+                .as_ref()
+                .is_some_and(|(_, _, _, _, labeled)| *labeled);
         if adult_labeled && !self.adult_content_display_enabled() {
             info!(
                 hash = %hash,
@@ -110,7 +120,7 @@ impl AppService {
             );
             return Ok(None);
         }
-        let fetch_result = if let Some((_, topic, channel, generation)) = &source {
+        let fetch_result = if let Some((_, topic, channel, generation, _)) = &source {
             match self
                 .services
                 .until_content_invalid(
@@ -170,13 +180,16 @@ impl AppService {
             .projection_store
             .is_adult_media_hash(&blob_hash)
             .await?
-            || self.is_advisory_media_hash(hash).await;
+            || self.is_advisory_media_hash(hash).await
+            || source
+                .as_ref()
+                .is_some_and(|(_, _, _, _, labeled)| *labeled);
         if *self.services.content_closed.borrow()
             || (currently_adult && !self.adult_content_display_enabled())
         {
             return Ok(None);
         }
-        if let Some((object_id, topic, channel, generation)) = source
+        if let Some((object_id, topic, channel, generation, _)) = source
             && (!self
                 .services
                 .content_scope_is_current(&topic, &channel, generation)
@@ -211,7 +224,7 @@ impl AppService {
             let stored = self
                 .services
                 .blob_service
-                .put_blob(bytes.clone(), mime)
+                .put_remote_blob(bytes.clone(), mime)
                 .await?;
             anyhow::ensure!(
                 stored.hash == blob_hash,

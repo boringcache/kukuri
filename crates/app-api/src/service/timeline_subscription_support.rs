@@ -367,11 +367,7 @@ impl AppService {
                         continue;
                     }
                     row.content = Some(text);
-                    let stored = self
-                        .services
-                        .projection_store
-                        .put_object_projection(row.clone())
-                        .await;
+                    let stored = self.services.put_post_projection(row.clone()).await;
                     if let Err(error) = stored {
                         warn!(
                             object_id = %row.object_id.as_str(),
@@ -476,10 +472,13 @@ impl AppService {
                         PayloadRef::BlobText { hash: current_hash, .. } if *current_hash == hash
                     );
                     if current.content.is_none() && same_body {
-                        let stored = services.blob_service.put_blob(bytes, "text/plain").await?;
+                        let stored = services
+                            .blob_service
+                            .put_remote_blob(bytes, "text/plain")
+                            .await?;
                         anyhow::ensure!(stored.hash == hash, "recovered body hash changed");
                         current.content = Some(text);
-                        projection_store.put_object_projection(current).await?;
+                        services.put_post_projection(current).await?;
                         projection_store
                             .mark_blob_status(&hash, BlobCacheStatus::Available)
                             .await?;

@@ -518,7 +518,7 @@ async fn cache_and_project_displayed_manifest(
     );
     services
         .blob_service
-        .put_blob(
+        .put_remote_blob(
             bytes,
             if key.starts_with("sessions/live/") {
                 LIVE_MANIFEST_MIME

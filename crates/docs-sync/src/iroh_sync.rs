@@ -46,6 +46,7 @@ struct ReplicaHandle {
 #[derive(Clone)]
 pub struct IrohDocsSync {
     node: Arc<IrohDocsNode>,
+    remote_cache: Option<Arc<SqliteStore>>,
     replicas: Arc<Mutex<HashMap<String, ReplicaHandle>>>,
     close_tasks: Arc<Mutex<JoinSet<()>>>,
     #[cfg(test)]
@@ -69,6 +70,7 @@ impl IrohDocsSync {
         let peers = Arc::new(PeerAddrBook::new(node.endpoint().clone(), node.discovery()));
         Self {
             node,
+            remote_cache: None,
             replicas: Arc::new(Mutex::new(HashMap::new())),
             close_tasks: Arc::new(Mutex::new(JoinSet::new())),
             #[cfg(test)]
@@ -78,18 +80,6 @@ impl IrohDocsSync {
             remote_fetch_retries: Arc::new(Mutex::new(RemoteFetchRetryState::default())),
             account_docs_author: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub fn with_account_store(node: Arc<IrohDocsNode>, store: Arc<SqliteStore>) -> Self {
-        let mut docs = Self::new(node.clone());
-        docs.peers = Arc::new(PeerAddrBook::with_account_store(
-            node.endpoint().clone(),
-            node.discovery(),
-            Arc::new(BlobPeerHealth::default()),
-            store,
-            "docs",
-        ));
-        docs
     }
 
     /// アカウントの署名鍵から導出した docs author を import し、既定の docs author にする(ADR 0053 §1)。戻り値はその id。
@@ -518,7 +508,7 @@ impl DocsSync for IrohDocsSync {
         author: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DocRecord>> {
-        self.read_local_source_owned(replica, key, author, limit)
+        self.read_cached_local_source(replica, key, author, limit)
             .await
     }
 

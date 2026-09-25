@@ -1,5 +1,21 @@
 use super::*;
 use crate::BookmarkCursor;
+use kukuri_core::PayloadRef;
+
+fn bookmark_cache_refs(row: &BookmarkedPostRow) -> Vec<(String, String)> {
+    let mut refs = Vec::new();
+    if let PayloadRef::BlobText { hash, .. } = &row.payload_ref {
+        refs.push(("blob".to_string(), hash.as_str().to_string()));
+    }
+    refs.extend(
+        row.attachments
+            .iter()
+            .map(|attachment| ("blob".to_string(), attachment.hash.as_str().to_string())),
+    );
+    refs.sort();
+    refs.dedup();
+    refs
+}
 
 #[async_trait]
 impl BlobCacheStore for SqliteStore {
@@ -273,6 +289,15 @@ impl ReactionBookmarkStore for SqliteStore {
     }
 
     async fn put_bookmarked_post(&self, row: BookmarkedPostRow) -> Result<()> {
+        let reference = format!("bookmark:{}", row.source_object_id.as_str());
+        let refs = bookmark_cache_refs(&row);
+        let _cache_gate = self.remote_cache_gate.lock().await;
+        let budget =
+            super::remote_cache::REMOTE_CACHE_CAPACITY_BYTES.saturating_sub(i64::try_from(
+                self.remote_cache_reserved
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )?);
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO bookmarked_posts (
@@ -330,8 +355,10 @@ impl ReactionBookmarkStore for SqliteStore {
                 .transpose()?,
         )
         .bind(row.bookmarked_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        Self::replace_remote_protected_refs(&mut tx, &reference, &refs, budget).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -393,6 +420,13 @@ impl ReactionBookmarkStore for SqliteStore {
     }
 
     async fn remove_bookmarked_post(&self, source_object_id: &EnvelopeId) -> Result<()> {
+        let _cache_gate = self.remote_cache_gate.lock().await;
+        let budget =
+            super::remote_cache::REMOTE_CACHE_CAPACITY_BYTES.saturating_sub(i64::try_from(
+                self.remote_cache_reserved
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )?);
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             DELETE FROM bookmarked_posts
@@ -400,8 +434,16 @@ impl ReactionBookmarkStore for SqliteStore {
             "#,
         )
         .bind(source_object_id.as_str())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        Self::replace_remote_protected_refs(
+            &mut tx,
+            &format!("bookmark:{}", source_object_id.as_str()),
+            &[],
+            budget,
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

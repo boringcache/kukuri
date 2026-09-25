@@ -1,0 +1,6 @@
+DROP INDEX remote_content_cache_protected_ref_owner;
+DROP TABLE remote_content_cache_protected_ref;
+DROP TABLE remote_content_cache_usage;
+DROP INDEX remote_content_cache_record;
+DROP INDEX remote_content_cache_lru;
+DROP TABLE remote_content_cache;

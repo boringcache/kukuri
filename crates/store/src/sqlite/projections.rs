@@ -165,19 +165,34 @@ impl SqliteStore {
     }
 }
 
-#[async_trait]
-impl ObjectProjectionStore for SqliteStore {
-    async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
-        self.put_object_projections(vec![row]).await
-    }
-
-    async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
+impl SqliteStore {
+    async fn put_object_projections_owned(
+        &self,
+        rows: Vec<ObjectProjectionRow>,
+        remote: bool,
+    ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
 
+        let _cache_gate = if remote {
+            Some(self.remote_cache_gate.lock().await)
+        } else {
+            None
+        };
+        let budget =
+            super::remote_cache::REMOTE_CACHE_CAPACITY_BYTES.saturating_sub(i64::try_from(
+                self.remote_cache_reserved
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )?);
         let mut tx = self.pool.begin().await?;
         for row in rows {
+            if remote {
+                anyhow::ensure!(
+                    Self::charge_remote_projection(&mut tx, &row, budget).await?,
+                    "remote projection cache capacity exceeded"
+                );
+            }
             let payload_json = serde_json::to_string(&row.payload_ref)?;
             let attachments_json = serde_json::to_string(&row.attachments)?;
             let content_labels_json = serde_json::to_string(&row.content_labels)?;
@@ -285,6 +300,21 @@ impl ObjectProjectionStore for SqliteStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ObjectProjectionStore for SqliteStore {
+    async fn put_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projections(vec![row]).await
+    }
+
+    async fn put_object_projections(&self, rows: Vec<ObjectProjectionRow>) -> Result<()> {
+        self.put_object_projections_owned(rows, false).await
+    }
+
+    async fn put_remote_object_projection(&self, row: ObjectProjectionRow) -> Result<()> {
+        self.put_object_projections_owned(vec![row], true).await
     }
 
     async fn get_object_projection(

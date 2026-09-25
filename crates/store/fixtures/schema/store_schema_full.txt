@@ -286,6 +286,23 @@ table reaction_cache
   column cid=13 name=source_envelope_id type=TEXT notnull=1 default=None pk=0
   column cid=14 name=derived_at type=INTEGER notnull=1 default=None pk=0
   column cid=15 name=projection_version type=INTEGER notnull=1 default=None pk=0
+table remote_content_cache
+  column cid=0 name=kind type=TEXT notnull=1 default=None pk=1
+  column cid=1 name=cache_key type=TEXT notnull=1 default=None pk=2
+  column cid=2 name=scope_key type=TEXT notnull=1 default=None pk=0
+  column cid=3 name=record_key type=TEXT notnull=0 default=None pk=0
+  column cid=4 name=record_author type=TEXT notnull=0 default=None pk=0
+  column cid=5 name=payload type=BLOB notnull=0 default=None pk=0
+  column cid=6 name=charged_bytes type=INTEGER notnull=1 default=None pk=0
+  column cid=7 name=is_protected type=INTEGER notnull=1 default=Some("0") pk=0
+  column cid=8 name=last_used_at type=INTEGER notnull=1 default=None pk=0
+table remote_content_cache_protected_ref
+  column cid=0 name=kind type=TEXT notnull=1 default=None pk=1
+  column cid=1 name=cache_key type=TEXT notnull=1 default=None pk=2
+  column cid=2 name=ref_id type=TEXT notnull=1 default=None pk=3
+table remote_content_cache_usage
+  column cid=0 name=id type=INTEGER notnull=0 default=None pk=1
+  column cid=1 name=used_bytes type=INTEGER notnull=1 default=None pk=0
 table replica_cursors
   column cid=0 name=replica_id type=TEXT notnull=0 default=None pk=1
   column cid=1 name=cursor type=TEXT notnull=0 default=None pk=0
@@ -519,6 +536,22 @@ index peer_candidates_window table=peer_candidates unique=0 origin=c partial=0
   key seqno=2 cid=5 name=Some("seen_ms")
   key seqno=3 cid=2 name=Some("endpoint_id")
   sql=Some("CREATE INDEX peer_candidates_window ON peer_candidates (scope, source, seen_ms, endpoint_id)")
+index remote_content_cache_lru table=remote_content_cache unique=0 origin=c partial=0
+  key seqno=0 cid=7 name=Some("is_protected")
+  key seqno=1 cid=8 name=Some("last_used_at")
+  key seqno=2 cid=0 name=Some("kind")
+  key seqno=3 cid=1 name=Some("cache_key")
+  sql=Some("CREATE INDEX remote_content_cache_lru ON remote_content_cache(is_protected, last_used_at, kind, cache_key)")
+index remote_content_cache_protected_ref_owner table=remote_content_cache_protected_ref unique=0 origin=c partial=0
+  key seqno=0 cid=2 name=Some("ref_id")
+  key seqno=1 cid=0 name=Some("kind")
+  key seqno=2 cid=1 name=Some("cache_key")
+  sql=Some("CREATE INDEX remote_content_cache_protected_ref_owner ON remote_content_cache_protected_ref(ref_id, kind, cache_key)")
+index remote_content_cache_record table=remote_content_cache unique=0 origin=c partial=1
+  key seqno=0 cid=2 name=Some("scope_key")
+  key seqno=1 cid=3 name=Some("record_key")
+  key seqno=2 cid=4 name=Some("record_author")
+  sql=Some("CREATE INDEX remote_content_cache_record ON remote_content_cache(scope_key, record_key, record_author) WHERE kind = 'record'")
 index sqlite_autoindex_adult_media_hashes_1 table=adult_media_hashes unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("blob_hash")
   sql=None
@@ -629,6 +662,15 @@ index sqlite_autoindex_reaction_cache_1 table=reaction_cache unique=1 origin=pk 
   key seqno=0 cid=0 name=Some("source_replica_id")
   key seqno=1 cid=1 name=Some("target_object_id")
   key seqno=2 cid=2 name=Some("reaction_id")
+  sql=None
+index sqlite_autoindex_remote_content_cache_1 table=remote_content_cache unique=1 origin=pk partial=0
+  key seqno=0 cid=0 name=Some("kind")
+  key seqno=1 cid=1 name=Some("cache_key")
+  sql=None
+index sqlite_autoindex_remote_content_cache_protected_ref_1 table=remote_content_cache_protected_ref unique=1 origin=pk partial=0
+  key seqno=0 cid=0 name=Some("kind")
+  key seqno=1 cid=1 name=Some("cache_key")
+  key seqno=2 cid=2 name=Some("ref_id")
   sql=None
 index sqlite_autoindex_replica_cursors_1 table=replica_cursors unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("replica_id")
