@@ -85,11 +85,6 @@ pub(crate) async fn hydrate_object_projection_from_post(
             }
         },
     };
-    let mut attachment_statuses = Vec::with_capacity(header.attachments.len());
-    for attachment in &header.attachments {
-        let status = best_effort_blob_cache_status(blob_service, &attachment.hash).await;
-        attachment_statuses.push((&attachment.hash, status));
-    }
     let remote_request = remote_record
         || (body_fetch == BodyFetch::Bounded
             && matches!(&header.payload_ref, PayloadRef::BlobText { .. }));
@@ -135,27 +130,13 @@ pub(crate) async fn hydrate_object_projection_from_post(
             )
             .await?;
     }
-    if let PayloadRef::BlobText { hash, .. } = &header.payload_ref {
-        if let Some(bytes) = fetched_body
+    if let PayloadRef::BlobText { hash, .. } = &header.payload_ref
+        && let Some(bytes) = fetched_body
             .as_mut()
             .and_then(|body| body.remote_bytes.take())
-        {
-            let stored = blob_service.put_remote_blob(bytes, "text/plain").await?;
-            anyhow::ensure!(stored.hash == *hash, "hydrated body hash changed");
-        }
-        projection_store
-            .mark_blob_status(
-                hash,
-                if content.is_some() {
-                    BlobCacheStatus::Available
-                } else {
-                    BlobCacheStatus::Missing
-                },
-            )
-            .await?;
-    }
-    for (hash, status) in attachment_statuses {
-        projection_store.mark_blob_status(hash, status).await?;
+    {
+        let stored = blob_service.put_remote_blob(bytes, "text/plain").await?;
+        anyhow::ensure!(stored.hash == *hash, "hydrated body hash changed");
     }
     services
         .put_post_projection(projection_row_from_post(&post, content))

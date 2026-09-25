@@ -118,13 +118,8 @@ impl AppService {
         let repost_object = envelope
             .to_post_object()?
             .ok_or_else(|| anyhow::anyhow!("failed to parse repost object"))?;
-        self.ingest_event(
-            &topic_replica_id(target_topic_id),
-            envelope.clone(),
-            None,
-            Vec::new(),
-        )
-        .await?;
+        self.ingest_event(&topic_replica_id(target_topic_id), envelope.clone())
+            .await?;
 
         let local_author_pubkey = self.current_author_pubkey();
         let profile_repost_envelope = build_profile_repost_envelope(
@@ -686,13 +681,7 @@ impl AppService {
         let post_object = envelope
             .to_post_object()?
             .ok_or_else(|| anyhow::anyhow!("failed to parse post object for profile topic"))?;
-        self.ingest_event(
-            &write_replica,
-            envelope.clone(),
-            Some(stored_blob.clone()),
-            stored_attachments,
-        )
-        .await?;
+        self.ingest_event(&write_replica, envelope.clone()).await?;
         if effective_channel_id.is_none() {
             let local_author_pubkey = self.current_author_pubkey();
             let profile_post_envelope = build_profile_post_envelope(

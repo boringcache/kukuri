@@ -51,13 +51,6 @@ pub(crate) async fn hydrate_game_room_from_record(
         let Some(verified) = result.verified() else {
             return Ok(false);
         };
-        services
-            .projection_store
-            .mark_blob_status(
-                &verified.state().current_manifest.hash,
-                BlobCacheStatus::Available,
-            )
-            .await?;
         let state = verified.state();
         let manifest = verified.manifest();
         // Slow blob I/O precedes the room lock. Other rooms never wait for it.

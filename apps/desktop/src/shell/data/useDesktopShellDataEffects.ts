@@ -180,15 +180,10 @@ export function useDesktopShellDataEffects({
     };
   }, [api, setAdultContentEnabled]);
 
-  // #858: 表示設定 OFF の間、ゲート対象 hash の表示済み object URL を破棄し、
-  // 取得試行の記録も消して以後の取得を停止する(ON へ戻せば再取得される)。
-  // #1107: 取得中の hash も無効にし、完了した bytes を表示に使わない(INVAR-1)。
-  useEffect(() => {
-    gatedMediaHashesRef.current = new Set(gatedAdultMediaHashes);
-    if (gatedAdultMediaHashes.length === 0) {
-      return;
-    }
-    for (const hash of gatedAdultMediaHashes) {
+  const revokeMediaHashes = useCallback((values: Iterable<string>) => {
+    const hashes = [...values];
+    if (hashes.length === 0) return;
+    for (const hash of hashes) {
       mediaGateEpochRef.current.set(hash, (mediaGateEpochRef.current.get(hash) ?? 0) + 1);
       const url = remoteObjectUrlRef.current.get(hash);
       if (url) {
@@ -201,7 +196,7 @@ export function useDesktopShellDataEffects({
     setMediaObjectUrls((current) => {
       let changed = false;
       const next = { ...current };
-      for (const hash of gatedAdultMediaHashes) {
+      for (const hash of hashes) {
         if (hash in next) {
           delete next[hash];
           changed = true;
@@ -209,7 +204,23 @@ export function useDesktopShellDataEffects({
       }
       return changed ? next : current;
     });
-  }, [gatedAdultMediaHashes, mediaFetchAttemptRef, remoteObjectUrlRef, setMediaObjectUrls]);
+  }, [mediaFetchAttemptRef, remoteObjectUrlRef, setMediaObjectUrls]);
+  // #858 / #1107: gate 後の取得結果も使わず、表示済み URL を解放する。
+  useEffect(() => {
+    gatedMediaHashesRef.current = new Set(gatedAdultMediaHashes);
+    revokeMediaHashes(gatedAdultMediaHashes);
+  }, [gatedAdultMediaHashes, revokeMediaHashes]);
+  // A reclaimed source is no longer a displayable attachment. Release its URL
+  // when the bounded visible view drops the reference; a later view revalidates it.
+  useEffect(() => {
+    const visible = new Set(previewableMediaAttachments.map((attachment) => attachment.hash));
+    const stale = [...remoteObjectUrlRef.current.keys()].filter((hash) => !visible.has(hash));
+    revokeMediaHashes(stale);
+  }, [previewableMediaAttachments, remoteObjectUrlRef, revokeMediaHashes]);
+  const handleAdultLabelEvicted = useCallback(
+    (hash: string | null) => revokeMediaHashes(hash ? [hash] : remoteObjectUrlRef.current.keys()),
+    [remoteObjectUrlRef, revokeMediaHashes]
+  );
   // 非 active な Timeline Column が Bookmarks を表示しているか(bookmarks ロード gate 用、Issue #765)。
   const hasBookmarksTimelineColumn = useDesktopShellStore((state) =>
     state.workspaceState.columns.some((column) => column.timelineView === 'bookmarks')
@@ -320,7 +331,11 @@ export function useDesktopShellDataEffects({
     [setCommunityNodeStatuses, setSyncStatus, storeApi]
   );
 
-  useRuntimeEventBridge(refreshNotificationsFromEvent, applySyncStatusChange);
+  useRuntimeEventBridge(
+    refreshNotificationsFromEvent,
+    applySyncStatusChange,
+    handleAdultLabelEvicted
+  );
 
   useEffect(() => {
     void refreshConnectivityStatus()

@@ -388,43 +388,25 @@ impl BlobService for IrohBlobService {
     }
 
     async fn fetch_blob(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-        if self.remote_cache.is_none() {
-            let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
-            return match self.node.blobs().blobs().get_bytes(parsed).await {
-                Ok(bytes) => Ok(Some(bytes.to_vec())),
-                Err(error) => {
-                    remote_fetch::fetch_bytes_with_cooldown(
-                        &self.node,
-                        &self.peers,
-                        &self.remote_fetch_retries,
-                        "blob",
-                        hash.as_str(),
-                        parsed,
-                        error,
-                    )
-                    .await
-                }
-            };
-        }
-        if let Some(bytes) = self.fetch_local_blob(hash).await? {
-            return Ok(Some(bytes));
+        if self.remote_cache.is_some() {
+            return self.fetch_blob_ephemeral(hash).await;
         }
         let parsed = iroh_blobs::Hash::from_str(hash.as_str())?;
-        let result = remote_fetch::fetch_bytes_ephemeral_with_cooldown(
-            &self.node,
-            &self.peers,
-            &self.remote_fetch_retries,
-            "blob",
-            hash.as_str(),
-            parsed,
-            "local blob unavailable",
-        )
-        .await?;
-        if let Some(bytes) = &result {
-            self.put_remote_blob(bytes.clone(), "application/octet-stream")
-                .await?;
+        match self.node.blobs().blobs().get_bytes(parsed).await {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(error) => {
+                remote_fetch::fetch_bytes_with_cooldown(
+                    &self.node,
+                    &self.peers,
+                    &self.remote_fetch_retries,
+                    "blob",
+                    hash.as_str(),
+                    parsed,
+                    error,
+                )
+                .await
+            }
         }
-        Ok(result)
     }
 
     async fn fetch_blob_ephemeral(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>> {

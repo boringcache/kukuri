@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const REMOTE_CACHE_CAPACITY_BYTES: i64 = 1024 * 1024 * 1024;
 pub const REMOTE_CACHE_UNUSED_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub const REMOTE_CACHE_RECLAIM_STEP: usize = 128;
+const REMOTE_CACHE_TOUCH_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 pub struct RemoteCacheReservation {
     counter: Arc<AtomicU64>,
@@ -36,8 +37,31 @@ async fn delete_cache_item(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     kind: &str,
     key: &str,
+    label_evictions: &mut Vec<String>,
 ) -> Result<()> {
     if kind == "projection" {
+        let hashes = sqlx::query_scalar::<_, String>(
+            "SELECT blob_hash FROM remote_adult_media_hash_refs WHERE object_id = ?1",
+        )
+        .bind(key)
+        .fetch_all(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM remote_adult_media_hash_refs WHERE object_id = ?1")
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+        for hash in hashes {
+            let deleted = sqlx::query(
+                "DELETE FROM adult_media_hashes WHERE blob_hash = ?1 AND is_protected = 0 \
+                 AND NOT EXISTS (SELECT 1 FROM remote_adult_media_hash_refs WHERE blob_hash = ?1)",
+            )
+            .bind(&hash)
+            .execute(&mut **tx)
+            .await?;
+            if deleted.rows_affected() != 0 {
+                label_evictions.push(hash);
+            }
+        }
         sqlx::query("DELETE FROM object_thread_cache WHERE object_id = ?1")
             .bind(key)
             .execute(&mut **tx)
@@ -47,15 +71,124 @@ async fn delete_cache_item(
             .execute(&mut **tx)
             .await?;
     }
-    sqlx::query("DELETE FROM remote_content_cache WHERE kind = ?1 AND cache_key = ?2")
-        .bind(kind)
-        .bind(key)
-        .execute(&mut **tx)
-        .await?;
+    let deleted =
+        sqlx::query("DELETE FROM remote_content_cache WHERE kind = ?1 AND cache_key = ?2")
+            .bind(kind)
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+    if kind == "adult_marker" && deleted.rows_affected() != 0 {
+        label_evictions.push(key.to_string());
+    }
     Ok(())
 }
 
 impl SqliteStore {
+    pub fn subscribe_adult_label_evictions(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.adult_label_evictions.subscribe()
+    }
+
+    pub(super) fn publish_adult_label_evictions(&self, hashes: Vec<String>) {
+        for hash in hashes.into_iter().collect::<HashSet<_>>() {
+            let _ = self.adult_label_evictions.send(hash);
+        }
+    }
+
+    pub(super) async fn available_remote_projections(
+        &self,
+        mut rows: Vec<ObjectProjectionRow>,
+    ) -> Result<Vec<ObjectProjectionRow>> {
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+        let now = now_ms()?;
+        let mut expired = QueryBuilder::<Sqlite>::new(
+            "SELECT cache_key FROM remote_content_cache \
+             WHERE kind = 'projection' AND is_protected = 0 AND last_used_at <= ",
+        );
+        expired.push_bind(now - REMOTE_CACHE_UNUSED_MS);
+        expired.push(" AND cache_key IN (");
+        let mut ids = expired.separated(", ");
+        for row in &rows {
+            ids.push_bind(row.object_id.as_str());
+        }
+        ids.push_unseparated(")");
+        let expired = expired
+            .build_query_scalar::<String>()
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        rows.retain(|row| !expired.contains(row.object_id.as_str()));
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+        let mut query =
+            QueryBuilder::<Sqlite>::new("UPDATE remote_content_cache SET last_used_at = ");
+        query.push_bind(now);
+        query.push(" WHERE kind = 'projection' AND last_used_at <= ");
+        query.push_bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS);
+        query.push(" AND cache_key IN (");
+        let mut ids = query.separated(", ");
+        for row in &rows {
+            ids.push_bind(row.object_id.as_str());
+        }
+        ids.push_unseparated(")");
+        query.build().execute(&self.pool).await?;
+        Ok(rows)
+    }
+
+    pub(super) async fn sync_remote_adult_hash_refs(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        row: &ObjectProjectionRow,
+        label_evictions: &mut Vec<String>,
+    ) -> Result<()> {
+        let previous = sqlx::query_scalar::<_, String>(
+            "SELECT blob_hash FROM remote_adult_media_hash_refs WHERE object_id = ?1",
+        )
+        .bind(row.object_id.as_str())
+        .fetch_all(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM remote_adult_media_hash_refs WHERE object_id = ?1")
+            .bind(row.object_id.as_str())
+            .execute(&mut **tx)
+            .await?;
+        for hash in adult_media_hashes_for_row(row)
+            .into_iter()
+            .collect::<HashSet<_>>()
+        {
+            sqlx::query(
+                "INSERT INTO adult_media_hashes (blob_hash, marked_at, is_protected) \
+                 VALUES (?1, ?2, 0) ON CONFLICT(blob_hash) DO NOTHING",
+            )
+            .bind(hash)
+            .bind(row.derived_at)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO remote_adult_media_hash_refs (object_id, blob_hash) VALUES (?1, ?2)",
+            )
+            .bind(row.object_id.as_str())
+            .bind(hash)
+            .execute(&mut **tx)
+            .await?;
+        }
+        for hash in previous {
+            let deleted = sqlx::query(
+                "DELETE FROM adult_media_hashes WHERE blob_hash = ?1 AND is_protected = 0 \
+                 AND NOT EXISTS (SELECT 1 FROM remote_adult_media_hash_refs WHERE blob_hash = ?1)",
+            )
+            .bind(&hash)
+            .execute(&mut **tx)
+            .await?;
+            if deleted.rows_affected() != 0 {
+                label_evictions.push(hash);
+            }
+        }
+        Ok(())
+    }
+
     pub fn empty_remote_cache_reservation(&self) -> RemoteCacheReservation {
         RemoteCacheReservation {
             counter: self.remote_cache_reserved.clone(),
@@ -81,6 +214,7 @@ impl SqliteStore {
             return Ok(false);
         }
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -104,6 +238,7 @@ impl SqliteStore {
                 &mut tx,
                 &row.get::<String, _>("kind"),
                 &row.get::<String, _>("cache_key"),
+                &mut label_evictions,
             )
             .await?;
             used -= row.get::<i64, _>("charged_bytes");
@@ -114,6 +249,7 @@ impl SqliteStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         if (used as u64).saturating_add(target) > REMOTE_CACHE_CAPACITY_BYTES as u64 {
             return Ok(false);
         }
@@ -127,6 +263,7 @@ impl SqliteStore {
     pub async fn reclaim_remote_cache_step(&self) -> Result<usize> {
         let _gate = self.remote_cache_gate.lock().await;
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -146,6 +283,7 @@ impl SqliteStore {
                 &mut tx,
                 &row.get::<String, _>("kind"),
                 &row.get::<String, _>("cache_key"),
+                &mut label_evictions,
             )
             .await?;
             reclaimed_bytes += row.get::<i64, _>("charged_bytes");
@@ -157,16 +295,19 @@ impl SqliteStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(count)
     }
 
     pub(super) async fn charge_remote_projection(
+        &self,
         tx: &mut sqlx::Transaction<'_, Sqlite>,
         row: &ObjectProjectionRow,
         budget: i64,
+        label_evictions: &mut Vec<String>,
     ) -> Result<bool> {
-        let charge = i64::try_from(serde_json::to_vec(row)?.len())? + 512;
-        Self::put_remote_content_in_tx(
+        let charge = i64::try_from(serde_json::to_vec(row)?.len())? * 2 + 512;
+        self.put_remote_content_in_tx(
             tx,
             "projection",
             row.object_id.as_str(),
@@ -177,6 +318,7 @@ impl SqliteStore {
             budget,
             now_ms()?,
             Some(charge),
+            label_evictions,
         )
         .await
     }
@@ -239,25 +381,30 @@ impl SqliteStore {
         let _gate = self.remote_cache_gate.lock().await;
         let reserved = i64::try_from(self.remote_cache_reserved.load(Ordering::Acquire))?;
         let mut tx = self.pool.begin().await?;
-        let admitted = Self::put_remote_content_in_tx(
-            &mut tx,
-            kind,
-            key,
-            scope,
-            payload,
-            record_key,
-            record_author,
-            budget.saturating_sub(reserved),
-            now,
-            None,
-        )
-        .await?;
+        let mut label_evictions = Vec::new();
+        let admitted = self
+            .put_remote_content_in_tx(
+                &mut tx,
+                kind,
+                key,
+                scope,
+                payload,
+                record_key,
+                record_author,
+                budget.saturating_sub(reserved),
+                now,
+                None,
+                &mut label_evictions,
+            )
+            .await?;
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(admitted)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn put_remote_content_in_tx(
+        &self,
         tx: &mut sqlx::Transaction<'_, Sqlite>,
         kind: &str,
         key: &str,
@@ -268,9 +415,10 @@ impl SqliteStore {
         budget: i64,
         now: i64,
         charged_bytes: Option<i64>,
+        label_evictions: &mut Vec<String>,
     ) -> Result<bool> {
         anyhow::ensure!(
-            matches!(kind, "blob" | "record" | "projection"),
+            matches!(kind, "blob" | "record" | "projection" | "adult_marker"),
             "unknown remote cache kind"
         );
         let charge = charged_bytes
@@ -338,7 +486,7 @@ impl SqliteStore {
             let Some(victim) = victim else { break };
             let victim_kind: String = victim.get("kind");
             let victim_key: String = victim.get("cache_key");
-            delete_cache_item(tx, &victim_kind, &victim_key).await?;
+            delete_cache_item(tx, &victim_kind, &victim_key, label_evictions).await?;
             next_used -= victim.get::<i64, _>("charged_bytes");
             reclaimed += 1;
         }
@@ -391,11 +539,13 @@ impl SqliteStore {
         .await?;
         let Some(row) = row else { return Ok(None) };
         sqlx::query(
-            "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3",
+            "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3 \
+             AND last_used_at <= ?4",
         )
         .bind(now)
         .bind(kind)
         .bind(key)
+        .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
         .execute(&self.pool)
         .await?;
         Ok(Some(row.get("payload")))
@@ -444,10 +594,12 @@ impl SqliteStore {
                 continue;
             }
             sqlx::query(
-                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = 'record' AND cache_key = ?2",
+                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = 'record' AND cache_key = ?2 \
+                 AND last_used_at <= ?3",
             )
             .bind(now)
             .bind(row.get::<String, _>("cache_key"))
+            .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
             .execute(&self.pool)
             .await?;
             result.push(row.get("payload"));
@@ -485,11 +637,13 @@ impl SqliteStore {
         .await?;
         if let Some(row) = row {
             sqlx::query(
-                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3",
+                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3 \
+                 AND last_used_at <= ?4",
             )
             .bind(now)
             .bind(kind)
             .bind(key)
+            .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
             .execute(&self.pool)
             .await?;
             Ok(Some(u64::try_from(row.get::<i64, _>("bytes"))?))
@@ -517,19 +671,6 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|row| row.get("chunk")))
-    }
-
-    pub async fn protect_remote_content(
-        &self,
-        kind: &str,
-        key: &str,
-        reference: &str,
-    ) -> Result<()> {
-        let _gate = self.remote_cache_gate.lock().await;
-        let mut tx = self.pool.begin().await?;
-        Self::add_remote_protected_ref(&mut tx, kind, key, reference).await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     async fn add_remote_protected_ref(
@@ -570,10 +711,12 @@ impl SqliteStore {
     }
 
     pub(super) async fn replace_remote_protected_refs(
+        &self,
         tx: &mut sqlx::Transaction<'_, Sqlite>,
         reference: &str,
         desired: &[(String, String)],
         budget: i64,
+        label_evictions: &mut Vec<String>,
     ) -> Result<()> {
         let old = sqlx::query(
             "SELECT kind, cache_key FROM remote_content_cache_protected_ref WHERE ref_id = ?1",
@@ -641,7 +784,7 @@ impl SqliteStore {
                 .execute(&mut **tx)
                 .await?;
             } else {
-                delete_cache_item(tx, kind, key).await?;
+                delete_cache_item(tx, kind, key, label_evictions).await?;
             }
         }
         for (kind, key) in desired.difference(&old) {
@@ -652,6 +795,7 @@ impl SqliteStore {
 
     pub async fn remove_remote_content(&self, kind: &str, key: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
             .execute(&mut *tx)
             .await?;
@@ -671,289 +815,13 @@ impl SqliteStore {
                 .execute(&mut *tx)
                 .await?;
             }
-            delete_cache_item(&mut tx, kind, key).await?;
+            delete_cache_item(&mut tx, kind, key, &mut label_evictions).await?;
         }
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use kukuri_core::PayloadRef;
-
-    fn remote_post(object_id: &str) -> ObjectProjectionRow {
-        let hash = BlobHash::new("a".repeat(64));
-        ObjectProjectionRow {
-            object_id: EnvelopeId::from(object_id),
-            topic_id: "topic".into(),
-            channel_id: "public".into(),
-            author_pubkey: "b".repeat(64),
-            created_at: 1,
-            object_kind: "post".into(),
-            root_object_id: None,
-            reply_to_object_id: None,
-            payload_ref: PayloadRef::BlobText {
-                hash: hash.clone(),
-                mime: "text/plain".into(),
-                bytes: 1,
-            },
-            content: Some("body".into()),
-            attachments: Vec::new(),
-            repost_of: None,
-            content_labels: Vec::new(),
-            source_replica_id: ReplicaId::new("bucket::v1::topic::746f706963::1"),
-            source_key: format!("objects/{object_id}/envelope"),
-            source_envelope_id: EnvelopeId::from(object_id),
-            source_blob_hash: Some(hash),
-            source_docs_author: None,
-            derived_at: 1,
-            projection_version: 3,
-        }
-    }
-
-    #[tokio::test]
-    async fn remote_projection_and_its_page_index_are_reclaimed_together() {
-        let store = SqliteStore::connect_memory().await.unwrap();
-        let row = remote_post("remote-1");
-        store
-            .put_remote_object_projection(row.clone())
-            .await
-            .unwrap();
-        let charged = sqlx::query_scalar::<_, i64>(
-            "SELECT used_bytes FROM remote_content_cache_usage WHERE id = 1",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert!(charged > 0);
-        assert!(
-            store
-                .put_remote_content_with_budget(
-                    "blob",
-                    "x",
-                    "s",
-                    b"v",
-                    None,
-                    None,
-                    100,
-                    now_ms().unwrap()
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            store
-                .get_object_projection(&row.object_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM object_thread_cache WHERE object_id = ?1",
-        )
-        .bind(row.object_id.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[tokio::test]
-    async fn bookmark_protects_shared_remote_hash_until_its_reference_is_removed() {
-        let store = SqliteStore::connect_memory().await.unwrap();
-        let row = remote_post("remote-bookmark");
-        let hash = match &row.payload_ref {
-            PayloadRef::BlobText { hash, .. } => hash.clone(),
-            _ => unreachable!(),
-        };
-        store
-            .put_remote_object_projection(row.clone())
-            .await
-            .unwrap();
-        assert!(
-            store
-                .put_remote_content("blob", hash.as_str(), "blob", b"body")
-                .await
-                .unwrap()
-        );
-        let bookmark = BookmarkedPostRow {
-            source_object_id: row.object_id.clone(),
-            source_envelope_id: row.source_envelope_id.clone(),
-            source_replica_id: row.source_replica_id.clone(),
-            topic_id: row.topic_id.clone(),
-            channel_id: row.channel_id.clone(),
-            author_pubkey: row.author_pubkey.clone(),
-            created_at: row.created_at,
-            object_kind: row.object_kind.clone(),
-            payload_ref: row.payload_ref.clone(),
-            content: row.content.clone(),
-            attachments: row.attachments.clone(),
-            reply_to_object_id: row.reply_to_object_id.clone(),
-            root_object_id: row.root_object_id.clone(),
-            repost_of: row.repost_of.clone(),
-            bookmarked_at: 2,
-        };
-        store.put_bookmarked_post(bookmark.clone()).await.unwrap();
-        let mut second = bookmark;
-        second.source_object_id = EnvelopeId::from("second-bookmark");
-        store.put_bookmarked_post(second.clone()).await.unwrap();
-        let protected = sqlx::query_scalar::<_, i64>(
-            "SELECT is_protected FROM remote_content_cache WHERE kind = 'blob' AND cache_key = ?1",
-        )
-        .bind(hash.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(protected, 1);
-        store.remove_bookmarked_post(&row.object_id).await.unwrap();
-        let protected = sqlx::query_scalar::<_, i64>(
-            "SELECT is_protected FROM remote_content_cache WHERE kind = 'blob' AND cache_key = ?1",
-        )
-        .bind(hash.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(protected, 1);
-        store
-            .remove_bookmarked_post(&second.source_object_id)
-            .await
-            .unwrap();
-        let protected = sqlx::query_scalar::<_, i64>(
-            "SELECT is_protected FROM remote_content_cache WHERE kind = 'blob' AND cache_key = ?1",
-        )
-        .bind(hash.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(protected, 0);
-    }
-
-    #[tokio::test]
-    async fn remote_cache_reclaims_lru_without_deleting_protected_content() {
-        let store = SqliteStore::connect_memory().await.unwrap();
-        let now = now_ms().unwrap();
-        let payload = [7u8; 100];
-        let charge = 100 + "blob".len() + "a".len() + "scope".len() + 64;
-        let budget = (charge * 2) as i64;
-        for (key, at) in [("a", now - 3), ("b", now - 2)] {
-            assert!(
-                store
-                    .put_remote_content_with_budget(
-                        "blob", key, "scope", &payload, None, None, budget, at
-                    )
-                    .await
-                    .unwrap()
-            );
-        }
-        store
-            .protect_remote_content("blob", "a", "bookmark:1")
-            .await
-            .unwrap();
-        for (key, at) in [("c", now - 1), ("d", now)] {
-            assert!(
-                store
-                    .put_remote_content_with_budget(
-                        "blob", key, "scope", &payload, None, None, budget, at
-                    )
-                    .await
-                    .unwrap()
-            );
-        }
-        assert!(
-            store
-                .get_remote_content("blob", "a")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            store
-                .get_remote_content("blob", "b")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let used = sqlx::query_scalar::<_, i64>(
-            "SELECT used_bytes FROM remote_content_cache_usage WHERE id = 1",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(used, budget);
-    }
-
-    #[tokio::test]
-    async fn in_flight_reservation_counts_against_cache_writes_and_releases_on_drop() {
-        let store = SqliteStore::connect_memory().await.unwrap();
-        let mut reservation = store.empty_remote_cache_reservation();
-        assert!(
-            store
-                .reserve_remote_cache_bytes(
-                    &mut reservation,
-                    REMOTE_CACHE_CAPACITY_BYTES as u64 - 80,
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            !store
-                .put_remote_content("blob", "reserved", "scope", &[1; 100])
-                .await
-                .unwrap()
-        );
-        drop(reservation);
-        assert!(
-            store
-                .put_remote_content("blob", "reserved", "scope", &[1; 100])
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn remote_cache_reclaims_at_most_128_expired_items_per_write() {
-        let store = SqliteStore::connect_memory().await.unwrap();
-        let now = now_ms().unwrap();
-        let old = now - REMOTE_CACHE_UNUSED_MS - 1;
-        for i in 0..129 {
-            store
-                .put_remote_content_with_budget(
-                    "record",
-                    &format!("item-{i}"),
-                    "scope",
-                    b"v",
-                    None,
-                    None,
-                    REMOTE_CACHE_CAPACITY_BYTES,
-                    old,
-                )
-                .await
-                .unwrap();
-        }
-        store
-            .put_remote_content_with_budget(
-                "record",
-                "fresh",
-                "scope",
-                b"v",
-                None,
-                None,
-                REMOTE_CACHE_CAPACITY_BYTES,
-                now,
-            )
-            .await
-            .unwrap();
-        let expired = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM remote_content_cache WHERE last_used_at < ?1",
-        )
-        .bind(now - REMOTE_CACHE_UNUSED_MS)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(expired, 1);
-        assert_eq!(store.reclaim_remote_cache_step().await.unwrap(), 1);
-        assert_eq!(store.reclaim_remote_cache_step().await.unwrap(), 0);
-    }
-}
+mod tests;

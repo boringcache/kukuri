@@ -722,7 +722,7 @@ reference_id?: string | null,
  */
 disputed_risk_signal_id?: string | null, };
 
-export type RuntimeEvent = { "type": "notification_status_changed" } | { "type": "sync_status_changed", sync_status?: SyncStatus | null, community_node_statuses?: Array<CommunityNodeNodeStatus> | null, };
+export type RuntimeEvent = { "type": "notification_status_changed" } | { "type": "adult_media_label_evicted", hash?: string | null, } | { "type": "sync_status_changed", sync_status?: SyncStatus | null, community_node_statuses?: Array<CommunityNodeNodeStatus> | null, };
 
 export type CreatePostRequest = { topic: string, content: string, reply_to?: string | null, channel_ref: ChannelRef, attachments: Array<CreateAttachmentRequest>, 
 /**

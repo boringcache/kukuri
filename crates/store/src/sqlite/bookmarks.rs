@@ -12,58 +12,17 @@ fn bookmark_cache_refs(row: &BookmarkedPostRow) -> Vec<(String, String)> {
             .iter()
             .map(|attachment| ("blob".to_string(), attachment.hash.as_str().to_string())),
     );
+    if let Some(snapshot) = &row.repost_of {
+        refs.extend(
+            snapshot
+                .attachments
+                .iter()
+                .map(|attachment| ("blob".to_string(), attachment.hash.as_str().to_string())),
+        );
+    }
     refs.sort();
     refs.dedup();
     refs
-}
-
-#[async_trait]
-impl BlobCacheStore for SqliteStore {
-    async fn mark_blob_status(&self, hash: &BlobHash, status: BlobCacheStatus) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO blob_objects (blob_hash, status)
-            VALUES (?1, ?2)
-            ON CONFLICT(blob_hash) DO UPDATE SET status = excluded.status
-            "#,
-        )
-        .bind(hash.as_str())
-        .bind(match status {
-            BlobCacheStatus::Missing => "missing",
-            BlobCacheStatus::Available => "available",
-            BlobCacheStatus::Pinned => "pinned",
-        })
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn mark_blob_statuses(&self, rows: Vec<(BlobHash, BlobCacheStatus)>) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-
-        let mut tx = self.pool.begin().await?;
-        for (hash, status) in rows {
-            sqlx::query(
-                r#"
-                INSERT INTO blob_objects (blob_hash, status)
-                VALUES (?1, ?2)
-                ON CONFLICT(blob_hash) DO UPDATE SET status = excluded.status
-                "#,
-            )
-            .bind(hash.as_str())
-            .bind(match status {
-                BlobCacheStatus::Missing => "missing",
-                BlobCacheStatus::Available => "available",
-                BlobCacheStatus::Pinned => "pinned",
-            })
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -298,6 +257,7 @@ impl ReactionBookmarkStore for SqliteStore {
                     .load(std::sync::atomic::Ordering::Acquire),
             )?);
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         sqlx::query(
             r#"
             INSERT INTO bookmarked_posts (
@@ -357,8 +317,16 @@ impl ReactionBookmarkStore for SqliteStore {
         .bind(row.bookmarked_at)
         .execute(&mut *tx)
         .await?;
-        Self::replace_remote_protected_refs(&mut tx, &reference, &refs, budget).await?;
+        self.replace_remote_protected_refs(
+            &mut tx,
+            &reference,
+            &refs,
+            budget,
+            &mut label_evictions,
+        )
+        .await?;
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(())
     }
 
@@ -427,6 +395,7 @@ impl ReactionBookmarkStore for SqliteStore {
                     .load(std::sync::atomic::Ordering::Acquire),
             )?);
         let mut tx = self.pool.begin().await?;
+        let mut label_evictions = Vec::new();
         sqlx::query(
             r#"
             DELETE FROM bookmarked_posts
@@ -436,14 +405,16 @@ impl ReactionBookmarkStore for SqliteStore {
         .bind(source_object_id.as_str())
         .execute(&mut *tx)
         .await?;
-        Self::replace_remote_protected_refs(
+        self.replace_remote_protected_refs(
             &mut tx,
             &format!("bookmark:{}", source_object_id.as_str()),
             &[],
             budget,
+            &mut label_evictions,
         )
         .await?;
         tx.commit().await?;
+        self.publish_adult_label_evictions(label_evictions);
         Ok(())
     }
 }

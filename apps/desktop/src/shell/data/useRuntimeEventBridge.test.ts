@@ -27,7 +27,7 @@ describe('useRuntimeEventBridge', () => {
 
   test('does not subscribe outside the Tauri runtime', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
-    renderHook(() => useRuntimeEventBridge(vi.fn(), vi.fn()));
+    renderHook(() => useRuntimeEventBridge(vi.fn(), vi.fn(), vi.fn()));
     expect(listenMock).not.toHaveBeenCalled();
   });
 
@@ -39,12 +39,17 @@ describe('useRuntimeEventBridge', () => {
     });
     const onNotificationStatusChanged = vi.fn();
     const onSyncStatusChanged = vi.fn();
+    const onAdultMediaLabelEvicted = vi.fn();
     const api = createDesktopMockApi();
     const syncStatus = await api.getSyncStatus();
     const communityNodeStatuses = await api.getCommunityNodeStatuses();
 
     renderHook(() =>
-      useRuntimeEventBridge(onNotificationStatusChanged, onSyncStatusChanged)
+      useRuntimeEventBridge(
+        onNotificationStatusChanged,
+        onSyncStatusChanged,
+        onAdultMediaLabelEvicted
+      )
     );
     await vi.waitFor(() => expect(capturedCallback).toBeDefined());
 
@@ -67,6 +72,10 @@ describe('useRuntimeEventBridge', () => {
     });
     expect(onSyncStatusChanged).toHaveBeenNthCalledWith(1, syncStatus, null);
     expect(onSyncStatusChanged).toHaveBeenNthCalledWith(2, null, communityNodeStatuses);
+    capturedCallback?.({ payload: { type: 'adult_media_label_evicted', hash: 'hash-1' } });
+    capturedCallback?.({ payload: { type: 'adult_media_label_evicted', hash: null } });
+    expect(onAdultMediaLabelEvicted).toHaveBeenNthCalledWith(1, 'hash-1');
+    expect(onAdultMediaLabelEvicted).toHaveBeenNthCalledWith(2, null);
   });
 
   test('ignores unknown runtime event types', async () => {
@@ -77,14 +86,20 @@ describe('useRuntimeEventBridge', () => {
     });
     const onNotificationStatusChanged = vi.fn();
     const onSyncStatusChanged = vi.fn();
+    const onAdultMediaLabelEvicted = vi.fn();
 
     renderHook(() =>
-      useRuntimeEventBridge(onNotificationStatusChanged, onSyncStatusChanged)
+      useRuntimeEventBridge(
+        onNotificationStatusChanged,
+        onSyncStatusChanged,
+        onAdultMediaLabelEvicted
+      )
     );
     await vi.waitFor(() => expect(capturedCallback).toBeDefined());
 
     capturedCallback?.({ payload: { type: 'future_event' } as unknown as RuntimeEvent });
     expect(onNotificationStatusChanged).not.toHaveBeenCalled();
     expect(onSyncStatusChanged).not.toHaveBeenCalled();
+    expect(onAdultMediaLabelEvicted).not.toHaveBeenCalled();
   });
 });

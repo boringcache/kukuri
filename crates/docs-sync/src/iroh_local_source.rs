@@ -40,7 +40,7 @@ impl IrohDocsSync {
         Ok(records)
     }
 
-    pub(super) async fn read_local_source_owned(
+    pub(crate) async fn read_local_source_owned(
         &self,
         replica: &ReplicaId,
         key: &str,

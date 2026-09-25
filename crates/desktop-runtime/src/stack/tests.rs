@@ -152,7 +152,7 @@ async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
         &[],
         DhtDiscoveryOptions::disabled(),
         TransportRelayConfig::default(),
-        Some(candidate_store),
+        Some(candidate_store.clone()),
     )
     .await
     .expect("stack a");
@@ -258,6 +258,20 @@ async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
             .blob_service
             .local_blob_status(&stored.hash)
             .await
+            .expect("pre-guard cache status"),
+        BlobStatus::Missing,
+        "network fetch must not persist before the caller verifies and saves"
+    );
+    stack_a
+        .blob_service
+        .put_remote_blob(b"candidate-ledger".to_vec(), "text/plain")
+        .await
+        .expect("store guarded remote blob");
+    assert_eq!(
+        stack_a
+            .blob_service
+            .local_blob_status(&stored.hash)
+            .await
             .expect("app-owned cache status"),
         BlobStatus::Available
     );
@@ -323,6 +337,26 @@ async fn runtime_connectivity_rebuild_preserves_manual_ticket_peers() {
         .await
         .expect("stack c shutdown timeout")
         .expect("stack c shutdown");
+    let reopened = SharedIrohStack::new(
+        &dir.path().join("stack-a"),
+        TransportNetworkConfig::loopback(),
+        &discovery_config,
+        &[],
+        DhtDiscoveryOptions::disabled(),
+        TransportRelayConfig::default(),
+        Some(candidate_store),
+    )
+    .await
+    .expect("reopen cached reader");
+    assert_eq!(
+        reopened
+            .blob_service
+            .fetch_local_blob(&stored.hash)
+            .await
+            .expect("redisplay after restart"),
+        Some(b"candidate-ledger".to_vec())
+    );
+    reopened.shutdown_checked().await.unwrap();
 }
 
 #[tokio::test]

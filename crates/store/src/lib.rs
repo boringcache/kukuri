@@ -25,7 +25,7 @@ pub use sqlite::{
     StoreStartupError,
 };
 pub use traits::{
-    BlobCacheStore, ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
+    ContentObservationStore, DirectMessageStore, LiveGameProjectionStore,
     NOTIFICATION_DISPATCH_PAGE_SIZE, NOTIFICATION_PAGE_SIZE, NotificationStore,
     ObjectProjectionStore, PostWithdrawalStore, ProjectionStore, ReactionBookmarkStore,
     SocialProjectionStore, Store,

@@ -31,3 +31,20 @@ CREATE TABLE remote_content_cache_protected_ref (
 );
 CREATE INDEX remote_content_cache_protected_ref_owner
     ON remote_content_cache_protected_ref(ref_id, kind, cache_key);
+
+-- Pre-existing markers remain protected until old-storage migration. New
+-- remote markers are owned by their cached projection and reclaimed with it.
+ALTER TABLE adult_media_hashes
+    ADD COLUMN is_protected INTEGER NOT NULL DEFAULT 1 CHECK (is_protected IN (0, 1));
+
+CREATE TABLE remote_adult_media_hash_refs (
+    object_id TEXT NOT NULL,
+    blob_hash TEXT NOT NULL,
+    PRIMARY KEY (object_id, blob_hash)
+);
+CREATE INDEX remote_adult_media_hash_refs_hash
+    ON remote_adult_media_hash_refs(blob_hash, object_id);
+
+-- This write-only status table has no reader. Display status is read from the
+-- local blob service instead of retaining one row per historical hash.
+DROP TABLE blob_objects;

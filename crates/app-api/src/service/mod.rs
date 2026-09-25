@@ -72,7 +72,7 @@ pub(crate) use kukuri_docs_sync::{
 };
 pub(crate) use kukuri_metaverse_host::DomeSessionRuntime;
 pub(crate) use kukuri_store::{
-    AuthorRelationshipProjectionRow, BlobCacheStatus, BlobCacheStore, BookmarkedCustomReactionRow,
+    AuthorRelationshipProjectionRow, BlobCacheStatus, BookmarkedCustomReactionRow,
     BookmarkedPostRow, DirectMessageConversationRow, DirectMessageMessageRow,
     DirectMessageOutboxRow, DirectMessageTombstoneRow, DomeConnectionProjectionRow,
     DomeHostingProjectionRow, GameRoomProjectionRow, LiveSessionProjectionRow, MutedAuthorRow,

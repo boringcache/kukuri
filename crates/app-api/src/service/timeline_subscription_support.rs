@@ -109,8 +109,6 @@ impl AppService {
         &self,
         replica: &ReplicaId,
         envelope: KukuriEnvelope,
-        _stored_blob: Option<StoredBlob>,
-        attachments: Vec<(AssetRole, StoredBlob)>,
     ) -> Result<()> {
         // 自分の投稿も、他人の投稿と同じ検証(署名、書き込む replica と topic / channel の整合)を通す(#1248)。
         // docs は読まない。header と行は envelope から作るので、remote の反映が作る行と同じ値になる。
@@ -147,22 +145,6 @@ impl AppService {
             projection_row_from_post(&post, content),
         )
         .await?;
-        if let PayloadRef::BlobText { hash, .. } = &object.payload_ref {
-            BlobCacheStore::mark_blob_status(
-                self.services.projection_store.as_ref(),
-                hash,
-                BlobCacheStatus::Available,
-            )
-            .await?;
-        }
-        for (_, attachment) in attachments {
-            BlobCacheStore::mark_blob_status(
-                self.services.projection_store.as_ref(),
-                &attachment.hash,
-                BlobCacheStatus::Available,
-            )
-            .await?;
-        }
         *self.last_sync_ts.lock().await = Some(Utc::now().timestamp_millis());
         Ok(())
     }
@@ -375,11 +357,6 @@ impl AppService {
                             "failed to store a locally available post body"
                         );
                     }
-                    let _ = self
-                        .services
-                        .projection_store
-                        .mark_blob_status(hash, BlobCacheStatus::Available)
-                        .await;
                     self.services.missing_body_ledger.forget(hash);
                 }
                 continue;
@@ -479,9 +456,6 @@ impl AppService {
                         anyhow::ensure!(stored.hash == hash, "recovered body hash changed");
                         current.content = Some(text);
                         services.put_post_projection(current).await?;
-                        projection_store
-                            .mark_blob_status(&hash, BlobCacheStatus::Available)
-                            .await?;
                     }
                     Ok(())
                 }

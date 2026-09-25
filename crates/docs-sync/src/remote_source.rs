@@ -172,6 +172,18 @@ impl DocsSync for RemoteDocsSource {
             return Ok(());
         };
         let docs_author = record.docs_author.as_deref().expect("matched author");
+        if self
+            .inner
+            .read_local_source_owned(replica, key, Some(docs_author), 1)
+            .await
+            .is_ok_and(|local| {
+                local
+                    .iter()
+                    .any(|existing| existing.content_hash == record.content_hash)
+            })
+        {
+            return Ok(());
+        }
         let payload = serde_json::to_vec(&DocReadRecord {
             key: record.key.clone(),
             value: record.value.clone(),

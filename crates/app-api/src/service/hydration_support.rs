@@ -51,12 +51,6 @@ async fn hydrate_verified_live_session(
     verified: &VerifiedLiveSession,
 ) -> Result<bool> {
     projection_store
-        .mark_blob_status(
-            &verified.state().current_manifest.hash,
-            BlobCacheStatus::Available,
-        )
-        .await?;
-    projection_store
         .upsert_live_session_cache(live_projection_row(verified))
         .await?;
     Ok(true)

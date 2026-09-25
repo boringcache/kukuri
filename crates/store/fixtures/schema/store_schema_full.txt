@@ -1,6 +1,7 @@
 table adult_media_hashes
   column cid=0 name=blob_hash type=TEXT notnull=1 default=None pk=1
   column cid=1 name=marked_at type=INTEGER notnull=1 default=Some("0") pk=0
+  column cid=2 name=is_protected type=INTEGER notnull=1 default=Some("1") pk=0
 table author_docs_authors
   column cid=0 name=author_pubkey type=TEXT notnull=1 default=None pk=1
   column cid=1 name=docs_author type=TEXT notnull=1 default=None pk=0
@@ -14,9 +15,6 @@ table author_relationship_cache
   column cid=5 name=friend_of_friend type=INTEGER notnull=1 default=None pk=0
   column cid=6 name=friend_of_friend_via_pubkeys_json type=TEXT notnull=1 default=None pk=0
   column cid=7 name=derived_at type=INTEGER notnull=1 default=None pk=0
-table blob_objects
-  column cid=0 name=blob_hash type=TEXT notnull=0 default=None pk=1
-  column cid=1 name=status type=TEXT notnull=1 default=None pk=0
 table block_edges
   column cid=0 name=subject_pubkey type=TEXT notnull=1 default=None pk=1
   column cid=1 name=target_pubkey type=TEXT notnull=1 default=None pk=2
@@ -286,6 +284,9 @@ table reaction_cache
   column cid=13 name=source_envelope_id type=TEXT notnull=1 default=None pk=0
   column cid=14 name=derived_at type=INTEGER notnull=1 default=None pk=0
   column cid=15 name=projection_version type=INTEGER notnull=1 default=None pk=0
+table remote_adult_media_hash_refs
+  column cid=0 name=object_id type=TEXT notnull=1 default=None pk=1
+  column cid=1 name=blob_hash type=TEXT notnull=1 default=None pk=2
 table remote_content_cache
   column cid=0 name=kind type=TEXT notnull=1 default=None pk=1
   column cid=1 name=cache_key type=TEXT notnull=1 default=None pk=2
@@ -536,6 +537,10 @@ index peer_candidates_window table=peer_candidates unique=0 origin=c partial=0
   key seqno=2 cid=5 name=Some("seen_ms")
   key seqno=3 cid=2 name=Some("endpoint_id")
   sql=Some("CREATE INDEX peer_candidates_window ON peer_candidates (scope, source, seen_ms, endpoint_id)")
+index remote_adult_media_hash_refs_hash table=remote_adult_media_hash_refs unique=0 origin=c partial=0
+  key seqno=0 cid=1 name=Some("blob_hash")
+  key seqno=1 cid=0 name=Some("object_id")
+  sql=Some("CREATE INDEX remote_adult_media_hash_refs_hash ON remote_adult_media_hash_refs(blob_hash, object_id)")
 index remote_content_cache_lru table=remote_content_cache unique=0 origin=c partial=0
   key seqno=0 cid=7 name=Some("is_protected")
   key seqno=1 cid=8 name=Some("last_used_at")
@@ -561,9 +566,6 @@ index sqlite_autoindex_author_docs_authors_1 table=author_docs_authors unique=1 
 index sqlite_autoindex_author_relationship_cache_1 table=author_relationship_cache unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("local_author_pubkey")
   key seqno=1 cid=1 name=Some("author_pubkey")
-  sql=None
-index sqlite_autoindex_blob_objects_1 table=blob_objects unique=1 origin=pk partial=0
-  key seqno=0 cid=0 name=Some("blob_hash")
   sql=None
 index sqlite_autoindex_block_edges_1 table=block_edges unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("subject_pubkey")
@@ -662,6 +664,10 @@ index sqlite_autoindex_reaction_cache_1 table=reaction_cache unique=1 origin=pk 
   key seqno=0 cid=0 name=Some("source_replica_id")
   key seqno=1 cid=1 name=Some("target_object_id")
   key seqno=2 cid=2 name=Some("reaction_id")
+  sql=None
+index sqlite_autoindex_remote_adult_media_hash_refs_1 table=remote_adult_media_hash_refs unique=1 origin=pk partial=0
+  key seqno=0 cid=0 name=Some("object_id")
+  key seqno=1 cid=1 name=Some("blob_hash")
   sql=None
 index sqlite_autoindex_remote_content_cache_1 table=remote_content_cache unique=1 origin=pk partial=0
   key seqno=0 cid=0 name=Some("kind")
