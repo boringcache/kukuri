@@ -1,6 +1,6 @@
 # Linux cache comparison
 
-Status: preparing the workflow. Namespace organization enrollment is pending.
+Status: Namespace is connected to this repository. Preparing the full Linux cold run.
 Source: kukuri-app/kukuri `ff491fa12f84e021ead2ac2ad13a60718eac7361`.
 Branch: `linux-cache-trial` in `boringcache/kukuri`.
 
@@ -36,14 +36,13 @@ workflow experiment using the existing cache connection.
 Dispatch `Kukuri Linux cache comparison` (`kukuri-fast.yml`) on this branch:
 
 - `provider`: `boringcache` or `namespace`.
-- `jobs`: `small`, `large`, or `all`. Small selects the three former 4-vCPU jobs.
 - `phase`: `cold` seeds, `warm` restores without publishing for BoringCache,
   and `commit` requires a hit and publishes the real source change.
 - `cli_version`: optional BoringCache CLI canary override; normally empty.
 
 Cache identities are separate from the earlier validation. Native Namespace
-tags are also separate from Kukuri's upstream tags. Run cold once for each
-selected group, then warm at the exact same commit. No sccache layer is added
+tags are also separate from Kukuri's upstream tags. Every run includes all eight Linux jobs. Run cold once, then warm at the exact
+same commit in this workflow stream. No sccache layer is added
 in this first directory-cache comparison. The upstream pnpm cache setting is
 preserved for both providers. Report any difference in the available pnpm cache
 state; it is outside the Rust directory-cache comparison.
@@ -57,5 +56,8 @@ just as the upstream desktop and harness jobs share their tags.
 
 The trial has a 32-vCPU Linux concurrency limit. Separate queue time from job
 duration; the baseline's full workflow cannot reproduce Kukuri's Team capacity.
-Namespace enrollment requires a separate approval because it grants GitHub
-repository access. The three GitHub jobs can run before enrollment.
+Namespace enrollment was approved and completed with only this repository
+selected. The earlier three-job GitHub run is a pilot, excluded from the final
+comparison. The full BoringCache profile uses new tags so that pilot cannot
+prewarm its cold run. Run labels identify the cache provider and phase; job
+labels identify the actual runner provider.

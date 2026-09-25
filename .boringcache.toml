@@ -2,35 +2,35 @@ workspace = "boringcache/kukuri"
 
 [entries.cargo-registry]
 path = "~/.cargo/registry"
-tag = "kukuri-linux-20260925-cargo-registry"
+tag = "kukuri-linux-full-20260925-cargo-registry"
 
 [entries.cargo-git]
 path = "~/.cargo/git"
-tag = "kukuri-linux-20260925-cargo-git"
+tag = "kukuri-linux-full-20260925-cargo-git"
 
 [entries.target-rust-static]
 path = "target"
-tag = "kukuri-linux-20260925-rust-static"
+tag = "kukuri-linux-full-20260925-rust-static"
 
 [entries.target-rust-tests]
 path = "target"
-tag = "kukuri-linux-20260925-rust-tests"
+tag = "kukuri-linux-full-20260925-rust-tests"
 
 [entries.target-desktop]
 path = "target"
-tag = "kukuri-linux-20260925-desktop"
+tag = "kukuri-linux-full-20260925-desktop"
 
 [entries.target-cn]
 path = "target"
-tag = "kukuri-linux-20260925-cn"
+tag = "kukuri-linux-full-20260925-cn"
 
 [entries.target-cn-e2e]
 path = "target"
-tag = "kukuri-linux-20260925-cn-e2e"
+tag = "kukuri-linux-full-20260925-cn-e2e"
 
 [entries.target-harness]
 path = "target"
-tag = "kukuri-linux-20260925-harness"
+tag = "kukuri-linux-full-20260925-harness"
 
 [profiles.linux-rust-static]
 entries = ["cargo-registry", "cargo-git", "target-rust-static"]

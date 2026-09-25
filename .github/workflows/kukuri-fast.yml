@@ -1,5 +1,5 @@
 name: Kukuri Linux cache comparison
-run-name: Linux ${{ inputs.provider }} ${{ inputs.jobs }} ${{ inputs.phase }}
+run-name: Kukuri Linux ${{ inputs.provider }} ${{ inputs.phase }}
 
 on:
   workflow_dispatch:
@@ -9,11 +9,6 @@ on:
         type: choice
         options: [boringcache, namespace]
         default: boringcache
-      jobs:
-        description: Small selects the three upstream 4-vCPU jobs
-        type: choice
-        options: [small, large, all]
-        default: small
       phase:
         description: Cold seeds, warm restores, commit updates the cache
         type: choice
@@ -39,8 +34,8 @@ env:
 
 jobs:
   linux-rust-static:
-    name: ${{ inputs.provider }} linux-rust-static ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    name: Namespace linux-rust-static ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-static"]') }}
     timeout-minutes: 45
     steps:
@@ -132,8 +127,8 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-rust-tests:
-    name: ${{ inputs.provider }} linux-rust-tests ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    name: Namespace linux-rust-tests ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-tests"]') }}
     timeout-minutes: 60
     steps:
@@ -215,8 +210,8 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-desktop-ui:
-    name: ${{ inputs.provider }} linux-desktop-ui ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-desktop-ui ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
     timeout-minutes: 45
     steps:
@@ -310,8 +305,8 @@ jobs:
     # #1121: Playwright は CPU を使い切るため、4 vCPU では worker を増やしても速くならず
     # metaverse の 3D test が timeout で落ちた。8 vCPU に戻すと既定で 4 worker になり、
     # 1 run あたりの vCPU × 分はほぼ同じまま所要時間が半分になる。cache-tag は据え置き。
-    name: ${{ inputs.provider }} linux-desktop-browser ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    name: Namespace linux-desktop-browser ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
     timeout-minutes: 45
     steps:
@@ -418,8 +413,8 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-cn:
-    name: ${{ inputs.provider }} linux-cn ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    name: Namespace linux-cn ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn"]') }}
     timeout-minutes: 60
     steps:
@@ -494,8 +489,8 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-cn-e2e:
-    name: ${{ inputs.provider }} linux-cn-e2e ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    name: Namespace linux-cn-e2e ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn-e2e"]') }}
     timeout-minutes: 60
     steps:
@@ -566,8 +561,8 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-smoke:
-    name: ${{ inputs.provider }} linux-smoke ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-smoke ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
     timeout-minutes: 30
     steps:
@@ -646,8 +641,8 @@ jobs:
         run: cargo xtask ci-prune-target
 
   linux-community-node:
-    name: ${{ inputs.provider }} linux-community-node ${{ inputs.phase }}
-    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    name: ${{ inputs.provider == 'boringcache' && 'GitHub' || 'Namespace' }} linux-community-node ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri'
     runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
     timeout-minutes: 45
     steps:
