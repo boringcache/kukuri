@@ -45,6 +45,10 @@ import {
 import { useRuntimeEventBridge } from '@/shell/data/useRuntimeEventBridge';
 import { isTauriRuntime } from '@/lib/releaseReadiness';
 
+function payloadByteLength(base64: string): number {
+  return Math.floor(base64.length * 3 / 4) - (base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0);
+}
+
 type Setter<K extends keyof DesktopShellState> = (
   value: DesktopShellStateValue<K>
 ) => void;
@@ -682,7 +686,7 @@ export function useDesktopShellDataEffects({
         : api.getBlobMediaPayload(attachment.hash, attachment.mime, attachment.source_object_id)
             .then((payload) => {
               if (!payload) return null;
-              const bytes = Math.floor(payload.bytes_base64.length * 3 / 4);
+              const bytes = payloadByteLength(payload.bytes_base64);
               if (bytes * 4 > reservedBytes) return null;
               return { kind: 'payload' as const, payload };
             });
@@ -698,7 +702,7 @@ export function useDesktopShellDataEffects({
               const url = createObjectUrlFromPayload(fetched.payload);
               return {
                 url,
-                memoryBytes: Math.floor(fetched.payload.bytes_base64.length * 3 / 4),
+                memoryBytes: payloadByteLength(fetched.payload.bytes_base64),
                 release: () => URL.revokeObjectURL(url),
               };
             })()

@@ -241,7 +241,8 @@ test('visible custom reactions auto-fetch media before save, and saved reactions
   await waitFor(() => {
     expect(getBlobMediaPayload).toHaveBeenCalledWith(
       remoteReactionAsset.blob_hash,
-      remoteReactionAsset.mime
+      remoteReactionAsset.mime,
+      undefined
     );
   });
 

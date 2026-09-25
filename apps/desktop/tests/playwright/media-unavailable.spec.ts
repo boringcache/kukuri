@@ -86,6 +86,11 @@ async function exhaustAutomaticMediaFetch(page: Page) {
   }
 }
 
+async function showMediaCard(page: Page) {
+  await page.locator('[data-post-object-id="browser-unavailable"]').scrollIntoViewIfNeeded();
+  await page.clock.runFor(100);
+}
+
 test('normal mode replaces unavailable media with the fetch failure and a retry control', async ({
   page,
 }) => {
@@ -95,6 +100,7 @@ test('normal mode replaces unavailable media with the fetch failure and a retry 
     rejectInitialFetch: false,
   });
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
+  await showMediaCard(page);
 
   await expect(page.locator('[data-post-object-id="browser-unavailable"]')).toBeVisible();
   await expect(page.getByText('browser-unavailable-envelope')).toHaveCount(0);
@@ -120,6 +126,7 @@ test('developer mode reports a rejected fetch and an existing refresh can recove
   });
   await page.clock.install();
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
+  await showMediaCard(page);
 
   await expect(page.getByTestId('post-body-fetch-failure-browser-unavailable')).toBeVisible();
   await exhaustAutomaticMediaFetch(page);
@@ -133,6 +140,7 @@ test('developer mode reports a rejected fetch and an existing refresh can recove
   await page.goto('/#/timeline?topic=kukuri%3Atopic%3Ageneral');
 
   await expect(page.getByText('Recovered body')).toBeVisible();
+  await showMediaCard(page);
   await expect(page.getByTestId('media-preview-browser-unavailable')).toBeVisible();
   await expect(page.getByText('Content unavailable.')).toHaveCount(0);
   await expect(page.getByText('Failed to load.')).toHaveCount(0);
