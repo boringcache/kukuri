@@ -102,25 +102,29 @@ impl SqliteStore {
             return Ok(rows);
         }
         let now = now_ms()?;
-        let mut expired = QueryBuilder::<Sqlite>::new(
-            "SELECT cache_key FROM remote_content_cache \
-             WHERE kind = 'projection' AND is_protected = 0 AND last_used_at <= ",
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT cache_key, last_used_at, is_protected FROM remote_content_cache \
+             WHERE kind = 'projection' AND cache_key IN (",
         );
-        expired.push_bind(now - REMOTE_CACHE_UNUSED_MS);
-        expired.push(" AND cache_key IN (");
-        let mut ids = expired.separated(", ");
+        let mut ids = query.separated(", ");
         for row in &rows {
             ids.push_bind(row.object_id.as_str());
         }
         ids.push_unseparated(")");
-        let expired = expired
-            .build_query_scalar::<String>()
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .collect::<HashSet<_>>();
+        let mut expired = HashSet::new();
+        let mut touch_due = false;
+        for row in query.build().fetch_all(&self.pool).await? {
+            let last_used_at: i64 = row.get("last_used_at");
+            if row.get::<i64, _>("is_protected") == 0
+                && last_used_at <= now - REMOTE_CACHE_UNUSED_MS
+            {
+                expired.insert(row.get::<String, _>("cache_key"));
+            } else if last_used_at <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
+                touch_due = true;
+            }
+        }
         rows.retain(|row| !expired.contains(row.object_id.as_str()));
-        if rows.is_empty() {
+        if rows.is_empty() || !touch_due {
             return Ok(rows);
         }
         let mut query =
@@ -528,7 +532,7 @@ impl SqliteStore {
     pub async fn get_remote_content(&self, kind: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let now = now_ms()?;
         let row = sqlx::query(
-            "SELECT payload FROM remote_content_cache \
+            "SELECT payload, last_used_at FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2 \
              AND (is_protected = 1 OR last_used_at > ?3)",
         )
@@ -538,6 +542,13 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else { return Ok(None) };
+        if row.get::<i64, _>("last_used_at") <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
+            self.touch_remote_content(kind, key, now).await?;
+        }
+        Ok(Some(row.get("payload")))
+    }
+
+    async fn touch_remote_content(&self, kind: &str, key: &str, now: i64) -> Result<()> {
         sqlx::query(
             "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3 \
              AND last_used_at <= ?4",
@@ -548,7 +559,7 @@ impl SqliteStore {
         .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
         .execute(&self.pool)
         .await?;
-        Ok(Some(row.get("payload")))
+        Ok(())
     }
 
     pub async fn get_remote_records(
@@ -593,15 +604,10 @@ impl SqliteStore {
             {
                 continue;
             }
-            sqlx::query(
-                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = 'record' AND cache_key = ?2 \
-                 AND last_used_at <= ?3",
-            )
-            .bind(now)
-            .bind(row.get::<String, _>("cache_key"))
-            .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
-            .execute(&self.pool)
-            .await?;
+            if row.get::<i64, _>("last_used_at") <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
+                self.touch_remote_content("record", &row.get::<String, _>("cache_key"), now)
+                    .await?;
+            }
             result.push(row.get("payload"));
         }
         Ok(result)
@@ -626,7 +632,7 @@ impl SqliteStore {
     pub async fn remote_content_len(&self, kind: &str, key: &str) -> Result<Option<u64>> {
         let now = now_ms()?;
         let row = sqlx::query(
-            "SELECT length(payload) AS bytes FROM remote_content_cache \
+            "SELECT length(payload) AS bytes, last_used_at FROM remote_content_cache \
              WHERE kind = ?1 AND cache_key = ?2 \
              AND (is_protected = 1 OR last_used_at > ?3)",
         )
@@ -636,16 +642,9 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         if let Some(row) = row {
-            sqlx::query(
-                "UPDATE remote_content_cache SET last_used_at = ?1 WHERE kind = ?2 AND cache_key = ?3 \
-                 AND last_used_at <= ?4",
-            )
-            .bind(now)
-            .bind(kind)
-            .bind(key)
-            .bind(now - REMOTE_CACHE_TOUCH_INTERVAL_MS)
-            .execute(&self.pool)
-            .await?;
+            if row.get::<i64, _>("last_used_at") <= now - REMOTE_CACHE_TOUCH_INTERVAL_MS {
+                self.touch_remote_content(kind, key, now).await?;
+            }
             Ok(Some(u64::try_from(row.get::<i64, _>("bytes"))?))
         } else {
             Ok(None)

@@ -32,6 +32,61 @@ fn remote_post(object_id: &str) -> ObjectProjectionRow {
 }
 
 #[tokio::test]
+async fn fresh_cache_reads_do_not_take_the_sqlite_writer_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::connect_file(dir.path().join("remote-cache.db"))
+        .await
+        .unwrap();
+    let post = remote_post("read-with-writer");
+    store
+        .put_remote_object_projection(post.clone())
+        .await
+        .unwrap();
+    store
+        .put_remote_content("blob", "blob-hash", "scope", b"body")
+        .await
+        .unwrap();
+    store
+        .put_remote_record("replica", "key", "author", b"record")
+        .await
+        .unwrap();
+
+    let mut writer = store.pool().begin().await.unwrap();
+    sqlx::query("UPDATE remote_content_cache_usage SET used_bytes = used_bytes WHERE id = 1")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        assert_eq!(
+            store
+                .available_remote_projections(vec![post])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.get_remote_content("blob", "blob-hash").await.unwrap(),
+            Some(b"body".to_vec())
+        );
+        assert_eq!(
+            store.remote_content_len("blob", "blob-hash").await.unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            store
+                .get_remote_records("replica", "key", Some("author"), 1)
+                .await
+                .unwrap(),
+            vec![b"record".to_vec()]
+        );
+    })
+    .await
+    .expect("fresh cache reads must not wait for a writer");
+    writer.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn adult_hash_marker_follows_cached_projection_refs() {
     let store = SqliteStore::connect_memory().await.unwrap();
     let mut evictions = store.subscribe_adult_label_evictions();
