@@ -1,59 +1,70 @@
-name: Kukuri Fast
+name: Kukuri Linux cache comparison
+run-name: Linux ${{ inputs.provider }} ${{ inputs.jobs }} ${{ inputs.phase }}
 
 on:
-  pull_request:
-    paths:
-      - '.config/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.cargo/**'
-      - 'xtask/**'
-      - 'crates/**'
-      - 'apps/**'
-      - 'harness/**'
-      - 'tools/check_iroh_resource_contract.py'
-      - '.github/workflows/kukuri-fast.yml'
-      - '.github/workflows/kukuri-nightly.yml'
-      - '.github/workflows/kukuri-release.yml'
-  push:
-    branches: [main, develop]
-    paths:
-      - '.config/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.cargo/**'
-      - 'xtask/**'
-      - 'crates/**'
-      - 'apps/**'
-      - 'harness/**'
-      - 'tools/check_iroh_resource_contract.py'
-      - '.github/workflows/kukuri-fast.yml'
-      - '.github/workflows/kukuri-nightly.yml'
-      - '.github/workflows/kukuri-release.yml'
   workflow_dispatch:
+    inputs:
+      provider:
+        description: Rust cache provider
+        type: choice
+        options: [boringcache, namespace]
+        default: boringcache
+      jobs:
+        description: Small selects the three upstream 4-vCPU jobs
+        type: choice
+        options: [small, large, all]
+        default: small
+      phase:
+        description: Cold seeds, warm restores, commit updates the cache
+        type: choice
+        options: [cold, warm, commit]
+        default: cold
+      cli_version:
+        description: Optional exact BoringCache CLI release or prerelease tag
+        type: string
+        required: false
+        default: ''
 
-# #1117: 同じ PR に続けて push したときは古い head の run を取り消し、Namespace の
-# 同時実行枠を空ける。push / workflow_dispatch は run ごとに別 group にして取り消さない。
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: kukuri-linux-cache-${{ inputs.provider }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  # #1120: CI の dev / test build は行番号だけの debuginfo にし、link 時間と Cache Volume の容量を減らす。
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-# #1120: cache-tag の `-v2` は、debuginfo を line-tables-only にする前の依存 crate の成果物を含む
-# 旧 volume を捨てるために付けた。依存の build 設定を大きく変えたときは同じ方法で入れ替える。
 jobs:
   linux-rust-static:
-    runs-on: namespace-profile-kukuri;overrides.cache-tag=kukuri-rust-static-v2
+    name: ${{ inputs.provider }} linux-rust-static ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-static"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -79,10 +90,24 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-rust-static
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Doctor
         run: cargo xtask-lite doctor
@@ -107,11 +132,32 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-rust-tests:
-    runs-on: namespace-profile-kukuri;overrides.cache-tag=kukuri-rust-tests-v2
+    name: ${{ inputs.provider }} linux-rust-tests ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-rust-tests"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -131,10 +177,24 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-rust-tests
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -155,11 +215,32 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-desktop-ui:
-    runs-on: namespace-profile-kukuri-4v;overrides.cache-tag=kukuri-desktop
+    name: ${{ inputs.provider }} linux-desktop-ui ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -192,10 +273,24 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-desktop-ui
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -215,11 +310,32 @@ jobs:
     # #1121: Playwright は CPU を使い切るため、4 vCPU では worker を増やしても速くならず
     # metaverse の 3D test が timeout で落ちた。8 vCPU に戻すと既定で 4 worker になり、
     # 1 run あたりの vCPU × 分はほぼ同じまま所要時間が半分になる。cache-tag は据え置き。
-    runs-on: namespace-profile-kukuri;overrides.cache-tag=kukuri-desktop
+    name: ${{ inputs.provider }} linux-desktop-browser ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-desktop"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -253,10 +369,24 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-desktop-browser
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -288,11 +418,32 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-cn:
-    runs-on: namespace-profile-kukuri;overrides.cache-tag=kukuri-cn-v2
+    name: ${{ inputs.provider }} linux-cn ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -313,10 +464,24 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-cn
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Community-node checks
         run: cargo xtask-lite cn-check
@@ -329,11 +494,32 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-cn-e2e:
-    runs-on: namespace-profile-kukuri;overrides.cache-tag=kukuri-cn-e2e-v2
+    name: ${{ inputs.provider }} linux-cn-e2e ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'large')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["nscloud-ubuntu-24.04-amd64-8x16"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-8x16-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-cn-e2e"]') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -353,10 +539,24 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-cn-e2e
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Community-node full-stack E2E
         run: cargo xtask-lite cn-e2e
@@ -366,11 +566,32 @@ jobs:
         run: cargo xtask-lite ci-prune-target
 
   linux-smoke:
-    runs-on: namespace-profile-kukuri-4v;overrides.cache-tag=kukuri-harness-v2
+    name: ${{ inputs.provider }} linux-smoke ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -390,10 +611,24 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-smoke
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: E2E smoke
         run: cargo xtask e2e-smoke
@@ -411,11 +646,32 @@ jobs:
         run: cargo xtask ci-prune-target
 
   linux-community-node:
-    runs-on: namespace-profile-kukuri-4v;overrides.cache-tag=kukuri-harness-v2
+    name: ${{ inputs.provider }} linux-community-node ${{ inputs.phase }}
+    if: github.repository == 'boringcache/kukuri' && (inputs.jobs == 'all' || inputs.jobs == 'small')
+    runs-on: ${{ inputs.provider == 'boringcache' && fromJSON('["ubuntu-24.04"]') || fromJSON('["nscloud-ubuntu-24.04-amd64-4x8-with-cache","nscloud-cache-size-20gb","nscloud-cache-tag-kukuri-linux-20260925-harness"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record runner and volume configuration
+        env:
+          CACHE_PROVIDER: ${{ inputs.provider }}
+        run: |
+          uname -a
+          lscpu | sed -n '1,25p'
+          free -h
+          df -h .
+          if [ -n "${NSC_CACHE_PATH:-}" ]; then
+            df -h "$NSC_CACHE_PATH"
+            findmnt -T "$NSC_CACHE_PATH"
+          fi
+          if [ "$CACHE_PROVIDER" = boringcache ] && [ -n "${NSC_CACHE_PATH:-}" ]; then
+            echo 'BoringCache comparison requires a runner without Namespace cache volumes.' >&2
+            exit 1
+          fi
 
       - name: Install Rust 1.92
         uses: dtolnay/rust-toolchain@stable
@@ -435,10 +691,24 @@ jobs:
           librsvg2-dev
           patchelf
 
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Cache Rust with Namespace
+        if: inputs.provider == 'namespace'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           cache: rust
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+
+      - name: Cache Rust directories with BoringCache
+        if: inputs.provider == 'boringcache'
+        uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          trust-policy: ${{ inputs.phase == 'warm' && 'restore' || 'publish' }}
+          mode: archive
+          cache-profiles: linux-community-node
+          diagnostics: summary
+          fail-on-cache-miss: ${{ inputs.phase != 'cold' }}
+          fail-on-cache-error: true
 
       - name: Community-node connectivity scenario
         env:
@@ -460,85 +730,6 @@ jobs:
         with:
           name: kukuri-fast-community-node-artifacts
           path: test-results/kukuri/
-          if-no-files-found: warn
-
-      # #1120: workspace crate の成果物は checkout ごとに再 compile されるため、Cache Volume に残さない。
-      - name: Prune workspace build artifacts
-        run: cargo xtask ci-prune-target
-
-  windows-fast:
-    runs-on: namespace-profile-kukuri-win;overrides.cache-tag=kukuri-windows-v2
-    timeout-minutes: 75
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust 1.92
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.92.0
-          components: clippy,rustfmt
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.16.1
-          run_install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
-
-      # #1073: Windows profile も Cache Volume を使う（Windows では junction で mount される）。
-      # `cache: rust` は Cargo registry / git と root の target を扱う。配布物を build する
-      # src-tauri 側の target は別 directory なので path で明示する。
-      - name: Cache Rust
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
-          path: |
-            ${{ github.workspace }}/apps/desktop/src-tauri/target
-
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: pnpm install --frozen-lockfile
-
-      - name: Doctor
-        run: cargo xtask doctor
-
-      - name: Oversized file report
-        run: cargo xtask oversized-files
-
-      - name: Windows Tauri compile check
-        timeout-minutes: 20
-        run: cargo xtask tauri-check
-
-      - name: E2E smoke
-        timeout-minutes: 15
-        run: cargo xtask e2e-smoke
-
-      - name: Windows package
-        # #1063: cache なしの実測 23〜25 分に対し、70% が 31.5 分となる値。
-        timeout-minutes: 45
-        run: cargo xtask desktop-package
-
-      - name: Upload kukuri artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kukuri-windows-fast-artifacts
-          path: test-results/kukuri/
-          if-no-files-found: warn
-
-      - name: Upload NSIS installer
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kukuri-windows-nsis
-          path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
           if-no-files-found: warn
 
       # #1120: workspace crate の成果物は checkout ごとに再 compile されるため、Cache Volume に残さない。

@@ -1,0 +1,57 @@
+workspace = "boringcache/kukuri"
+
+[entries.cargo-registry]
+path = "~/.cargo/registry"
+tag = "kukuri-linux-20260925-cargo-registry"
+
+[entries.cargo-git]
+path = "~/.cargo/git"
+tag = "kukuri-linux-20260925-cargo-git"
+
+[entries.target-rust-static]
+path = "target"
+tag = "kukuri-linux-20260925-rust-static"
+
+[entries.target-rust-tests]
+path = "target"
+tag = "kukuri-linux-20260925-rust-tests"
+
+[entries.target-desktop]
+path = "target"
+tag = "kukuri-linux-20260925-desktop"
+
+[entries.target-cn]
+path = "target"
+tag = "kukuri-linux-20260925-cn"
+
+[entries.target-cn-e2e]
+path = "target"
+tag = "kukuri-linux-20260925-cn-e2e"
+
+[entries.target-harness]
+path = "target"
+tag = "kukuri-linux-20260925-harness"
+
+[profiles.linux-rust-static]
+entries = ["cargo-registry", "cargo-git", "target-rust-static"]
+
+[profiles.linux-rust-tests]
+entries = ["cargo-registry", "cargo-git", "target-rust-tests"]
+
+[profiles.linux-desktop-ui]
+entries = ["cargo-registry", "cargo-git", "target-desktop"]
+
+[profiles.linux-desktop-browser]
+entries = ["cargo-registry", "cargo-git", "target-desktop"]
+
+[profiles.linux-cn]
+entries = ["cargo-registry", "cargo-git", "target-cn"]
+
+[profiles.linux-cn-e2e]
+entries = ["cargo-registry", "cargo-git", "target-cn-e2e"]
+
+[profiles.linux-smoke]
+entries = ["cargo-registry", "cargo-git", "target-harness"]
+
+[profiles.linux-community-node]
+entries = ["cargo-registry", "cargo-git", "target-harness"]
