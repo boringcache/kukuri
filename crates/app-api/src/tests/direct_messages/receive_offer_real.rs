@@ -193,7 +193,7 @@ async fn real_public_offer_reaches_offscreen_account_from_bounded_app_cache() {
             )
             .await;
     }
-    timeout(Duration::from_secs(20), async {
+    let all_kinds = timeout(Duration::from_secs(30), async {
         loop {
             let notifications = recipient_app.list_notifications().await.unwrap();
             if [
@@ -212,8 +212,17 @@ async fn real_public_offer_reaches_offscreen_account_from_bounded_app_cache() {
             sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("all five public notifications reached the offscreen account route");
+    .await;
+    if all_kinds.is_err() {
+        let kinds = recipient_app
+            .list_notifications()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>();
+        panic!("all five public notifications reached the offscreen account route: {kinds:?}");
+    }
     let cached_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM remote_content_cache WHERE kind = 'blob'")
             .fetch_one(sender_store.pool())

@@ -717,11 +717,8 @@ async fn shutdown_cancels_an_account_offer_subscription_still_registering() {
     let store = Arc::new(MemoryStore::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let transport = Arc::new(ProbeOfferTransport {
-        unsubscribes: AtomicUsize::new(0),
         subscribe_barrier: Some(barrier.clone()),
-        unsubscribe_barrier: None,
-        stream_drops: Arc::new(AtomicUsize::new(0)),
-        stop_senders: std::sync::Mutex::new(Vec::new()),
+        ..Default::default()
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),
@@ -757,11 +754,8 @@ async fn cancelled_shutdown_retries_the_account_route_lease_cleanup() {
     let store = Arc::new(MemoryStore::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let transport = Arc::new(ProbeOfferTransport {
-        unsubscribes: AtomicUsize::new(0),
-        subscribe_barrier: None,
         unsubscribe_barrier: Some(barrier.clone()),
-        stream_drops: Arc::new(AtomicUsize::new(0)),
-        stop_senders: std::sync::Mutex::new(Vec::new()),
+        ..Default::default()
     });
     let app = Arc::new(AppService::from_handles(ServiceHandles::new(
         store.clone(),

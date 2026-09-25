@@ -1,6 +1,6 @@
 use super::super::*;
 use super::receive_offer::{offer_app, offer_for};
-use super::receive_offer_doubles::OfferBlobService;
+use super::receive_offer_doubles::{OfferBlobService, ProbeOfferTransport};
 use crate::service::public_notification_offer_support::encode_public_notification_manifest;
 use kukuri_core::ReceiveOfferScopeV1;
 use kukuri_transport::ReceiveOfferEnvelope;
@@ -125,4 +125,134 @@ async fn public_account_offer_rejects_unsigned_content_before_notification_stora
         .is_err()
     );
     assert!(app.list_notifications().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn public_account_offer_rejects_a_signed_private_post() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    let memory_blob = Arc::new(MemoryBlobService::default());
+    let blob = Arc::new(OfferBlobService::new(memory_blob.clone()));
+    let transport = Arc::new(FakeTransport::new("recipient", FakeNetwork::default()));
+    let app = offer_app(recipient.clone(), store, transport, blob);
+    let topic = TopicId::new("private-source-notification");
+    let channel = ChannelId::new("private-channel");
+    let content = format!("private hello @{}", recipient.public_key_hex());
+    let envelope = build_post_envelope_with_docs_author(
+        &sender,
+        &topic,
+        PayloadRef::InlineText {
+            text: content.clone(),
+        },
+        Vec::new(),
+        Vec::new(),
+        None,
+        ObjectVisibility::Private,
+        Some(&channel),
+        Vec::new(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        deliver_public_source(
+            &app,
+            &sender,
+            &recipient,
+            memory_blob.as_ref(),
+            PublicNotificationSource::Post {
+                replica: private_channel_replica_id(channel.as_str()),
+                envelope,
+                content,
+                reply_target: None,
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(app.list_notifications().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_fifth_public_offer_waits_for_the_account_worker_instead_of_disappearing() {
+    let sender = generate_keys();
+    let recipient = generate_keys();
+    let store = Arc::new(MemoryStore::default());
+    let transport = Arc::new(FakeTransport::new("sender", FakeNetwork::default()));
+    let gate = Arc::new((
+        std::sync::atomic::AtomicBool::new(false),
+        tokio::sync::Notify::new(),
+    ));
+    let offers = Arc::new(ProbeOfferTransport {
+        resolve_gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let app = AppService::from_handles(ServiceHandles::new(
+        store.clone(),
+        store,
+        transport,
+        offers.clone(),
+        Arc::new(MemoryDocsSync::default()),
+        Arc::new(MemoryBlobService::default()),
+        sender.clone(),
+    ));
+    for _ in 0..5 {
+        let envelope = build_follow_edge_envelope_with_docs_author(
+            &sender,
+            &recipient.public_key(),
+            FollowEdgeStatus::Active,
+            None,
+        )
+        .unwrap();
+        app.queue_public_notification_offer(
+            PublicNotificationSource::Follow { envelope },
+            BTreeSet::from([recipient.public_key_hex()]),
+        )
+        .await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while offers.resolve_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    gate.0.store(true, Ordering::SeqCst);
+    gate.1.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while offers.resolve_attempts.load(Ordering::SeqCst) < 5 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all five explicit recipients must reach destination lookup");
+    gate.0.store(false, Ordering::SeqCst);
+    let envelope = build_follow_edge_envelope_with_docs_author(
+        &sender,
+        &recipient.public_key(),
+        FollowEdgeStatus::Active,
+        None,
+    )
+    .unwrap();
+    app.queue_public_notification_offer(
+        PublicNotificationSource::Follow { envelope },
+        BTreeSet::from([recipient.public_key_hex()]),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while offers.resolve_attempts.load(Ordering::SeqCst) < 6 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    app.shutdown().await;
+    assert!(
+        app.subscription_registry
+            .public_notification_offer_queue
+            .lock()
+            .await
+            .is_none(),
+        "account shutdown must remove the public offer worker"
+    );
 }

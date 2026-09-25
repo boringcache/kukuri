@@ -326,6 +326,7 @@ gossip topic IDはrouteのUTF-8 bytesのBLAKE3で、既存topic通知の`hint/`�
 公開通知のmanifestはversion=1と署名済みpost/repostまたはfollow envelopeを持つ。
 post/repostには書込みreplica・本文（署名済みpayload refとのhash/長さ照合）を添え、返信時は署名済み親投稿で返信先の著者を検証する。
 送信先は投稿内の明示mention、返信先著者、repost元著者、follow対象に限り、全follower探索をしない。
+送信はaccount所有の1 worker・最大64件の待機窓で進め、表示・投稿操作を宛先数や接続待ちで止めない。
 manifestは1GiB/非利用7日のapp所有cacheから再提供し、受信側は署名・public scope・対象を確認して既存の通知IDと保存sinkへ合流する。
 
 private manifestはさらに `PrivateReceivePayloadV1` としてepoch内で暗号化する。

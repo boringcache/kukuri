@@ -51,16 +51,16 @@ impl AppService {
             task.abort();
             let _ = tokio::time::timeout(Duration::from_secs(2), task.wait()).await;
         }
-        let public_tasks = std::mem::take(
+        let public_queue = std::mem::take(
             &mut *self
                 .subscription_registry
-                .public_notification_offer_tasks
+                .public_notification_offer_queue
                 .lock()
                 .await,
         );
-        for task in public_tasks {
-            task.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(2), task.wait()).await;
+        if let Some(queue) = public_queue {
+            queue.task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(2), queue.task.wait()).await;
         }
         if let Err(error) = self
             .unsubscribe_account_receive_offer_lease(&self.services.keys.public_key())

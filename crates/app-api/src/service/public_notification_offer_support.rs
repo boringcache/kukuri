@@ -13,9 +13,10 @@ use super::notifications_support::{
     pubkey_mentions,
 };
 use super::post_integrity::VerifiedPost;
+use super::subscription_registry::PublicNotificationOfferQueue;
 use super::*;
 
-const PUBLIC_OFFER_TASKS: usize = 4;
+const PUBLIC_OFFER_QUEUE_CAPACITY: usize = 64;
 const PUBLIC_OFFER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,24 +114,38 @@ impl AppService {
             Ok(payload) => payload,
             _ => return,
         };
-        let mut tasks = self
+        let mut queue = self
             .subscription_registry
-            .public_notification_offer_tasks
+            .public_notification_offer_queue
             .lock()
             .await;
-        tasks.retain(|task| !task.is_finished());
-        if tasks.len() >= PUBLIC_OFFER_TASKS {
-            return;
+        if queue
+            .as_ref()
+            .is_none_or(|worker| worker.task.is_finished())
+        {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(PUBLIC_OFFER_QUEUE_CAPACITY);
+            let services = self.services.clone();
+            let closed = Arc::clone(&self.subscription_registry.account_receive_offer_closed);
+            let task = AbortOnDropTask::new(tokio::spawn(async move {
+                while let Some((payload, recipients)) = receiver.recv().await {
+                    if closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(error) =
+                        publish_public_notification_offers(&services, &closed, payload, recipients)
+                            .await
+                    {
+                        tracing::debug!(%error, "public notification offers deferred");
+                    }
+                }
+            }));
+            *queue = Some(PublicNotificationOfferQueue { sender, task });
         }
-        let services = self.services.clone();
-        let closed = Arc::clone(&self.subscription_registry.account_receive_offer_closed);
-        tasks.push(AbortOnDropTask::new(tokio::spawn(async move {
-            if let Err(error) =
-                publish_public_notification_offers(&services, &closed, payload, recipients).await
-            {
-                tracing::debug!(%error, "public notification offers deferred");
-            }
-        })));
+        if let Some(worker) = queue.as_ref()
+            && let Err(error) = worker.sender.try_send((payload, recipients))
+        {
+            tracing::debug!(%error, "public notification offer queue is full");
+        }
     }
 
     pub(crate) async fn ingest_public_notification_offer(
@@ -163,6 +178,10 @@ impl AppService {
                     anyhow::anyhow!("invalid public notification post: {reason:?}")
                 })?;
                 let header = post.header();
+                anyhow::ensure!(
+                    header.visibility == ObjectVisibility::Public && header.channel_id.is_none(),
+                    "private post cannot enter public notification route"
+                );
                 let content_matches = match &header.payload_ref {
                     PayloadRef::BlobText { hash, bytes, .. } => {
                         content.len() as u64 == *bytes
