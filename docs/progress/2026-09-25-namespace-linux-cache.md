@@ -1,7 +1,8 @@
 # Linux cache comparison
 
-Status: Completed the full mixed Linux cold/warm pair on the existing trial.
-Source: kukuri-app/kukuri `6f506d4ead06652dbbe7411635bcf2c9ab8efa16`.
+Status: Completed the full mixed Linux cold/warm pair and next-commit build on the existing trial.
+Cold/warm source: kukuri-app/kukuri `6f506d4ead06652dbbe7411635bcf2c9ab8efa16`.
+Current rolling source: `3fa85b5344d540219b937555bd8a673fc5919d92`.
 Branch: `linux-cache-trial` in `boringcache/kukuri`.
 
 The first experiment compares BoringCache directory caches with Namespace Rust
@@ -23,8 +24,8 @@ Acceptance criteria:
   build/test, save, job duration, queue time, and available storage evidence.
   Failed or missing-cache samples are not performance wins. The initial base `ff491fa1` failed browser and backup tests under both
   cache providers. The trial now uses the next real upstream commit `6f506d4e`,
-  which includes media-observer and database-close fixes. `3fa85b53` remains
-  available for a subsequent real commit build.
+  which includes media-observer and database-close fixes. The subsequent real
+  commit build at `3fa85b53` is recorded below.
 - INVAR-1: Keep all eight upstream Linux job workloads and omit Windows.
 - INVAR-2: Do not change signed-release workflows, upstream code, account plans,
   or existing Namespace profiles.
@@ -76,6 +77,30 @@ so no complete warm claim is possible at that base. After advancing to
 `6f506d4e`, both providers use new cache tags for a fresh cold/warm pair.
 
 ## Completed runs
+
+The [rolling commit build](https://github.com/boringcache/kukuri/actions/runs/36160851759)
+at experiment merge `0729b77fc38f1342197530e17e8204b9d2541dd8` advanced exactly one
+upstream first-parent commit to `3fa85b53`. It reused the existing cache tags,
+enabled publication, and passed all eight jobs. Each job reported a cache hit,
+restored three entries, and saved three entries. No new Namespace-volume run
+was launched.
+
+Against the [upstream run at that source](https://github.com/kukuri-app/kukuri/actions/runs/36148214345),
+our Linux completion was 9m20s versus 7m30s. Upstream's Windows-inclusive total
+was 7m55s. Our desktop UI job determined completion at 9m15s; its Vitest step
+took 7m15s versus 5m53s upstream, while Rust cache setup took 5s versus 2s.
+Both passed the same 254 files and 2,056 tests. This supports runner performance
+as the main explanation for that job's slowdown, without isolating CPU speed,
+contention, or other environment effects.
+
+Estimated Namespace unit-minutes were 180.40 versus 221.20 upstream (18.4%
+lower). The five jobs staying on Namespace took 22m33s combined versus 21m42s
+(3.9% longer), including our cache saves. The lower usage comes from moving
+three jobs to GitHub. At $0.0015 per overage unit-minute, the marginal compute
+difference is about $0.0612 per equivalent run; actual invoice savings depend
+on allowances, billing overhead, storage, BoringCache charges, and Windows.
+
+The following cold/warm results predate that rolling build.
 
 Both mixed runs used experiment commit `33d9434d5e26bb3d23cc93bde5134364a40ada0b`
 and upstream source `6f506d4e`. Each run contains all eight Linux jobs: three on
