@@ -1,6 +1,6 @@
 # Linux cache comparison
 
-Status: Namespace is connected to this repository. Preparing the full Linux cold run.
+Status: Namespace is connected to this repository. Running the full Linux comparison.
 Source: kukuri-app/kukuri `ff491fa12f84e021ead2ac2ad13a60718eac7361`.
 Branch: `linux-cache-trial` in `boringcache/kukuri`.
 
@@ -61,3 +61,10 @@ selected. The earlier three-job GitHub run is a pilot, excluded from the final
 comparison. The full BoringCache profile uses new tags so that pilot cannot
 prewarm its cold run. Run labels identify the cache provider and phase; job
 labels identify the actual runner provider.
+
+Cargo registry, Git dependency, and target tags follow the same six workload
+groups as Namespace volumes. Desktop UI/browser share one group; smoke and
+community-node share one group. Other workloads have separate tags, so an
+unrelated job cannot replace their dependency directories during a parallel save.
+The initial full run was cancelled after this configuration issue was found;
+the replacement cold run uses fresh tags.
